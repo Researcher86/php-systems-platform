@@ -293,6 +293,13 @@ Inspect queue state (published / depth / completed / failed / retried), the
 same counters `GET /queue/status` answers over HTTP.
 
 ```bash
+php bin/platform.php workers:status
+```
+
+Show the queue consumer's worker lifecycle (id / pid / state / current job /
+completed / failed / started_at), also exposed as `GET /workers`.
+
+```bash
 php bin/platform.php status
 ```
 

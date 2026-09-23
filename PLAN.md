@@ -2361,7 +2361,7 @@ Phase 5 is complete when all of the following are true.
 ## Worker pool
 
 * [x] Multiple workers can execute jobs.
-* [ ] Worker lifecycle is observable.
+* [x] Worker lifecycle is observable.
 * [ ] Worker failure is detected.
 * [ ] Worker replacement works.
 * [x] Graceful shutdown works.

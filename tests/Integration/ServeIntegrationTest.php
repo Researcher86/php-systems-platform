@@ -23,6 +23,7 @@ use PhpSystemsPlatform\Queue\QueueJournal;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
 use PhpSystemsPlatform\Workers\WorkerManager;
+use PhpSystemsPlatform\Workers\WorkerRegistry;
 use PHPUnit\Framework\TestCase;
 use PhpWorkerPool\Sdk\WorkerPoolClient;
 use RecursiveDirectoryIterator;
@@ -416,6 +417,131 @@ final class ServeIntegrationTest extends TestCase
         $this->expectExceptionMessage('Worker rejected job');
 
         $this->workerManager()->execute($job);
+    }
+
+    public function testWorkerRegistryAttributesCompletedJobsToForwarders(): void
+    {
+        $order = $this->postOrder('Edsger Dijkstra', 6.75);
+        $clock = new SystemClock();
+        $logPath = self::DATA_DIR . '/queue/queue.log';
+
+        // One READY job, straight into the real journal.
+        new Producer(
+            new InMemoryQueue($clock, new FileStorage($logPath)),
+            new JobFactory($clock, new MetricsCollector()),
+        )->dispatch(OrderCreatedJob::TYPE, ['order_id' => $order['id']], maxAttempts: 3);
+
+        $queue = InMemoryQueue::restoreFromStorage(new FileStorage($logPath), $clock);
+        $journal = new QueueJournal($logPath);
+
+        $workerManager = null;
+        $pool = new WorkerPool(
+            size: 2,
+            handler: function (\PhpJobQueue\Job\Job $job) use (&$workerManager): mixed {
+                $workerManager ??= $this->workerManager();
+
+                $workerManager->execute($job);
+
+                return null;
+            },
+        );
+        $registry = new WorkerRegistry($pool, $journal);
+        $dispatcher = new JobDispatcher(
+            queue: $queue,
+            workerPool: $pool,
+            retryPolicy: new FixedDelayRetry(0),
+            clock: $clock,
+            visibilityTimeout: 2,
+            storage: new FileStorage($logPath),
+        );
+        $dispatcher->start();
+
+        // One consumer tick, mirroring QueueConsumer::tick(): capture between
+        // dispatch and collect, settle after the answer lands. collect() here
+        // waits for the pool round-trip (a single blocking pass).
+        $dispatcher->dispatchPending();
+        $registry->capture();
+        $dispatcher->collect(5.0);
+        $registry->settle();
+
+        $pool->shutdown();
+
+        // The forwarder that held the job was credited with it.
+        $completed = array_sum(array_map(
+            static fn (array $worker): int => $worker['tasks_completed'],
+            $registry->snapshot(),
+        ));
+        self::assertGreaterThanOrEqual(1, $completed);
+
+        foreach ($registry->snapshot() as $worker) {
+            self::assertSame(
+                ['id', 'pid', 'state', 'current_job', 'started_at', 'tasks_completed', 'tasks_failed'],
+                array_keys($worker),
+            );
+        }
+    }
+
+    public function testWorkersStatusExposesTheConsumerForwarders(): void
+    {
+        $logPath = self::DATA_DIR . '/queue/queue.log';
+        $statusPath = self::DATA_DIR . '/worker/workers.status.json';
+        $order = $this->postOrder('Alan Turing', 9.99);
+
+        $process = proc_open(
+            [PHP_BINARY, dirname(__DIR__, 2) . '/bin/platform.php', 'queue:consume'],
+            [
+                1 => ['file', self::LOG_DIR . '/consume.out', 'a'],
+                2 => ['file', self::LOG_DIR . '/consume.err', 'a'],
+            ],
+            $pipes,
+        );
+
+        self::assertIsResource($process);
+
+        try {
+            // A job the consumer's forwarders must complete.
+            $clock = new SystemClock();
+            $job = new Producer(
+                new InMemoryQueue($clock, new FileStorage($logPath)),
+                new JobFactory($clock, new MetricsCollector()),
+            )->dispatch(OrderCreatedJob::TYPE, ['order_id' => $order['id']], maxAttempts: 3);
+
+            // Wait until the snapshot shows a worker that completed it.
+            $deadline = microtime(true) + 15.0;
+            $workers = [];
+
+            do {
+                $decoded = is_file($statusPath) ? json_decode((string) file_get_contents($statusPath), true) : null;
+                $workers = is_array($decoded) ? $decoded : [];
+                $done = array_sum(array_map(
+                    static fn (array $worker): int => $worker['tasks_completed'],
+                    $workers,
+                ));
+                usleep(100_000);
+            } while (microtime(true) < $deadline && $done < 1);
+
+            self::assertGreaterThanOrEqual(1, $done, sprintf(
+                'Consumer output: %s',
+                (string) file_get_contents(self::LOG_DIR . '/consume.out'),
+            ));
+
+            foreach ($workers as $worker) {
+                self::assertSame(
+                    ['id', 'pid', 'state', 'current_job', 'started_at', 'tasks_completed', 'tasks_failed'],
+                    array_keys($worker),
+                );
+            }
+
+            // And GET /workers reads the same snapshot over HTTP.
+            [$status, $body] = $this->request('GET', '/workers');
+            self::assertSame(200, $status);
+            $payload = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+            self::assertTrue($payload['running']);
+            self::assertNotEmpty($payload['workers']);
+        } finally {
+            proc_terminate($process);
+            proc_close($process);
+        }
     }
 
     private function workerManager(): WorkerManager

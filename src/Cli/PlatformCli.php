@@ -33,6 +33,7 @@ use PhpSystemsPlatform\Application\Handlers\OrderReadHandler;
 use PhpSystemsPlatform\Application\Handlers\OrderUpdateHandler;
 use PhpSystemsPlatform\Application\Handlers\ParallelHandler;
 use PhpSystemsPlatform\Application\Handlers\QueueStatusHandler;
+use PhpSystemsPlatform\Application\Handlers\WorkersStatusHandler;
 use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Http\Router;
@@ -43,6 +44,7 @@ use PhpSystemsPlatform\Storage\Migrator;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
 use PhpSystemsPlatform\Workers\ConcurrentTaskRunner;
 use PhpSystemsPlatform\Workers\WorkerManager;
+use PhpSystemsPlatform\Workers\WorkerRegistry;
 use PhpWorkerPool\IPC\ConnectionClosedException;
 use PhpWorkerPool\Protocol\Request as WorkerRequest;
 use PhpWorkerPool\Sdk\ConnectionFailedException;
@@ -68,6 +70,7 @@ final class PlatformCli
         'queue:publish' => 'Publish sample jobs into the queue.',
         'queue:consume' => 'Run the queue consumer (pairs with worker pool).',
         'queue:status' => 'Show queue depth and job counters.',
+        'workers:status' => 'Show the queue consumer worker lifecycle.',
         'status' => 'Show the state of every platform component.',
         'demo' => 'Run the complete end-to-end platform story.',
         'benchmark' => 'Run the platform benchmark suite.',
@@ -138,6 +141,7 @@ final class PlatformCli
             'queue:publish' => $this->queuePublish(array_slice($argv, 2)),
             'queue:consume' => $this->queueConsume(),
             'queue:status' => $this->queueStatus(),
+            'workers:status' => $this->workersStatus(),
 
             // Real handlers land with their implementation phase.
             default => $this->notImplemented($command),
@@ -256,7 +260,7 @@ final class PlatformCli
         $metrics = new ServerMetrics();
         $loop = new SelectLoop();
 
-        $application = $this->application($database, $cache, $producer, $runner, $config['queue']['data_dir'] . '/queue.log');
+        $application = $this->application($database, $cache, $producer, $runner, $config['queue']['data_dir'] . '/queue.log', $config['workers']['data_dir'] . '/workers.status.json');
 
         $loop->onReadable($server->socket(), static function () use ($loop, $server, $parser, $encoder, $application, $metrics, $logger): void {
             $connection = $server->accept();
@@ -316,9 +320,11 @@ final class PlatformCli
      * parallel, exposed as GET /parallel (again null-tolerant - without a
      * pool the handler answers "not configured" instead of crashing serve).
      * The queue phase adds GET /queue/status, the journal-derived counters
-     * the queue:status CLI prints, on top of the queue's data dir.
+     * the queue:status CLI prints, on top of the queue's data dir; the
+     * worker-lifecycle phase adds GET /workers, the queue consumer's
+     * forwarder snapshot.
      */
-    private function application(Database $database, CacheService $cache, ?Producer $producer = null, ?ConcurrentTaskRunner $runner = null, string $queueLogPath = ''): Application
+    private function application(Database $database, CacheService $cache, ?Producer $producer = null, ?ConcurrentTaskRunner $runner = null, string $queueLogPath = '', string $workersStatusPath = ''): Application
     {
         $orders = new OrderService(new OrderRepository($database), $producer);
 
@@ -329,6 +335,7 @@ final class PlatformCli
         $router->put('/orders/{id}', (new OrderUpdateHandler($orders, $cache))(...));
         $router->get('/parallel', (new ParallelHandler($runner))(...));
         $router->get('/queue/status', (new QueueStatusHandler($queueLogPath))(...));
+        $router->get('/workers', (new WorkersStatusHandler($workersStatusPath))(...));
 
         return new Application($router);
     }
@@ -886,12 +893,14 @@ final class PlatformCli
             storage: new FileStorage($logPath),
             metrics: $metrics,
         );
+        $registry = $this->workerRegistry($pool, $logPath, $workersConfig);
         $consumer = new QueueConsumer(
             dispatcher: $dispatcher,
             queue: $queue,
             logPath: $logPath,
             clock: $clock,
             shutdownGrace: 10.0,
+            registry: $registry,
             knownIds: $knownIds,
         );
 
@@ -907,6 +916,10 @@ final class PlatformCli
 
         printf("Consumer stopped.\n");
 
+        // The final snapshot: the workers' last states after the shutdown
+        // drained them (DRAINING/STOPPING/DEAD) are what the file keeps.
+        $registry->write();
+
         $counters = $metrics->getCounters();
         printf(
             "  completed=%d failed=%d retried=%d\n",
@@ -919,6 +932,70 @@ final class PlatformCli
         $this->stopWorkerPoolIfOwned($ownsWorkerPool);
         $this->stopCacheServerIfOwned($ownsCacheServer);
         $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
+
+        return 0;
+    }
+
+    /**
+     * Build the worker-lifecycle observer for queue:consume's own forwarder
+     * pool: it tracks each worker's pid, state and current job, attributes
+     * completed/failed jobs from the journal, and writes a JSON snapshot the
+     * `workers:status` CLI and `GET /workers` endpoint read.
+     *
+     * @param array<string, mixed> $workersConfig
+     */
+    private function workerRegistry(WorkerPool $pool, string $logPath, array $workersConfig): WorkerRegistry
+    {
+        $dataDir = $workersConfig['data_dir'];
+
+        if (!is_dir($dataDir) && !@mkdir($dataDir, 0o777, true) && !is_dir($dataDir)) {
+            throw new RuntimeException(sprintf('Could not create worker data directory "%s".', $dataDir));
+        }
+
+        return new WorkerRegistry(
+            pool: $pool,
+            journal: new QueueJournal($logPath),
+            statusPath: $dataDir . '/workers.status.json',
+        );
+    }
+
+    /**
+     * Print the queue consumer's worker lifecycle from the snapshot it keeps
+     * writing - the same data `GET /workers` answers with over HTTP.
+     */
+    private function workersStatus(): int
+    {
+        $config = $this->config();
+        $path = $config['workers']['data_dir'] . '/workers.status.json';
+
+        if (!is_file($path)) {
+            printf("No worker status at %s - start the queue consumer (queue:consume) first.\n", $path);
+
+            return 0;
+        }
+
+        $decoded = json_decode((string) file_get_contents($path), true);
+
+        if (!is_array($decoded)) {
+            fwrite(STDERR, sprintf('Could not parse worker status "%s".', $path) . PHP_EOL);
+
+            return 1;
+        }
+
+        printf("Worker status (%s)\n", $path);
+
+        foreach ($decoded as $worker) {
+            printf(
+                "  id=%d pid=%d state=%s current_job=%s completed=%d failed=%d started_at=%.3f\n",
+                (int) $worker['id'],
+                (int) $worker['pid'],
+                (string) $worker['state'],
+                $worker['current_job'] === null ? '-' : (string) $worker['current_job'],
+                (int) $worker['tasks_completed'],
+                (int) $worker['tasks_failed'],
+                (float) $worker['started_at'],
+            );
+        }
 
         return 0;
     }

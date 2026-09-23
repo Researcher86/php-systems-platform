@@ -376,6 +376,17 @@ The wiring, platform-side:
   `RuntimeException` (a failed attempt for the queue); a dead pool propagates
   the connection error the same way. `queue:consume`'s php-job-queue workers
   are forwarders that run each job through it.
+- `Workers\WorkerRegistry` — the queue consumer's own worker lifecycle made
+  observable (PLAN Step 11). php-worker-pool keeps its workers' states
+  private inside the Master with no client channel, so the lifecycle the
+  platform can truthfully read is its own: each forwarder's `id`, `pid`,
+  `state` (STARTING/IDLE/BUSY/DRAINING/STOPPING/DEAD), current job and
+  `started_at` come straight off the php-job-queue Worker objects the
+  consumer owns. `tasks_completed`/`tasks_failed` are attributed from the
+  journal: `capture()` runs between dispatch and collect (the only instant a
+  worker is BUSY with a known job), `settle()` credits the terminal state
+  afterwards. The consumer writes a `workers.status.json` snapshot on a
+  schedule, read by `workers:status` and `GET /workers`.
 - `Workers\ConcurrentTaskRunner` — the fan-out over one `WorkerPoolClient`
   connection: `run()` is all-or-fail (`all`), `runWithin($seconds, ...)`
   shares one budget over the group and returns whatever answers arrived,
@@ -406,5 +417,7 @@ chunks overlapped instead of stacking into ~200ms.
 | `Application\Handlers\QueueStatusHandler` | `QueueJournal` over HTTP (`GET /queue/status`) |
 | `Workers\WorkerManager`        | `WorkerPoolClient` job execution (`job.execute`) |
 | `Workers\WorkerJobs`           | pool-side `job.execute` handler → `Queue\JobExecutor` |
+| `Workers\WorkerRegistry`       | forwarder lifecycle (pid/state/counters) from php-job-queue `Worker` + journal |
+| `Application\Handlers\WorkersStatusHandler` | `WorkerRegistry` snapshot over HTTP (`GET /workers`) |
 | `Workers\ConcurrentTaskRunner` | `WorkerPoolClient` fan-out (`send`/`allWithin`) |
 | `Workers\WorkerTasks`          | per-worker task handler (`ping`, `hash_chunk`) |

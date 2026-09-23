@@ -11,6 +11,7 @@ use PhpJobQueue\Persistence\FileStorage;
 use PhpJobQueue\Queue\InMemoryQueue;
 use PhpJobQueue\Support\Clock;
 use PhpJobQueue\Support\SystemClock;
+use PhpSystemsPlatform\Workers\WorkerRegistry;
 
 /**
  * The platform's long-running queue consumer loop.
@@ -57,6 +58,7 @@ final class QueueConsumer
         private float $maxWait = self::DEFAULT_MAX_WAIT,
         private float $resyncInterval = self::DEFAULT_RESYNC_INTERVAL,
         private float $shutdownGrace = self::DEFAULT_SHUTDOWN_GRACE,
+        private ?WorkerRegistry $registry = null,
         array $knownIds = [],
     ) {
         $this->known = $knownIds;
@@ -115,6 +117,11 @@ final class QueueConsumer
     {
         $dispatched = $this->dispatcher->dispatchPending();
 
+        // Between the dispatch and the collect the workers are BUSY with a
+        // known current job, so this is the only instant that captures every
+        // dispatched job - see WorkerRegistry::capture().
+        $this->registry?->capture();
+
         $wait = $this->waitTime();
 
         if ($this->dispatcher->hasWorkInFlight()) {
@@ -125,6 +132,9 @@ final class QueueConsumer
         }
 
         $this->dispatcher->requeueExpired();
+
+        $this->registry?->settle();
+        $this->registry?->maybeWrite();
 
         return $dispatched;
     }

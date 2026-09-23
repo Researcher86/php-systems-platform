@@ -345,12 +345,12 @@
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-mini-database.git",
-                "reference": "862c885f93f6d415bf1fd0286861060aa1228ef4"
+                "reference": "4dc9e17dd3319489203be049b8e8d53086862f9a"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-mini-database/zipball/862c885f93f6d415bf1fd0286861060aa1228ef4",
-                "reference": "862c885f93f6d415bf1fd0286861060aa1228ef4",
+                "url": "https://api.github.com/repos/Researcher86/php-mini-database/zipball/4dc9e17dd3319489203be049b8e8d53086862f9a",
+                "reference": "4dc9e17dd3319489203be049b8e8d53086862f9a",
                 "shasum": ""
             },
             "require": {
@@ -405,7 +405,7 @@
                 "source": "https://github.com/Researcher86/php-mini-database/tree/master",
                 "issues": "https://github.com/Researcher86/php-mini-database/issues"
             },
-            "time": "2026-09-23T06:15:43+00:00"
+            "time": "2026-09-23T13:26:34+00:00"
         },
         {
             "name": "tanat/php-mini-http-server",

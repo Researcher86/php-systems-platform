@@ -18,10 +18,9 @@ use RuntimeException;
  *
  * Two properties matter. Applying the schema twice must change nothing (a
  * second serve on the same data directory is the normal case), and a data
- * directory written before the product column must be refused with an
- * explanation rather than left to fail later on the first insert: the mini
- * database parses ALTER TABLE but does not execute it yet, so the column
- * cannot be added in place.
+ * directory written before the product column must be upgraded in place -
+ * the column added and the orders already in it backfilled - rather than
+ * left to fail later on the first insert.
  */
 final class MigratorUpgradeTest extends TestCase
 {
@@ -66,7 +65,7 @@ final class MigratorUpgradeTest extends TestCase
         self::assertSame('SKU-PRO', $orders->getOrder($order->id)?->product);
     }
 
-    public function testOrdersWrittenBeforeTheProductColumnAreRefusedWithAnExplanation(): void
+    public function testOrdersWrittenBeforeTheProductColumnAreUpgradedInPlace(): void
     {
         $this->legacyOrders();
         $this->database->write(
@@ -74,16 +73,25 @@ final class MigratorUpgradeTest extends TestCase
             ['legacy-1', 'Ada Lovelace', '1.00', 'created', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z'],
         );
 
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('product');
-
         Migrator::migrate($this->database);
+
+        // The order that predates the column keeps everything it had and is
+        // backfilled with the default sku - not dropped, not refused.
+        $orders = new OrderService(new OrderRepository($this->database));
+        $legacy = $orders->getOrder('legacy-1');
+
+        self::assertNotNull($legacy);
+        self::assertSame('Ada Lovelace', $legacy->customer);
+        self::assertSame('1.00', $legacy->amount);
+        self::assertSame(OrderService::DEFAULT_PRODUCT, $legacy->product);
+
+        // And the upgraded table takes new orders with their own sku.
+        $order = $orders->createOrder('Grace Hopper', '2.00', 'SKU-PRO');
+        self::assertSame('SKU-PRO', $orders->getOrder($order->id)?->product);
     }
 
-    public function testAnEmptyOrdersTableFromBeforeTheProductColumnIsRebuilt(): void
+    public function testAnEmptyOrdersTableFromBeforeTheProductColumnGainsIt(): void
     {
-        // Nothing to lose, so the migration takes the table to the current
-        // shape instead of refusing a directory that holds no orders.
         $this->legacyOrders();
 
         Migrator::migrate($this->database);

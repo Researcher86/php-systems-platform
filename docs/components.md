@@ -90,12 +90,13 @@ time-ordered like a ULID), generated in `OrderService`; `orders.id` is
 catalog the concurrency phase loads — `customers(name, tier, since)`,
 `products(sku, title, price)`, `inventory(sku, available, reserved)` — which
 it also seeds (there is no upsert, so a seed row is a read followed by an
-insert when missing). `orders.product` is the sku an order names. The mini database parses
-`ALTER TABLE` but does not execute it yet, so the column cannot be added to
-an existing table: the migration probes for it with a one-row
-`SELECT product FROM orders LIMIT 1` (the server validates a column only when
-a row is produced) and either rebuilds an empty legacy table or refuses to
-start, naming the data directory to remove when the old table holds orders.
+insert when missing). `orders.product` is the sku an order names. A data directory written before
+that column existed is brought forward in place: `ALTER TABLE orders ADD
+COLUMN product VARCHAR(64)` (added columns are nullable, since rows already
+exist), then `UPDATE orders SET product = ? WHERE product IS NULL` backfills
+the default sku. On every later start the server answers `Table "orders"
+already has a column "product"` — the one failure the migration treats as
+"already applied".
 
 ```php
 use PhpMiniDatabase\Client\ClientConfig;

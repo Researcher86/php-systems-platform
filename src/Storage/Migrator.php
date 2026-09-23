@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Storage;
 
+use PhpSystemsPlatform\Domain\OrderService;
 use RuntimeException;
 use Throwable;
 
@@ -100,33 +101,32 @@ final class Migrator
     /**
      * CREATE TABLE IF NOT EXISTS leaves an existing table alone, so a data
      * directory written before orders carried a product keeps the old shape
-     * and would only break later, on the first insert. The mini database
-     * parses ALTER TABLE but does not execute it yet, so the column cannot be
-     * added in place.
+     * and would only break later, on the first insert. ALTER TABLE brings it
+     * forward in place: the column is added (nullable, which is what an
+     * added column can be for rows that already exist) and every order
+     * written before it is backfilled with the default sku.
      *
-     * The server validates a column only when a row is actually produced,
-     * which makes one row the whole probe: an error means orders were written
-     * under the old shape, and those are the caller's to keep or throw away -
-     * the platform says so while it is still starting instead of failing on
-     * the first write. No row means the table holds nothing, whichever shape
-     * it has, so it is simply rebuilt in the current one.
+     * Adding a column that is already there is the normal case - every
+     * restart after the first - and the server says so precisely, which is
+     * the one failure this swallows. Anything else is a real problem and
+     * belongs to the caller.
      */
     private static function upgradeOrders(Database $database): void
     {
         try {
-            if ($database->read('SELECT product FROM orders LIMIT 1') !== []) {
-                return;
-            }
+            $database->write('ALTER TABLE orders ADD COLUMN product VARCHAR(64)');
         } catch (Throwable $e) {
-            throw new RuntimeException(
-                'The orders table was written before the product column existed and the mini database '
-                . 'cannot add a column in place. Remove the database data directory and start again.',
-                previous: $e,
-            );
+            if (!str_contains($e->getMessage(), 'already has a column')) {
+                throw new RuntimeException('Could not add the product column to orders.', previous: $e);
+            }
+
+            return;
         }
 
-        $database->write('DROP TABLE IF EXISTS orders');
-        self::createOrders($database);
+        $database->write(
+            'UPDATE orders SET product = ? WHERE product IS NULL',
+            [OrderService::DEFAULT_PRODUCT],
+        );
     }
 
     /**

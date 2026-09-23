@@ -2330,9 +2330,9 @@ Phase 5 is complete when all of the following are true.
 
 ## HTTP
 
-* [ ] HTTP server works.
-* [ ] Routing works.
-* [ ] Health endpoint works.
+* [x] HTTP server works.
+* [x] Routing works.
+* [x] Health endpoint works.
 * [ ] Order API works.
 
 ## Database

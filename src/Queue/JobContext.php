@@ -6,6 +6,7 @@ namespace PhpSystemsPlatform\Queue;
 
 use PhpJobQueue\Job\Job as QueueJob;
 use PhpSystemsPlatform\Cache\CacheService;
+use PhpSystemsPlatform\Domain\OrderLoader;
 use PhpSystemsPlatform\Domain\OrderService;
 
 /**
@@ -21,6 +22,7 @@ final readonly class JobContext
         public QueueJob $job,
         public OrderService $orders,
         public CacheService $cache,
+        public ?OrderLoader $loader = null,
     ) {
     }
 }

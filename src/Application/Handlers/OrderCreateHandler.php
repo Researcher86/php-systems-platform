@@ -13,7 +13,8 @@ use PhpSystemsPlatform\Http\Response;
 
 /**
  * POST /orders - the synchronous write path: parse a {"customer", "amount"}
- * body, let OrderService validate and persist it, answer 201 with the order
+ * body (plus an optional "product" sku, defaulting to the catalog's standard
+ * plan), let OrderService validate and persist it, answer 201 with the order
  * and its Location. A bad payload is a 400; everything below the domain layer
  * (a dead database, for example) is left for the Application boundary to turn
  * into a 500.
@@ -44,13 +45,18 @@ final readonly class OrderCreateHandler
 
         $customer = $payload['customer'] ?? null;
         $amount = $payload['amount'] ?? null;
+        $product = $payload['product'] ?? null;
 
         if (!is_string($customer) || !array_key_exists('amount', $payload)) {
             return Response::json(['error' => 'customer and amount are required.'], 400);
         }
 
+        if ($product !== null && !is_string($product)) {
+            return Response::json(['error' => 'product must be a catalog sku.'], 400);
+        }
+
         try {
-            $order = $this->orders->createOrder($customer, $amount);
+            $order = $this->orders->createOrder($customer, $amount, $product);
         } catch (InvalidArgumentException $e) {
             return Response::json(['error' => $e->getMessage()], 400);
         }

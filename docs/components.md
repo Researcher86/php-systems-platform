@@ -86,6 +86,17 @@ The mini database has no auto-increment. Order ids are UUID v7 (`ramsey/uuid`,
 time-ordered like a ULID), generated in `OrderService`; `orders.id` is
 `VARCHAR(36)`.
 
+`Storage\Migrator` owns the schema: `orders` plus the read-only reference
+catalog the concurrency phase loads — `customers(name, tier, since)`,
+`products(sku, title, price)`, `inventory(sku, available, reserved)` — which
+it also seeds (there is no upsert, so a seed row is a read followed by an
+insert when missing). `orders.product` is the sku an order names. The mini database parses
+`ALTER TABLE` but does not execute it yet, so the column cannot be added to
+an existing table: the migration probes for it with a one-row
+`SELECT product FROM orders LIMIT 1` (the server validates a column only when
+a row is produced) and either rebuilds an empty legacy table or refuses to
+start, naming the data directory to remove when the old table holds orders.
+
 ```php
 use PhpMiniDatabase\Client\ClientConfig;
 use PhpMiniDatabase\Client\Connection;
@@ -400,12 +411,43 @@ The wiring, platform-side:
   connection: `run()` is all-or-fail (`all`), `runWithin($seconds, ...)`
   shares one budget over the group and returns whatever answers arrived,
   keyed by position.
+- `Workers\CatalogTasks` — the reference-data tasks `catalog.customer`,
+  `catalog.product`, `catalog.stock`: one keyed read each, on the worker's
+  own lazily built connection. `delay_ms` simulates an enrichment slower than
+  a local table; a request without its key, or with an out-of-range delay, is
+  `Response::error('bad_params')`.
 - `Application\Handlers\ParallelHandler` — the controller above, with the
   runner injected from `serve()`; without one it answers 503 "not configured".
 
 The observable proof of concurrency: four 50k chunks each report ~50ms of
 worker time while the request's `wallMicroseconds` is also ~50-60ms — the
 chunks overlapped instead of stacking into ~200ms.
+
+### Concurrent database work (Step 13, shipped)
+
+The same picture for I/O instead of CPU. One order's snapshot is the order
+plus three pieces of reference data; the order read is a genuine dependency
+(the other three are keyed by what it says), the three that follow are
+independent of each other.
+
+- `Domain\OrderLoader` — the seam: `load(string $id): ?OrderSnapshot`.
+- `Domain\SequentialOrderLoader` — the three reads one after another, in one
+  process. Used by `Queue\JobExecutor`, so a job running inside a pool worker
+  does its own reads instead of competing for the pool it occupies.
+- `Workers\ConcurrentOrderLoader` — the same three as one fan-out through
+  `ConcurrentTaskRunner::run()` (all-or-fail: a silently missing part would
+  be indistinguishable from an absent catalog row).
+- `Queue\Jobs\OrderProcessJob` (`order.process`) — loads the snapshot and
+  settles the order from it: stock the catalog can cover completes it,
+  anything else cancels it, then the stale cached copy is dropped.
+- `Workers\OrderLoadBenchmark` + `orders:compare <rounds> <delay-ms>` — the
+  measurement, one untimed warm-up per loader, printed for both local reads
+  and a simulated external dependency per part.
+
+Measured (5 rounds, container): local reads 0.77ms sequential vs 1.91ms
+concurrent (**0.40x** — the fan-out loses), 50ms simulated dependency per
+part 161ms vs 53ms (**3.06x**). The database server is a single event loop,
+so the fan-out overlaps *waiting*; it does not multiply database throughput.
 
 ## Adapter mapping (used by later phases)
 

@@ -36,13 +36,17 @@ use PhpSystemsPlatform\Application\Handlers\QueueStatusHandler;
 use PhpSystemsPlatform\Application\Handlers\WorkersStatusHandler;
 use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
+use PhpSystemsPlatform\Domain\SequentialOrderLoader;
 use PhpSystemsPlatform\Http\Router;
 use PhpSystemsPlatform\Queue\QueueConsumer;
 use PhpSystemsPlatform\Queue\QueueJournal;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Migrator;
+use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
+use PhpSystemsPlatform\Workers\ConcurrentOrderLoader;
 use PhpSystemsPlatform\Workers\ConcurrentTaskRunner;
+use PhpSystemsPlatform\Workers\OrderLoadBenchmark;
 use PhpSystemsPlatform\Workers\QueueBenchmark;
 use PhpSystemsPlatform\Workers\WorkerManager;
 use PhpSystemsPlatform\Workers\WorkerRegistry;
@@ -75,6 +79,7 @@ final class PlatformCli
         'status' => 'Show the state of every platform component.',
         'demo' => 'Run the complete end-to-end platform story.',
         'benchmark' => 'Run the queue benchmark: benchmark <jobs> <workers>.',
+        'orders:compare' => 'Compare sequential and concurrent order loading: orders:compare <rounds> <delay-ms>.',
         'memory:demo' => 'Demonstrate fork() and copy-on-write memory behavior.',
         'workers:memory' => 'Measure worker process memory (1, 2, 4, 8 workers).',
         'failure:demo' => 'Reproduce the failure scenarios end to end.',
@@ -144,6 +149,7 @@ final class PlatformCli
             'queue:status' => $this->queueStatus(),
             'workers:status' => $this->workersStatus(),
             'benchmark' => $this->queueBenchmark(array_slice($argv, 2)),
+            'orders:compare' => $this->ordersCompare(array_slice($argv, 2)),
 
             // Real handlers land with their implementation phase.
             default => $this->notImplemented($command),
@@ -1079,6 +1085,122 @@ final class PlatformCli
         $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
 
         return 0;
+    }
+
+    /**
+     * PLAN Step 13's measurement: the same order snapshot loaded both ways.
+     *
+     * Two passes, deliberately. The first loads three local catalog rows,
+     * where a pool round trip per part costs more than the overlap saves -
+     * the case the plan warns about ("do not add concurrency merely because
+     * it is possible"). The second gives every part a simulated external
+     * dependency, which is the case the fan-out exists for: three waits that
+     * happen at the same time instead of one after another.
+     *
+     * The order itself is created here, for a seeded customer and the
+     * default sku, so the command needs nothing but the platform's own
+     * infrastructure.
+     *
+     * @param list<string> $args rounds, simulated latency per part in ms
+     */
+    private function ordersCompare(array $args): int
+    {
+        $rounds = isset($args[0]) ? (int) $args[0] : 5;
+        $delayMs = isset($args[1]) ? (int) $args[1] : 50;
+
+        if ($rounds < 1 || $rounds > 100) {
+            fwrite(STDERR, "rounds must be between 1 and 100.\n");
+
+            return 1;
+        }
+
+        if ($delayMs < 1 || $delayMs > 1000) {
+            fwrite(STDERR, "delay-ms must be between 1 and 1000.\n");
+
+            return 1;
+        }
+
+        $config = $this->config();
+        $databaseConfig = $config['database'];
+        $workersConfig = $config['workers'];
+
+        $database = Database::fromConfig(new ClientConfig(
+            host: $databaseConfig['host'],
+            port: $databaseConfig['port'],
+            connectTimeoutSeconds: $databaseConfig['timeout'],
+        ));
+
+        $ownsDatabaseServer = false;
+        $ownsWorkerPool = false;
+
+        try {
+            $ownsDatabaseServer = $this->ensureDatabaseServer($databaseConfig);
+            Migrator::migrate($database);
+            $ownsWorkerPool = $this->ensureWorkerPoolServer($workersConfig);
+        } catch (RuntimeException $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            $database->close();
+            $this->stopWorkerPoolIfOwned($ownsWorkerPool);
+            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
+
+            return 1;
+        }
+
+        $orders = new OrderService(new OrderRepository($database));
+        $catalog = new CatalogRepository($database);
+        $runner = new ConcurrentTaskRunner(new WorkerPoolClient(
+            $workersConfig['socket'],
+            // A part that sleeps for its simulated dependency must not look
+            // like a task timeout.
+            max((float) $workersConfig['task_timeout'], $delayMs / 1000 + 5.0),
+        ));
+
+        try {
+            $order = $orders->createOrder('Ada Lovelace', '19.99');
+
+            $local = new OrderLoadBenchmark(
+                new SequentialOrderLoader($orders, $catalog),
+                new ConcurrentOrderLoader($orders, $runner),
+            )->run($order->id, $rounds);
+
+            $waiting = new OrderLoadBenchmark(
+                new SequentialOrderLoader($orders, $catalog, $delayMs),
+                new ConcurrentOrderLoader($orders, $runner, $delayMs),
+            )->run($order->id, $rounds);
+        } catch (RuntimeException | ConnectionFailedException $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            $database->close();
+            $this->stopWorkerPoolIfOwned($ownsWorkerPool);
+            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
+
+            return 1;
+        }
+
+        printf("Order load comparison: %d rounds, order %s\n\n", $rounds, $order->id);
+        printf("  local reads only\n");
+        $this->printComparison($local);
+        printf("\n  with a %d ms simulated external dependency per part\n", $delayMs);
+        $this->printComparison($waiting);
+        printf(
+            "\nThree local rows are cheaper to read in one process than to hand to three;\n"
+            . "the fan-out starts paying once a part actually waits.\n",
+        );
+
+        $database->close();
+        $this->stopWorkerPoolIfOwned($ownsWorkerPool);
+        $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
+
+        return 0;
+    }
+
+    /**
+     * @param array{rounds: int, sequential_ms: float, concurrent_ms: float, speedup: float} $result
+     */
+    private function printComparison(array $result): void
+    {
+        printf("    sequential   %.3f ms\n", $result['sequential_ms']);
+        printf("    concurrent   %.3f ms\n", $result['concurrent_ms']);
+        printf("    speedup      %.2fx\n", $result['speedup']);
     }
 
     /**

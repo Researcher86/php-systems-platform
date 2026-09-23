@@ -8,7 +8,9 @@ use PhpJobQueue\Job\Job as QueueJob;
 use PhpMiniDatabase\Client\ClientConfig;
 use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
+use PhpSystemsPlatform\Domain\SequentialOrderLoader;
 use PhpSystemsPlatform\Storage\Database;
+use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
 
 /**
@@ -29,6 +31,7 @@ final class JobExecutor
     private ?OrderService $orders = null;
     private ?CacheService $cache = null;
     private ?Database $database = null;
+    private ?SequentialOrderLoader $loader = null;
 
     /**
      * @param array<string, mixed> $databaseConfig the `database` config block
@@ -42,12 +45,25 @@ final class JobExecutor
 
     public function __invoke(QueueJob $job): mixed
     {
-        $context = new JobContext($job, $this->orders(), $this->cache());
+        $context = new JobContext($job, $this->orders(), $this->cache(), $this->loader());
 
         $this->registry ??= new JobRegistry();
         $this->registry->execute($job, $context);
 
         return null;
+    }
+
+    /**
+     * The sequential loader, on this worker's own connection: a job running
+     * in a pool worker does its own reads instead of fanning them back into
+     * the pool it is occupying a slot in.
+     */
+    private function loader(): SequentialOrderLoader
+    {
+        return $this->loader ??= new SequentialOrderLoader(
+            $this->orders(),
+            new CatalogRepository($this->database()),
+        );
     }
 
     private function orders(): OrderService

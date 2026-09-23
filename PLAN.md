@@ -2369,7 +2369,7 @@ Phase 5 is complete when all of the following are true.
 ## Concurrency
 
 * [x] At least one real concurrent workload is demonstrated.
-* [ ] Sequential vs concurrent behavior can be compared.
+* [x] Sequential vs concurrent behavior can be compared.
 * [ ] Concurrency limits are explicit.
 
 ## Memory

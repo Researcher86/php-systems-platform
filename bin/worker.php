@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use PhpSystemsPlatform\Workers\CatalogTasks;
 use PhpSystemsPlatform\Workers\WorkerJobs;
 use PhpSystemsPlatform\Workers\WorkerTasks;
 use PhpWorkerPool\Master\Master;
@@ -19,10 +20,11 @@ require __DIR__ . '/../vendor/autoload.php';
  * pool does is the component's - this file only decides which tasks its
  * workers run and with what sizing.
  *
- * Two task families live here: the hash tasks (ping/hash_chunk, WorkerTasks)
- * that back GET /parallel, and job.execute (WorkerJobs) that runs queue jobs
- * on a worker process. The pool itself never knows what a task means - it
- * only forks processes and moves Request/Response between them.
+ * Three task families live here: the hash tasks (ping/hash_chunk,
+ * WorkerTasks) that back GET /parallel, job.execute (WorkerJobs) that runs
+ * queue jobs on a worker process, and the catalog.* reads (CatalogTasks) the
+ * concurrent order loader fans out. The pool itself never knows what a task
+ * means - it only forks processes and moves Request/Response between them.
  */
 
 $config = require __DIR__ . '/../config/platform.php';
@@ -38,10 +40,15 @@ $requestTimeout = (float) (getenv('WORKER_POOL_TIMEOUT') ?: $workers['task_timeo
 
 $workerTasks = WorkerTasks::handler();
 $workerJobs = new WorkerJobs($config)->handler();
+$catalogTasks = new CatalogTasks((array) $config['database'])->handler();
 
-$handler = static function (Request $request) use ($workerJobs, $workerTasks): Response {
-    return $request->action === 'job.execute'
-        ? $workerJobs($request)
+$handler = static function (Request $request) use ($catalogTasks, $workerJobs, $workerTasks): Response {
+    if ($request->action === 'job.execute') {
+        return $workerJobs($request);
+    }
+
+    return str_starts_with($request->action, 'catalog.')
+        ? $catalogTasks($request)
         : $workerTasks($request);
 };
 

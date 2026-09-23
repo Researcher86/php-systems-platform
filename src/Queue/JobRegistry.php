@@ -7,6 +7,7 @@ namespace PhpSystemsPlatform\Queue;
 use PhpJobQueue\Job\Job as QueueJob;
 use PhpSystemsPlatform\Queue\Jobs\NoopJob;
 use PhpSystemsPlatform\Queue\Jobs\OrderCreatedJob;
+use PhpSystemsPlatform\Queue\Jobs\OrderProcessJob;
 use RuntimeException;
 
 /**
@@ -27,6 +28,7 @@ final class JobRegistry
      */
     private const array HANDLERS = [
         OrderCreatedJob::TYPE => OrderCreatedJob::class,
+        OrderProcessJob::TYPE => OrderProcessJob::class,
         NoopJob::TYPE => NoopJob::class,
     ];
 

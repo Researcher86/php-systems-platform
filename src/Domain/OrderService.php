@@ -22,16 +22,24 @@ use Ramsey\Uuid\Uuid;
  */
 final readonly class OrderService
 {
+    /**
+     * The catalog sku an order is for when the request does not name one.
+     * Seeded by Storage\Migrator, so a default order always has a product
+     * and a stock level to load.
+     */
+    public const string DEFAULT_PRODUCT = 'SKU-STANDARD';
+
     public function __construct(
         private OrderRepository $orders,
         private ?Producer $producer = null,
     ) {
     }
 
-    public function createOrder(string $customer, mixed $amount): Order
+    public function createOrder(string $customer, mixed $amount, ?string $product = null): Order
     {
         $customer = $this->normalizeCustomer($customer);
         $amount = $this->normalizeAmount($amount);
+        $product = $this->normalizeProduct($product);
 
         $now = $this->now();
 
@@ -39,6 +47,7 @@ final readonly class OrderService
             id: Uuid::uuid7()->toString(),
             customer: $customer,
             amount: $amount,
+            product: $product,
             status: OrderStatus::CREATED,
             createdAt: $now,
             updatedAt: $now,
@@ -85,6 +94,27 @@ final readonly class OrderService
         }
 
         return $customer;
+    }
+
+    /**
+     * A sku is a catalog key, not free text: it is the identity three later
+     * loads are made with, so an unusable one must be refused at the edge
+     * rather than become three empty reads. An absent sku is not an error -
+     * it is the default product.
+     */
+    private function normalizeProduct(?string $product): string
+    {
+        $product = trim($product ?? '');
+
+        if ($product === '') {
+            return self::DEFAULT_PRODUCT;
+        }
+
+        if (preg_match('/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/', $product) !== 1) {
+            throw new InvalidArgumentException('product must be a catalog sku.');
+        }
+
+        return $product;
     }
 
     /**

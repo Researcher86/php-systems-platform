@@ -16,12 +16,17 @@ use PhpJobQueue\Worker\WorkerPool;
 use PhpMiniDatabase\Client\ClientConfig;
 use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
+use PhpSystemsPlatform\Domain\SequentialOrderLoader;
 use PhpSystemsPlatform\Queue\JobContext;
 use PhpSystemsPlatform\Queue\JobExecutor;
 use PhpSystemsPlatform\Queue\Jobs\OrderCreatedJob;
+use PhpSystemsPlatform\Queue\Jobs\OrderProcessJob;
 use PhpSystemsPlatform\Queue\QueueJournal;
 use PhpSystemsPlatform\Storage\Database;
+use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
+use PhpSystemsPlatform\Workers\ConcurrentOrderLoader;
+use PhpSystemsPlatform\Workers\ConcurrentTaskRunner;
 use PhpSystemsPlatform\Workers\WorkerManager;
 use PhpSystemsPlatform\Workers\WorkerRegistry;
 use PHPUnit\Framework\TestCase;
@@ -216,6 +221,183 @@ final class ServeIntegrationTest extends TestCase
         new OrderCreatedJob()->execute(new JobContext($job, self::orders(), $unreachableCache));
 
         self::assertSame(1, $unreachableCache->counters()->bypasses);
+    }
+
+    public function testMigratorSeedsTheReferenceCatalogTheLoadersRead(): void
+    {
+        $catalog = new CatalogRepository(self::$database);
+
+        $customer = $catalog->findCustomer('Ada Lovelace');
+        self::assertNotNull($customer);
+        self::assertSame('gold', $customer->tier);
+
+        $product = $catalog->findProduct(OrderService::DEFAULT_PRODUCT);
+        self::assertNotNull($product);
+        self::assertSame('19.99', $product->price);
+
+        $stock = $catalog->findStock(OrderService::DEFAULT_PRODUCT);
+        self::assertNotNull($stock);
+        self::assertGreaterThan(0, $stock->available);
+    }
+
+    public function testCreatedOrdersCarryAProductAndDefaultToTheStandardSku(): void
+    {
+        $order = $this->postOrder('Ada Lovelace', 19.99);
+        self::assertSame(OrderService::DEFAULT_PRODUCT, $order['product']);
+
+        [$status, $body] = $this->request('POST', '/orders', json_encode([
+            'customer' => 'Grace Hopper',
+            'amount' => 49,
+            'product' => 'SKU-PRO',
+        ], JSON_THROW_ON_ERROR));
+
+        self::assertSame(201, $status);
+
+        $pro = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+        self::assertSame('SKU-PRO', $pro['product']);
+
+        $rows = self::$database->read('SELECT product FROM orders WHERE id = ?', [$pro['id']]);
+        self::assertSame('SKU-PRO', $rows[0]['product']);
+    }
+
+    public function testSequentialLoaderAssemblesTheWholeOrderSnapshot(): void
+    {
+        $order = $this->postOrder('Ada Lovelace', 19.99);
+
+        $snapshot = new SequentialOrderLoader(self::orders(), new CatalogRepository(self::$database))
+            ->load($order['id']);
+
+        self::assertNotNull($snapshot);
+        self::assertSame($order['id'], $snapshot->order->id);
+        self::assertSame('gold', $snapshot->customer?->tier);
+        self::assertSame('Standard plan', $snapshot->product?->title);
+        self::assertSame(OrderService::DEFAULT_PRODUCT, $snapshot->stock?->sku);
+        self::assertGreaterThan(0, (int) $snapshot->stock?->available);
+    }
+
+    public function testSequentialLoaderAnswersNullForAnUnknownOrder(): void
+    {
+        $snapshot = new SequentialOrderLoader(self::orders(), new CatalogRepository(self::$database))
+            ->load($this->missingOrderId());
+
+        self::assertNull($snapshot);
+    }
+
+    public function testSnapshotLeavesUnseededReferenceDataEmptyInsteadOfFailing(): void
+    {
+        // A customer nobody seeded, and a sku that is not in the catalog: the
+        // order still loads, the missing parts are simply absent.
+        [$status, $body] = $this->request('POST', '/orders', json_encode([
+            'customer' => 'Nobody In The Catalog',
+            'amount' => 1,
+            'product' => 'SKU-GHOST',
+        ], JSON_THROW_ON_ERROR));
+        self::assertSame(201, $status);
+
+        $order = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+        $snapshot = new SequentialOrderLoader(self::orders(), new CatalogRepository(self::$database))
+            ->load($order['id']);
+
+        self::assertNotNull($snapshot);
+        self::assertNull($snapshot->customer);
+        self::assertNull($snapshot->product);
+        self::assertNull($snapshot->stock);
+    }
+
+    public function testConcurrentLoaderAnswersExactlyWhatTheSequentialOneDoes(): void
+    {
+        $order = $this->postOrder('Grace Hopper', 49.0);
+
+        $sequential = new SequentialOrderLoader(self::orders(), new CatalogRepository(self::$database))
+            ->load($order['id']);
+        $concurrent = new ConcurrentOrderLoader(self::orders(), $this->taskRunner())
+            ->load($order['id']);
+
+        // Same snapshot, different execution model - the whole premise of the
+        // comparison.
+        self::assertEquals($sequential, $concurrent);
+    }
+
+    public function testConcurrentLoaderAnswersNullForAnUnknownOrder(): void
+    {
+        self::assertNull(new ConcurrentOrderLoader(self::orders(), $this->taskRunner())
+            ->load($this->missingOrderId()));
+    }
+
+    public function testFanningOutTheIndependentPartsOverlapsTheirWait(): void
+    {
+        $order = $this->postOrder('Alan Turing', 99.0);
+        $catalog = new CatalogRepository(self::$database);
+
+        // 100ms of simulated external latency per part: three parts cost
+        // ~300ms one after another, but only one such wait when they are in
+        // flight together.
+        $sequentialStarted = microtime(true);
+        new SequentialOrderLoader(self::orders(), $catalog, 100)->load($order['id']);
+        $sequentialSeconds = microtime(true) - $sequentialStarted;
+
+        $concurrentStarted = microtime(true);
+        new ConcurrentOrderLoader(self::orders(), $this->taskRunner(), 100)->load($order['id']);
+        $concurrentSeconds = microtime(true) - $concurrentStarted;
+
+        self::assertGreaterThan(0.3, $sequentialSeconds);
+        self::assertLessThan($sequentialSeconds, $concurrentSeconds);
+    }
+
+    public function testOrderProcessJobCompletesAnOrderItsStockCanCover(): void
+    {
+        $order = $this->postOrder('Ada Lovelace', 19.99);
+        $job = $this->dispatchJob(OrderProcessJob::TYPE, ['order_id' => $order['id']]);
+
+        new OrderProcessJob()->execute(new JobContext($job, self::orders(), self::$cache, self::loader()));
+
+        $rows = self::$database->read('SELECT status FROM orders WHERE id = ?', [$order['id']]);
+        self::assertSame('completed', $rows[0]['status']);
+
+        // The status changed, so the entry warmed on write must not survive.
+        self::assertNull(self::$cache->getOrder($order['id']));
+    }
+
+    public function testOrderProcessJobCancelsAnOrderNothingCanBeShippedFor(): void
+    {
+        [, $body] = $this->request('POST', '/orders', json_encode([
+            'customer' => 'Ada Lovelace',
+            'amount' => 5,
+            'product' => 'SKU-GHOST',
+        ], JSON_THROW_ON_ERROR));
+        $order = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+
+        $job = $this->dispatchJob(OrderProcessJob::TYPE, ['order_id' => $order['id']]);
+        new OrderProcessJob()->execute(new JobContext($job, self::orders(), self::$cache, self::loader()));
+
+        $rows = self::$database->read('SELECT status FROM orders WHERE id = ?', [$order['id']]);
+        self::assertSame('cancelled', $rows[0]['status']);
+    }
+
+    public function testOrderProcessJobFailsWhenTheOrderIsMissing(): void
+    {
+        $job = $this->dispatchJob(OrderProcessJob::TYPE, ['order_id' => $this->missingOrderId()]);
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('not found');
+
+        new OrderProcessJob()->execute(new JobContext($job, self::orders(), self::$cache, self::loader()));
+    }
+
+    public function testTheQueuePathRunsAnOrderProcessJobEndToEnd(): void
+    {
+        $order = $this->postOrder('Grace Hopper', 49.0);
+        $clock = new SystemClock();
+
+        new Producer(
+            new InMemoryQueue($clock, new FileStorage(self::DATA_DIR . '/queue/queue.log')),
+            new JobFactory($clock, new MetricsCollector()),
+        )->dispatch(OrderProcessJob::TYPE, ['order_id' => $order['id']], maxAttempts: 3);
+
+        $this->drainQueue();
+
+        $rows = self::$database->read('SELECT status FROM orders WHERE id = ?', [$order['id']]);
+        self::assertSame('completed', $rows[0]['status']);
     }
 
     public function testParallelSplitsAHashTaskAcrossWorkers(): void
@@ -544,6 +726,39 @@ final class ServeIntegrationTest extends TestCase
         }
     }
 
+    public function testOrdersCompareReportsBothExecutionModels(): void
+    {
+        $out = self::LOG_DIR . '/compare.out';
+        $err = self::LOG_DIR . '/compare.err';
+        @unlink($out);
+        @unlink($err);
+
+        $process = proc_open(
+            [PHP_BINARY, dirname(__DIR__, 2) . '/bin/platform.php', 'orders:compare', '2', '50'],
+            [
+                1 => ['file', $out, 'a'],
+                2 => ['file', $err, 'a'],
+            ],
+            $pipes,
+        );
+
+        self::assertIsResource($process);
+        $code = proc_close($process);
+
+        self::assertSame(0, $code, (string) file_get_contents($err));
+
+        $output = (string) file_get_contents($out);
+        self::assertStringContainsString('local reads only', $output);
+        self::assertStringContainsString('50 ms simulated', $output);
+        self::assertStringContainsString('sequential', $output);
+        self::assertStringContainsString('concurrent', $output);
+
+        // Two measured pairs, and with a waiting part the fan-out wins.
+        preg_match_all('/speedup\s+([\d.]+)x/', $output, $speedups);
+        self::assertCount(2, $speedups[1]);
+        self::assertGreaterThan(1.0, (float) $speedups[1][1]);
+    }
+
     public function testQueueBenchmarkRunsTheFullPipelineAndReportsMetrics(): void
     {
         $out = self::LOG_DIR . '/bench.out';
@@ -579,6 +794,17 @@ final class ServeIntegrationTest extends TestCase
         self::assertGreaterThan(0.0, (float) $throughput[1]);
     }
 
+    private function taskRunner(): ConcurrentTaskRunner
+    {
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+        $workers = $config['workers'];
+
+        return new ConcurrentTaskRunner(new WorkerPoolClient(
+            (string) $workers['socket'],
+            (float) $workers['task_timeout'],
+        ));
+    }
+
     private function workerManager(): WorkerManager
     {
         $config = require dirname(__DIR__, 2) . '/config/platform.php';
@@ -593,6 +819,11 @@ final class ServeIntegrationTest extends TestCase
     private static function orders(): OrderService
     {
         return new OrderService(new OrderRepository(self::$database));
+    }
+
+    private static function loader(): SequentialOrderLoader
+    {
+        return new SequentialOrderLoader(self::orders(), new CatalogRepository(self::$database));
     }
 
     private function dispatchJob(string $type, array $payload = []): \PhpJobQueue\Job\Job

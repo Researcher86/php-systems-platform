@@ -308,6 +308,15 @@ average/p95 latency, queue depth, worker utilization. Comparing 4 vs 8
 workers shows the speedup is not linear.
 
 ```bash
+php bin/platform.php orders:compare 5 50
+```
+
+Compare the two ways of loading one order's whole picture (rounds,
+simulated external latency per part in ms): the same snapshot read
+sequentially in one process, and with its independent parts fanned out to
+worker processes.
+
+```bash
 php bin/platform.php status
 ```
 
@@ -362,6 +371,20 @@ Response:
 ```http
 POST /orders
 ```
+
+Request body:
+
+```json
+{
+    "customer": "Ada Lovelace",
+    "amount": 19.99,
+    "product": "SKU-STANDARD"
+}
+```
+
+`product` is optional and names a sku in the seeded reference catalog; it
+defaults to `SKU-STANDARD`. The sku is what the background processing loads
+the product and its stock level by.
 
 Example response:
 
@@ -450,6 +473,59 @@ BUSY / IDLE
 ```
 
 This makes process lifecycle and graceful shutdown observable rather than hiding them behind a framework.
+
+---
+
+# Concurrent Database Work
+
+Processing an order needs more than the order: the customer behind it, the
+product it names, and that product's stock level. The order has to be read
+first - the other three are keyed by what it says - but those three are
+independent of each other.
+
+```text
+            ┌── customer   (database)
+order ──────┼── product    (database)
+            └── stock      (database)
+```
+
+Both ways of doing that work live in the platform and answer with exactly the
+same snapshot:
+
+* `Domain\SequentialOrderLoader` - the three reads one after another, in one
+  process.
+* `Workers\ConcurrentOrderLoader` - the three reads sent to the worker pool
+  together, each executed by its own worker process on its own database
+  connection, then collected.
+
+`orders:compare` measures both, twice: once against plain local reads, and
+once with a simulated external dependency per part - the kind of enrichment
+that waits on something slower than a local table.
+
+```text
+Order load comparison: 5 rounds
+
+  local reads only
+    sequential   0.766 ms
+    concurrent   1.906 ms
+    speedup      0.40x
+
+  with a 50 ms simulated external dependency per part
+    sequential   161.050 ms
+    concurrent    52.656 ms
+    speedup      3.06x
+```
+
+The lesson is the pair of numbers, not the second one. Fanning out costs a
+pool round trip per part, so three sub-millisecond reads get **slower**; the
+same fan-out is worth roughly 3x once each part actually waits. The database
+server itself is a single event loop, so concurrency here overlaps *waiting*,
+it does not multiply database throughput.
+
+This is also why the background job does not fan out: `OrderProcessJob`
+already runs inside a pool worker, and a worker that hands work back to its
+own pool competes with the jobs queued behind it. It uses the sequential
+loader deliberately.
 
 ---
 

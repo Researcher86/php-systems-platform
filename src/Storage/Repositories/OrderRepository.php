@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Storage\Repositories;
 
 use PhpSystemsPlatform\Domain\Order;
+use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Domain\OrderStatus;
 use PhpSystemsPlatform\Storage\Database;
 
@@ -15,7 +16,7 @@ use PhpSystemsPlatform\Storage\Database;
  */
 final readonly class OrderRepository
 {
-    private const COLUMNS = 'id, customer, amount, status, created_at, updated_at';
+    private const COLUMNS = 'id, customer, amount, product, status, created_at, updated_at';
 
     public function __construct(
         private Database $database,
@@ -25,11 +26,12 @@ final readonly class OrderRepository
     public function create(Order $order): bool
     {
         $affected = $this->database->write(
-            'INSERT INTO orders (' . self::COLUMNS . ') VALUES (?, ?, ?, ?, ?, ?)',
+            'INSERT INTO orders (' . self::COLUMNS . ') VALUES (?, ?, ?, ?, ?, ?, ?)',
             [
                 $order->id,
                 $order->customer,
                 $order->amount,
+                $order->product,
                 $order->status->value,
                 $order->createdAt,
                 $order->updatedAt,
@@ -91,6 +93,9 @@ final readonly class OrderRepository
             id: (string) $row['id'],
             customer: (string) $row['customer'],
             amount: (string) $row['amount'],
+            // A row written before the product column existed reads as null;
+            // the default sku keeps such an order loadable instead of fatal.
+            product: ((string) ($row['product'] ?? '')) ?: OrderService::DEFAULT_PRODUCT,
             status: OrderStatus::from((string) $row['status']),
             createdAt: (string) $row['created_at'],
             updatedAt: (string) $row['updated_at'],

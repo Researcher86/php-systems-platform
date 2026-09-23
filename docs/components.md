@@ -255,10 +255,13 @@ serve (HTTP) ──producer──► journal ◄──consumer──► WorkerPo
   then runs a `QueueConsumer` loop: the component's tick (dispatch pending →
   apply answers → requeue expired) plus a journal re-sync every 100ms, so a
   job published by another process while the consumer lives is picked up
-  without a restart. `Queue\JobExecutor` is the WorkerPool handler: it builds
-  its own Database/CacheService per forked worker (nothing inherited from the
-  parent), and `Queue\JobRegistry` maps a carrier's type string to the
-  platform `Job` that runs it. SIGTERM/SIGINT stop the loop gracefully.
+  without a restart. Each of the consumer's php-job-queue workers is a
+  **forwarder** that hands its job to the php-worker-pool via
+  `Workers\WorkerManager`; the pool's forked workers (their `WorkerJobs`
+  handler → `Queue\JobExecutor` → `JobRegistry`) are what actually execute
+  it, with per-worker services built inside each fork. This is PLAN Step 10's
+  Queue Consumer → Worker Manager → Workers. SIGTERM/SIGINT stop the loop
+  gracefully.
 - `queue:status` / `GET /queue/status` read `Queue\QueueJournal` — the same
   replay the consumer restores from — and expose the metrics PLAN Step 9
   names: `queue.depth` (non-terminal jobs), `queue.published`, plus
@@ -349,17 +352,30 @@ request (206 with some, 503 when none complete, 400 on bad `work`/`split`).
 The wiring, platform-side:
 
 - `bin/worker.php` — the Master process. One file that loads the platform
-  autoloader and runs `Master(minWorkers: 2, maxWorkers: 16, handler:
-  WorkerTasks::handler())`. Like the cache, the pool has no daemon mode, so
-  `PlatformCli::serve()` spawns it as a child when no pool answers a ping on
-  the configured socket (`workerPoolAnswers()`), owns it, and SIGTERMs it on
-  shutdown (`stopWorkerPoolIfOwned()`) — graceful: settle in-flight tasks,
-  exit workers, remove the socket.
-- `Workers\WorkerTasks` — the only code a worker runs: `ping` and `hash_chunk`
+  autoloader and runs `Master(minWorkers: 2, maxWorkers: 16, ...)` with a
+  handler that routes two task families: `ping`/`hash_chunk` to
+  `WorkerTasks`, and `job.execute` to `WorkerJobs`. Like the cache, the pool
+  has no daemon mode, so `PlatformCli::serve()` spawns it as a child when no
+  pool answers a ping on the configured socket (`workerPoolAnswers()`), owns
+  it, and SIGTERMs it on shutdown (`stopWorkerPoolIfOwned()`) — graceful:
+  settle in-flight tasks, exit workers, remove the socket. `queue:consume`
+  uses the same ensure/own/stop helpers when it runs standalone.
+- `Workers\WorkerTasks` — the hash tasks: `ping` and `hash_chunk`
   (a deterministic sha256 chain reporting its `iterations`, elapsed
   `microseconds` and `checksum`). A payload that cannot describe a task is
   answered with `Response::error('bad_params')`, not a thrown exception, so
   the controller sees a degraded chunk instead of a crashed worker.
+- `Workers\WorkerJobs` — the queue task: `job.execute` takes a job's plain
+  `toArray()` array, rebuilds the carrier (`Job::fromArray()`), and runs it
+  through `Queue\JobExecutor` (per-worker services → `JobRegistry`). A
+  failure is answered `Response::error('job_failed', ...)` — the pool sees an
+  application outcome, not a crashed worker, and the queue retries it.
+- `Workers\WorkerManager` — the queue side of that bridge, and the Worker
+  Manager of PLAN Step 10: it sends a `Job` to the pool as a `job.execute`
+  task over one `WorkerPoolClient`. A `job_failed` answer becomes a
+  `RuntimeException` (a failed attempt for the queue); a dead pool propagates
+  the connection error the same way. `queue:consume`'s php-job-queue workers
+  are forwarders that run each job through it.
 - `Workers\ConcurrentTaskRunner` — the fan-out over one `WorkerPoolClient`
   connection: `run()` is all-or-fail (`all`), `runWithin($seconds, ...)`
   shares one budget over the group and returns whatever answers arrived,
@@ -388,6 +404,7 @@ chunks overlapped instead of stacking into ~200ms.
 | `Queue\QueueConsumer`          | `JobDispatcher` loop + journal re-sync (cross-process handoff) |
 | `Queue\QueueJournal`           | `FileStorage` replay → `queue.*` counters |
 | `Application\Handlers\QueueStatusHandler` | `QueueJournal` over HTTP (`GET /queue/status`) |
-| `Workers\WorkerManager`        | `WorkerPoolClient`                     |
+| `Workers\WorkerManager`        | `WorkerPoolClient` job execution (`job.execute`) |
+| `Workers\WorkerJobs`           | pool-side `job.execute` handler → `Queue\JobExecutor` |
 | `Workers\ConcurrentTaskRunner` | `WorkerPoolClient` fan-out (`send`/`allWithin`) |
 | `Workers\WorkerTasks`          | per-worker task handler (`ping`, `hash_chunk`) |

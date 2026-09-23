@@ -22,7 +22,9 @@ use PhpSystemsPlatform\Queue\Jobs\OrderCreatedJob;
 use PhpSystemsPlatform\Queue\QueueJournal;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
+use PhpSystemsPlatform\Workers\WorkerManager;
 use PHPUnit\Framework\TestCase;
+use PhpWorkerPool\Sdk\WorkerPoolClient;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use RuntimeException;
@@ -387,6 +389,44 @@ final class ServeIntegrationTest extends TestCase
             proc_terminate($process);
             proc_close($process);
         }
+    }
+
+    public function testWorkerPoolExecutesAQueueJob(): void
+    {
+        $order = $this->postOrder('Linus Torvalds', 4.5);
+        $job = $this->dispatchJob(OrderCreatedJob::TYPE, ['order_id' => $order['id']]);
+
+        // The Worker Manager hands the job to the running pool; a forked
+        // worker executes it and warms the cache from the authoritative row.
+        $this->workerManager()->execute($job);
+
+        $cached = self::$cache->getOrder($order['id']);
+        self::assertIsArray($cached);
+        self::assertSame('Linus Torvalds', $cached['customer']);
+        self::assertSame('4.50', $cached['amount']);
+    }
+
+    public function testWorkerPoolRejectsAMalformedJob(): void
+    {
+        $job = $this->dispatchJob(OrderCreatedJob::TYPE, []);
+
+        // A worker failure is answered as job_failed, which the manager turns
+        // into a failed attempt the queue can retry - not a silent success.
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Worker rejected job');
+
+        $this->workerManager()->execute($job);
+    }
+
+    private function workerManager(): WorkerManager
+    {
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+        $workers = $config['workers'];
+
+        return new WorkerManager(new WorkerPoolClient(
+            (string) $workers['socket'],
+            (float) $workers['task_timeout'],
+        ));
     }
 
     private static function orders(): OrderService

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Cli;
 
 use PhpJobQueue\Dispatcher\JobDispatcher;
+use PhpJobQueue\Job\Job;
 use PhpJobQueue\Metrics\MetricsCollector;
 use PhpJobQueue\Persistence\FileStorage;
 use PhpJobQueue\Producer\JobFactory;
@@ -35,13 +36,13 @@ use PhpSystemsPlatform\Application\Handlers\QueueStatusHandler;
 use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Http\Router;
-use PhpSystemsPlatform\Queue\JobExecutor;
 use PhpSystemsPlatform\Queue\QueueConsumer;
 use PhpSystemsPlatform\Queue\QueueJournal;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Migrator;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
 use PhpSystemsPlatform\Workers\ConcurrentTaskRunner;
+use PhpSystemsPlatform\Workers\WorkerManager;
 use PhpWorkerPool\IPC\ConnectionClosedException;
 use PhpWorkerPool\Protocol\Request as WorkerRequest;
 use PhpWorkerPool\Sdk\ConnectionFailedException;
@@ -777,17 +778,20 @@ final class PlatformCli
      * The long-running queue consumer: the second side of the queue phase.
      *
      * It restores the append-only journal into a queue (InMemoryQueue::
-     * restoreFromStorage()), replays every READY job it finds through the
-     * platform's JobExecutor workers, and keeps pulling jobs that arrive
-     * while it lives - the QueueConsumer loop re-reads the journal, so a
-     * job published by another process is picked up on the next pass. It
-     * answers to SIGTERM/SIGINT, which stop accepting, let busy workers
-     * finish within a grace period, and only then return here for the
-     * cleanup of whatever infrastructure this process started.
+     * restoreFromStorage()), and dispatches every READY job it finds to the
+     * php-worker-pool through Workers\WorkerManager - the Worker Manager of
+     * PLAN Step 10. The pool's forked workers are what actually run a job
+     * (its WorkerJobs handler), so worker lifecycle, dispatch, failure and
+     * shutdown all belong to the pool, not to this process. The QueueConsumer
+     * loop keeps the component's dispatch/answer/requeue machinery and
+     * re-reads the journal, so a job published by another process while the
+     * consumer lives is picked up on the next pass. SIGTERM/SIGINT stop it
+     * gracefully.
      *
-     * The workers run platform jobs against the real database and cache, so
-     * - like serve() - the consumer makes sure those servers answer before
-     * it starts and stops them again if it was the one that started them.
+     * Jobs run on real worker processes that need the database and cache, and
+     * the pool Master that owns them, so - like serve() - the consumer makes
+     * sure those servers answer before it starts and stops them again if it
+     * was the one that started them.
      */
     private function queueConsume(): int
     {
@@ -795,6 +799,7 @@ final class PlatformCli
         $queueConfig = $config['queue'];
         $databaseConfig = $config['database'];
         $cacheConfig = $config['cache'];
+        $workersConfig = $config['workers'];
 
         $dataDir = $queueConfig['data_dir'];
 
@@ -831,25 +836,42 @@ final class PlatformCli
 
         $ownsDatabaseServer = false;
         $ownsCacheServer = false;
+        $ownsWorkerPool = false;
 
         try {
             $ownsDatabaseServer = $this->ensureDatabaseServer($databaseConfig);
             Migrator::migrate($database);
             $ownsCacheServer = $this->ensureCacheServer($cacheConfig);
+            $ownsWorkerPool = $this->ensureWorkerPoolServer($workersConfig);
         } catch (RuntimeException $e) {
             fwrite(STDERR, $e->getMessage() . PHP_EOL);
             $database->close();
+            $this->stopWorkerPoolIfOwned($ownsWorkerPool);
             $this->stopCacheServerIfOwned($ownsCacheServer);
             $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
 
             return 1;
         }
 
+        // Each php-job-queue worker is now a forwarder: it takes a job from
+        // the dispatcher, hands it to the pool as a job.execute task through
+        // WorkerManager, and waits for the pool's verdict. The WorkerPoolClient
+        // is built lazily inside the handler so every forked forwarder gets
+        // its own connection to the Master instead of sharing the parent's.
         $metrics = new MetricsCollector();
-        $executor = new JobExecutor($databaseConfig, $cacheConfig);
+        $workerManager = null;
         $pool = new WorkerPool(
             size: (int) $queueConfig['consumers'],
-            handler: fn (\PhpJobQueue\Job\Job $job): mixed => $executor->__invoke($job),
+            handler: static function (Job $job) use (&$workerManager, $workersConfig): mixed {
+                $workerManager ??= new WorkerManager(new WorkerPoolClient(
+                    (string) $workersConfig['socket'],
+                    (float) $workersConfig['task_timeout'],
+                ));
+
+                $workerManager->execute($job);
+
+                return null;
+            },
             metrics: $metrics,
         );
         $dispatcher = new JobDispatcher(
@@ -857,7 +879,10 @@ final class PlatformCli
             workerPool: $pool,
             retryPolicy: new FixedDelayRetry((int) $queueConfig['retry_delay']),
             clock: $clock,
-            visibilityTimeout: (int) $queueConfig['timeout'],
+            // A job can legitimately be in flight at the pool for up to the
+            // pool's task timeout; visibility must span that whole round-trip
+            // or a slow job is requeued while a worker is still finishing it.
+            visibilityTimeout: (int) $workersConfig['task_timeout'],
             storage: new FileStorage($logPath),
             metrics: $metrics,
         );
@@ -871,11 +896,11 @@ final class PlatformCli
         );
 
         printf(
-            "Consumer started (workers=%d, max attempts=%d, retry delay=%ds, visibility=%ds). SIGTERM/SIGINT to stop.\n",
+            "Consumer started (forwarders=%d, max attempts=%d, retry delay=%ds, visibility=%ds). SIGTERM/SIGINT to stop.\n",
             $queueConfig['consumers'],
             $queueConfig['max_attempts'],
             (int) $queueConfig['retry_delay'],
-            (int) $queueConfig['timeout'],
+            (int) $workersConfig['task_timeout'],
         );
 
         $consumer->run();
@@ -891,6 +916,7 @@ final class PlatformCli
         );
 
         $database->close();
+        $this->stopWorkerPoolIfOwned($ownsWorkerPool);
         $this->stopCacheServerIfOwned($ownsCacheServer);
         $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
 

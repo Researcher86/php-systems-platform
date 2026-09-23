@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Queue;
 
 use PhpJobQueue\Job\Job as QueueJob;
+use PhpSystemsPlatform\Queue\Jobs\NoopJob;
 use PhpSystemsPlatform\Queue\Jobs\OrderCreatedJob;
 use RuntimeException;
 
@@ -26,6 +27,7 @@ final class JobRegistry
      */
     private const array HANDLERS = [
         OrderCreatedJob::TYPE => OrderCreatedJob::class,
+        NoopJob::TYPE => NoopJob::class,
     ];
 
     public function execute(QueueJob $carrier, JobContext $context): void

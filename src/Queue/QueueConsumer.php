@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Queue;
 
+use Closure;
 use PhpJobQueue\Dispatcher\JobDispatcher;
 use PhpJobQueue\Job\Job;
 use PhpJobQueue\Job\JobState;
@@ -68,13 +69,35 @@ final class QueueConsumer
     {
         $this->running = true;
 
-        $this->dispatcher->start();
         $this->installSignalHandlers();
+
+        try {
+            $this->runWhile(static fn (): bool => true);
+        } finally {
+            $this->restoreSignalHandlers();
+            $this->running = false;
+        }
+    }
+
+    /**
+     * Run the loop until $done stops returning true (or stop() is called) -
+     * the long-running shape for a benchmark, which decides on its own when
+     * the work is finished instead of waiting for a signal. The loop is the
+     * same as run()'s: re-sync the journal, tick, repeat; start() forks the
+     * workers (idempotent), and shutdown happens here on the way out.
+     *
+     * @param Closure(): bool $done returns true while the loop should keep going
+     */
+    public function runWhile(Closure $done): void
+    {
+        $this->running = true;
+
+        $this->dispatcher->start();
 
         $nextResync = $this->clock->now() + $this->resyncInterval;
 
         try {
-            while (!$this->stopping) {
+            while (!$this->stopping && $done()) {
                 if ($this->clock->now() >= $nextResync) {
                     $this->resync();
                     $nextResync = $this->clock->now() + $this->resyncInterval;
@@ -83,7 +106,6 @@ final class QueueConsumer
                 $this->tick();
             }
         } finally {
-            $this->restoreSignalHandlers();
             $this->running = false;
             $this->dispatcher->shutdown($this->shutdownGrace);
         }
@@ -111,9 +133,10 @@ final class QueueConsumer
 
     /**
      * One pass of the loop: the same shape as QueueRuntime::tick(), built
-     * only on the dispatcher's public surface.
+     * only on the dispatcher's public surface. Public because a benchmark
+     * drives the loop itself (see runWhile()).
      */
-    private function tick(): int
+    public function tick(): int
     {
         $dispatched = $this->dispatcher->dispatchPending();
 

@@ -300,6 +300,14 @@ Show the queue consumer's worker lifecycle (id / pid / state / current job /
 completed / failed / started_at), also exposed as `GET /workers`.
 
 ```bash
+php bin/platform.php benchmark 1000 4
+```
+
+Run a measured queue workload (jobs, workers): total time, throughput,
+average/p95 latency, queue depth, worker utilization. Comparing 4 vs 8
+workers shows the speedup is not linear.
+
+```bash
 php bin/platform.php status
 ```
 

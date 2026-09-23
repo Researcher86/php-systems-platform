@@ -43,6 +43,7 @@ use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Migrator;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
 use PhpSystemsPlatform\Workers\ConcurrentTaskRunner;
+use PhpSystemsPlatform\Workers\QueueBenchmark;
 use PhpSystemsPlatform\Workers\WorkerManager;
 use PhpSystemsPlatform\Workers\WorkerRegistry;
 use PhpWorkerPool\IPC\ConnectionClosedException;
@@ -73,7 +74,7 @@ final class PlatformCli
         'workers:status' => 'Show the queue consumer worker lifecycle.',
         'status' => 'Show the state of every platform component.',
         'demo' => 'Run the complete end-to-end platform story.',
-        'benchmark' => 'Run the platform benchmark suite.',
+        'benchmark' => 'Run the queue benchmark: benchmark <jobs> <workers>.',
         'memory:demo' => 'Demonstrate fork() and copy-on-write memory behavior.',
         'workers:memory' => 'Measure worker process memory (1, 2, 4, 8 workers).',
         'failure:demo' => 'Reproduce the failure scenarios end to end.',
@@ -142,6 +143,7 @@ final class PlatformCli
             'queue:consume' => $this->queueConsume(),
             'queue:status' => $this->queueStatus(),
             'workers:status' => $this->workersStatus(),
+            'benchmark' => $this->queueBenchmark(array_slice($argv, 2)),
 
             // Real handlers land with their implementation phase.
             default => $this->notImplemented($command),
@@ -930,6 +932,149 @@ final class PlatformCli
 
         $database->close();
         $this->stopWorkerPoolIfOwned($ownsWorkerPool);
+        $this->stopCacheServerIfOwned($ownsCacheServer);
+        $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
+
+        return 0;
+    }
+
+    /**
+     * The Step 12 workload: publish N READY jobs, run them through the real
+     * queue → consumer → worker-pool → job path with a fixed-size pool, and
+     * report total time, throughput, latencies and utilization. Run a few
+     * combinations side by side (100/4, 1000/4, 1000/8) to see that doubling
+     * the workers does not halve the time.
+     *
+     * @param list<string> $args
+     */
+    private function queueBenchmark(array $args): int
+    {
+        $jobs = isset($args[0]) ? (int) $args[0] : 100;
+        $workers = isset($args[1]) ? (int) $args[1] : 4;
+
+        if ($jobs < 1 || $jobs > 5000) {
+            fwrite(STDERR, "jobs must be between 1 and 5000.\n");
+
+            return 1;
+        }
+
+        if ($workers < 1 || $workers > 16) {
+            fwrite(STDERR, "workers must be between 1 and 16.\n");
+
+            return 1;
+        }
+
+        $config = $this->config();
+        $databaseConfig = $config['database'];
+        $cacheConfig = $config['cache'];
+
+        $database = Database::fromConfig(new ClientConfig(
+            host: $databaseConfig['host'],
+            port: $databaseConfig['port'],
+            connectTimeoutSeconds: $databaseConfig['timeout'],
+        ));
+
+        $ownsDatabaseServer = false;
+        $ownsCacheServer = false;
+
+        try {
+            $ownsDatabaseServer = $this->ensureDatabaseServer($databaseConfig);
+            Migrator::migrate($database);
+            $ownsCacheServer = $this->ensureCacheServer($cacheConfig);
+        } catch (RuntimeException $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            $database->close();
+            $this->stopCacheServerIfOwned($ownsCacheServer);
+            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
+
+            return 1;
+        }
+
+        // An isolated pool with exactly $workers processes on its own socket,
+        // so the benchmark controls the parallelism it is measuring.
+        $benchDir = sys_get_temp_dir() . '/php-systems-platform/bench-' . uniqid('', true);
+
+        if (!is_dir($benchDir) && !@mkdir($benchDir, 0o777, true) && !is_dir($benchDir)) {
+            fwrite(STDERR, sprintf('Could not create benchmark directory "%s".', $benchDir) . PHP_EOL);
+            $database->close();
+            $this->stopCacheServerIfOwned($ownsCacheServer);
+            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
+
+            return 1;
+        }
+
+        $logPath = $benchDir . '/queue.log';
+        $socketPath = '/tmp/php-bench-' . uniqid('', true) . '.sock';
+
+        $master = proc_open(
+            [PHP_BINARY, dirname(__DIR__, 2) . '/bin/worker.php'],
+            [
+                1 => ['file', $benchDir . '/worker.out', 'a'],
+                2 => ['file', $benchDir . '/worker.err', 'a'],
+            ],
+            $pipes,
+            null,
+            [
+                'WORKER_POOL_SOCKET' => $socketPath,
+                'WORKER_POOL_MIN' => (string) $workers,
+                'WORKER_POOL_MAX' => (string) $workers,
+                // A benchmark pushes thousands of jobs through a small pool;
+                // the default 5s task timeout would fail jobs queued behind a
+                // burst. Give the pool the full 30s the forwarders wait.
+                'WORKER_POOL_TIMEOUT' => '30',
+            ],
+        );
+
+        if (!is_resource($master)) {
+            fwrite(STDERR, "Could not start the benchmark worker pool.\n");
+            $database->close();
+            $this->stopCacheServerIfOwned($ownsCacheServer);
+            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
+
+            return 1;
+        }
+
+        $benchmark = new QueueBenchmark(
+            logPath: $logPath,
+            socketPath: $socketPath,
+            forwarders: $workers,
+        );
+
+        if (!$this->waitForSocket($socketPath)) {
+            proc_terminate($master);
+            proc_close($master);
+            fwrite(STDERR, sprintf('Benchmark pool did not start listening on "%s" in time.', $socketPath) . PHP_EOL);
+            $database->close();
+            $this->stopCacheServerIfOwned($ownsCacheServer);
+            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
+
+            return 1;
+        }
+
+        try {
+            $metrics = $benchmark->run($jobs, $workers);
+        } catch (RuntimeException $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            proc_terminate($master);
+            proc_close($master);
+            $database->close();
+            $this->stopCacheServerIfOwned($ownsCacheServer);
+            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
+
+            return 1;
+        }
+
+        printf("Queue benchmark: %d jobs, %d pool workers\n", $metrics['jobs'], $metrics['workers']);
+        printf("  total processing time  %.4fs\n", $metrics['wall_seconds']);
+        printf("  throughput             %.1f jobs/s\n", $metrics['throughput_per_sec']);
+        printf("  average latency        %.2f ms\n", $metrics['avg_latency_ms']);
+        printf("  p95 latency            %.2f ms\n", $metrics['p95_latency_ms']);
+        printf("  queue depth            %d\n", $metrics['queue_depth']);
+        printf("  worker utilization     %.1f%%\n", $metrics['worker_utilization'] * 100);
+
+        proc_terminate($master);
+        proc_close($master);
+        $database->close();
         $this->stopCacheServerIfOwned($ownsCacheServer);
         $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
 

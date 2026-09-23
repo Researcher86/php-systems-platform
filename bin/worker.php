@@ -28,6 +28,14 @@ require __DIR__ . '/../vendor/autoload.php';
 $config = require __DIR__ . '/../config/platform.php';
 $workers = $config['workers'];
 
+// The platform's own launch uses the config's socket and autoscaling bounds
+// (min 2, max 16); an environment override lets a benchmark run an isolated
+// pool with a fixed number of workers on its own socket.
+$socket = getenv('WORKER_POOL_SOCKET') ?: (string) $workers['socket'];
+$minWorkers = (int) (getenv('WORKER_POOL_MIN') ?: 2);
+$maxWorkers = (int) (getenv('WORKER_POOL_MAX') ?: 16);
+$requestTimeout = (float) (getenv('WORKER_POOL_TIMEOUT') ?: $workers['task_timeout']);
+
 $workerTasks = WorkerTasks::handler();
 $workerJobs = new WorkerJobs($config)->handler();
 
@@ -38,11 +46,11 @@ $handler = static function (Request $request) use ($workerJobs, $workerTasks): R
 };
 
 $master = new Master(
-    socketPath: $workers['socket'],
-    minWorkers: 2,
-    maxWorkers: 16,
+    socketPath: $socket,
+    minWorkers: $minWorkers,
+    maxWorkers: $maxWorkers,
     maxQueueSize: 10_000,
-    requestTimeoutSeconds: $workers['task_timeout'],
+    requestTimeoutSeconds: $requestTimeout,
     handler: $handler,
 );
 

@@ -544,6 +544,41 @@ final class ServeIntegrationTest extends TestCase
         }
     }
 
+    public function testQueueBenchmarkRunsTheFullPipelineAndReportsMetrics(): void
+    {
+        $out = self::LOG_DIR . '/bench.out';
+        $err = self::LOG_DIR . '/bench.err';
+        @unlink($out);
+        @unlink($err);
+
+        $process = proc_open(
+            [PHP_BINARY, dirname(__DIR__, 2) . '/bin/platform.php', 'benchmark', '20', '2'],
+            [
+                1 => ['file', $out, 'a'],
+                2 => ['file', $err, 'a'],
+            ],
+            $pipes,
+        );
+
+        self::assertIsResource($process);
+        $code = proc_close($process);
+
+        self::assertSame(0, $code, (string) file_get_contents($err));
+
+        $output = (string) file_get_contents($out);
+        self::assertStringContainsString('total processing time', $output);
+        self::assertStringContainsString('throughput', $output);
+        self::assertStringContainsString('average latency', $output);
+        self::assertStringContainsString('p95 latency', $output);
+        self::assertStringContainsString('worker utilization', $output);
+
+        preg_match('/total processing time\s+([\d.]+)s/', $output, $total);
+        self::assertGreaterThan(0.0, (float) $total[1]);
+
+        preg_match('/throughput\s+([\d.]+) jobs/', $output, $throughput);
+        self::assertGreaterThan(0.0, (float) $throughput[1]);
+    }
+
     private function workerManager(): WorkerManager
     {
         $config = require dirname(__DIR__, 2) . '/config/platform.php';

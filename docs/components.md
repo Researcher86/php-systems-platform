@@ -266,6 +266,15 @@ serve (HTTP) ──producer──► journal ◄──consumer──► WorkerPo
   replay the consumer restores from — and expose the metrics PLAN Step 9
   names: `queue.depth` (non-terminal jobs), `queue.published`, plus
   `queue.completed`, `queue.failed`, `queue.retried` (attempts > 1).
+- `benchmark <jobs> <workers>` (PLAN Step 12) runs a measured workload over
+  the real pipeline: it publishes `jobs` `bench.noop` jobs
+  (`Queue\Jobs\NoopJob` — deliberately database-free, so the measurement is
+  the queue/pool path, not the storage layer) into an isolated journal,
+  drives `Queue\QueueConsumer` against an isolated fixed-size pool, and
+  reports total time, throughput, average/p95 latency, queue depth and
+  worker utilization. Completion is credited by `WorkerRegistry` the moment
+  an answer lands. Running 100/4, 1000/4 and 1000/8 shows that doubling the
+  workers does not halve the time.
 
 ### Platform job model (Step 8, shipped)
 
@@ -410,6 +419,7 @@ chunks overlapped instead of stacking into ~200ms.
 | `Queue\Job`                    | platform interface; runs a `PhpJobQueue\Job\Job` via `JobContext` |
 | `Queue\JobContext`             | carrier + `OrderService` + `CacheService` for one execution |
 | `Queue\Jobs\OrderCreatedJob`   | executes an `order.created` carrier     |
+| `Queue\Jobs\NoopJob`           | `bench.noop` — the benchmark's database-free job |
 | `Queue\JobRegistry`            | maps a carrier type to the platform `Job` that runs it |
 | `Queue\JobExecutor`            | WorkerPool handler; builds per-worker services, runs registry |
 | `Queue\QueueConsumer`          | `JobDispatcher` loop + journal re-sync (cross-process handoff) |
@@ -418,6 +428,7 @@ chunks overlapped instead of stacking into ~200ms.
 | `Workers\WorkerManager`        | `WorkerPoolClient` job execution (`job.execute`) |
 | `Workers\WorkerJobs`           | pool-side `job.execute` handler → `Queue\JobExecutor` |
 | `Workers\WorkerRegistry`       | forwarder lifecycle (pid/state/counters) from php-job-queue `Worker` + journal |
+| `Workers\QueueBenchmark`       | measured queue → pool runs: publish, drive consumer, report metrics |
 | `Application\Handlers\WorkersStatusHandler` | `WorkerRegistry` snapshot over HTTP (`GET /workers`) |
 | `Workers\ConcurrentTaskRunner` | `WorkerPoolClient` fan-out (`send`/`allWithin`) |
 | `Workers\WorkerTasks`          | per-worker task handler (`ping`, `hash_chunk`) |

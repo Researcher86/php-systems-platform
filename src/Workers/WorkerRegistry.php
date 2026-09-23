@@ -43,13 +43,34 @@ final class WorkerRegistry
     private array $workers = [];
 
     /**
-     * workerId => job id it was last seen busy on, awaiting a terminal state.
+     * job id => worker id carrying it, awaiting a terminal state. Keyed by
+     * the JOB, not the worker: a worker moves on to the next delivery while
+     * an earlier one waits for the journal to show its terminal state, and
+     * keying by worker would drop that earlier job (it would be overwritten
+     * by the next delivery).
      *
-     * @var array<int, string>
+     * @var array<string, int>
      */
     private array $inFlight = [];
 
+    /** @var array<string, float> job id => wall time it was credited COMPLETED */
+    private array $resolvedAt = [];
+
+    private int $resolvedCount = 0;
+
+    private const float JOURNAL_REFRESH_SECONDS = 0.05;
+
+    /** @var array<string, array<string, mixed>>|null */
+    private ?array $rowsCache = null;
+
+    private float $rowsCacheAt = 0.0;
+
     private float $nextSnapshotAt = 0.0;
+
+    /** Time-weighted sum of busy workers: Σ (busy count × seconds between samples). */
+    private float $busySeconds = 0.0;
+
+    private float $lastSampleAt = 0.0;
 
     public function __construct(
         private WorkerPool $pool,
@@ -65,6 +86,16 @@ final class WorkerRegistry
      */
     public function capture(): void
     {
+        $now = $this->clock->now();
+
+        // Utilization sampling: weight the number of busy workers by the time
+        // since the previous sample, so busySeconds() is Σ(busy × Δt).
+        if ($this->lastSampleAt > 0.0) {
+            $this->busySeconds += ($now - $this->lastSampleAt) * $this->busyCount();
+        }
+
+        $this->lastSampleAt = $now;
+
         foreach ($this->pool->getWorkers() as $worker) {
             $this->observe($worker);
 
@@ -75,7 +106,7 @@ final class WorkerRegistry
             $job = $worker->getCurrentJob();
 
             if ($job !== null) {
-                $this->inFlight[$worker->getId()] = $job->getId()->toString();
+                $this->inFlight[$job->getId()->toString()] = $worker->getId();
             }
         }
     }
@@ -91,8 +122,13 @@ final class WorkerRegistry
             $this->observe($worker);
         }
 
-        foreach ($this->inFlight as $workerId => $jobId) {
-            $row = $this->journal->rows()[$jobId] ?? null;
+        // The journal is replayed for attribution on a short interval, not
+        // every tick: a benchmark with thousands of jobs would otherwise
+        // decode the whole log on every fast pass.
+        $rows = $this->rows();
+
+        foreach ($this->inFlight as $jobId => $workerId) {
+            $row = $rows[$jobId] ?? null;
 
             if ($row === null) {
                 continue;
@@ -101,11 +137,14 @@ final class WorkerRegistry
             switch (JobState::fromName((string) $row['state'])) {
                 case JobState::COMPLETED:
                     $this->workers[$workerId]['tasks_completed']++;
-                    unset($this->inFlight[$workerId]);
+                    $this->resolvedAt[$jobId] = $this->clock->now();
+                    $this->resolvedCount++;
+                    unset($this->inFlight[$jobId]);
                     break;
                 case JobState::FAILED:
                     $this->workers[$workerId]['tasks_failed']++;
-                    unset($this->inFlight[$workerId]);
+                    $this->resolvedCount++;
+                    unset($this->inFlight[$jobId]);
                     break;
                 default:
                     // READY/PROCESSING/DELAYED - the job is still someone's
@@ -129,6 +168,66 @@ final class WorkerRegistry
         }
 
         return $snapshot;
+    }
+
+    /**
+     * Time-weighted busy time, for worker utilization: Σ(busy workers × Δt).
+     */
+    public function busySeconds(): float
+    {
+        return $this->busySeconds;
+    }
+
+    /**
+     * The wall time a job was credited COMPLETED, or null if it has not been
+     * resolved yet - how a benchmark measures per-job latency without polling
+     * the journal (the registry credits it the moment the answer lands).
+     */
+    public function resolvedAt(string $jobId): ?float
+    {
+        return $this->resolvedAt[$jobId] ?? null;
+    }
+
+    /**
+     * How many jobs have reached a terminal state (completed or failed) - a
+     * benchmark's "everything is processed" signal.
+     */
+    public function resolvedCount(): int
+    {
+        return $this->resolvedCount;
+    }
+
+    /**
+     * How many workers are holding a job right now.
+     */
+    private function busyCount(): int
+    {
+        $busy = 0;
+
+        foreach ($this->pool->getWorkers() as $worker) {
+            if ($worker->isWorking()) {
+                $busy++;
+            }
+        }
+
+        return $busy;
+    }
+
+    /**
+     * The journal replay, cached for JOURNAL_REFRESH_SECONDS.
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    private function rows(): array
+    {
+        $now = $this->clock->now();
+
+        if ($this->rowsCache === null || $now - $this->rowsCacheAt >= self::JOURNAL_REFRESH_SECONDS) {
+            $this->rowsCache = $this->journal->rows();
+            $this->rowsCacheAt = $now;
+        }
+
+        return $this->rowsCache;
     }
 
     /**

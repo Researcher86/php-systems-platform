@@ -1866,8 +1866,8 @@ README should contain one high-level diagram:
               └──┬────┬───┬─┘
                  │    │   │
           ┌──────┘    │   └────────┐
-          ▼            ▼            ▼
-       Cache        Database      Queue
+          ▼           ▼            ▼
+        Cache      Database      Queue
                                    │
                                    ▼
                               Worker Pool
@@ -2437,23 +2437,23 @@ The completed `php-systems-platform` should make it possible to demonstrate the 
                              │
                              ▼
                     ┌────────────────┐
-                    │ HTTP Server     │
+                    │  HTTP Server   │
                     └───────┬────────┘
                             │
                             ▼
                     ┌────────────────┐
-                    │ Application    │
+                    │  Application   │
                     └───┬────┬────┬──┘
                         │    │    │
               ┌─────────┘    │    └──────────┐
               ▼              ▼               ▼
            Cache          Database          Queue
-              │                              │
-              │                              ▼
-              │                        Worker Pool
-              │                         │ │ │ │
-              │                         ▼ ▼ ▼ ▼
-              │                        Jobs
+              │                               │
+              │                               ▼
+              │                           Worker Pool
+              │                            │ │ │ │
+              │                            ▼ ▼ ▼ ▼
+              │                             Jobs
               │
               └──────────────┐
                              ▼

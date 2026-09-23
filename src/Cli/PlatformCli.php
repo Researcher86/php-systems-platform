@@ -247,9 +247,9 @@ final class PlatformCli
 
         $router = new Router();
         $router->get('/health', (new HealthHandler())(...));
-        $router->post('/orders', (new OrderCreateHandler($orders))(...));
+        $router->post('/orders', (new OrderCreateHandler($orders, $cache))(...));
         $router->get('/orders/{id}', (new OrderReadHandler($orders, $cache))(...));
-        $router->put('/orders/{id}', (new OrderUpdateHandler($orders))(...));
+        $router->put('/orders/{id}', (new OrderUpdateHandler($orders, $cache))(...));
 
         return new Application($router);
     }

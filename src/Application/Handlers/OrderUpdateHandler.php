@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Application\Handlers;
 
+use PhpMiniCache\Sdk\CacheClientException;
+use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Domain\OrderStatus;
 use PhpSystemsPlatform\Http\Request;
@@ -13,11 +15,18 @@ use PhpSystemsPlatform\Http\Response;
  * PUT /orders/{id} - the synchronous update path: move an order to a new
  * status ("processing", "completed", "cancelled"). Invalid statuses are a
  * 400, missing orders a 404.
+ *
+ * Cache consistency: invalidate-on-write. The row changed, so the cached copy
+ * (if any) is stale and is deleted (cache.delete); the next read misses,
+ * re-reads the authoritative row, and refills. The database stays the source
+ * of truth; the cache is only ever derived state. If the cache cannot answer,
+ * the write proceeds as a bypass, never a failure.
  */
 final readonly class OrderUpdateHandler
 {
     public function __construct(
         private OrderService $orders,
+        private CacheService $cache,
     ) {
     }
 
@@ -42,6 +51,12 @@ final readonly class OrderUpdateHandler
 
         if ($order === null) {
             return Response::json(['error' => 'Order not found.'], 404);
+        }
+
+        try {
+            $this->cache->deleteOrder($order->id);
+        } catch (CacheClientException) {
+            $this->cache->counters()->bypasses++;
         }
 
         return Response::json($order);

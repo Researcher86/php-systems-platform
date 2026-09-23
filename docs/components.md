@@ -147,9 +147,20 @@ and never touches the repository, a miss reads the authoritative row, refills
 the cache (TTL 60s), and answers (`X-Cache: hit|miss` on every response). A
 cache that cannot answer is a bypass, not a failure: the request is still
 served from the database. `Cache\CacheCounters` records `hits`, `misses`,
-`sets`, `deletes` and `bypasses` next to the read path. A write does not yet
-invalidate the entry — that is the invalidation phase; until then an entry is
-stale until its TTL.
+`sets`, `deletes` and `bypasses` next to the read path.
+
+The consistency contract on writes (no distributed protocol — the trade-off
+is made explicit instead):
+
+- `POST /orders` is **populate-on-write** (`CacheService::setOrder`, `cache.set`):
+  a fresh UUID can never collide with an existing entry, so nothing is stale —
+  the authoritative row is written through and the very first read is a hit.
+- `PUT /orders/{id}` is **invalidate-on-write** (`CacheService::deleteOrder`,
+  `cache.delete`): the row changed, so any cached copy is stale and is removed;
+  the next read misses, re-reads the authoritative row, and refills. Before
+  this phase the stale entry would have been served until its TTL.
+- Both are best-effort: a cache that cannot answer on the write path counts a
+  bypass and the write still succeeds.
 
 ```php
 use PhpMiniCache\Sdk\CacheClient;

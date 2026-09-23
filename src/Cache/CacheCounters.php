@@ -21,24 +21,4 @@ final class CacheCounters
         public int $bypasses = 0,
     ) {
     }
-
-    /**
-     * @return array{
-     *     hits: int,
-     *     misses: int,
-     *     sets: int,
-     *     deletes: int,
-     *     bypasses: int,
-     * }
-     */
-    public function snapshot(): array
-    {
-        return [
-            'hits' => $this->hits,
-            'misses' => $this->misses,
-            'sets' => $this->sets,
-            'deletes' => $this->deletes,
-            'bypasses' => $this->bypasses,
-        ];
-    }
 }

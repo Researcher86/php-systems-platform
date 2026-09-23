@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Application\Handlers;
 
 use InvalidArgumentException;
+use PhpMiniCache\Sdk\CacheClientException;
+use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Http\Request;
 use PhpSystemsPlatform\Http\Response;
@@ -15,11 +17,17 @@ use PhpSystemsPlatform\Http\Response;
  * and its Location. A bad payload is a 400; everything below the domain layer
  * (a dead database, for example) is left for the Application boundary to turn
  * into a 500.
+ *
+ * Cache consistency: populate-on-write. A fresh UUID can never collide with an
+ * existing entry, so nothing is ever stale here - the authoritative row is
+ * placed into the cache (cache.set) and the very first read is served by it.
+ * If the cache cannot answer, the write proceeds as a bypass, never a failure.
  */
 final readonly class OrderCreateHandler
 {
     public function __construct(
         private OrderService $orders,
+        private CacheService $cache,
     ) {
     }
 
@@ -45,6 +53,12 @@ final readonly class OrderCreateHandler
             $order = $this->orders->createOrder($customer, $amount);
         } catch (InvalidArgumentException $e) {
             return Response::json(['error' => $e->getMessage()], 400);
+        }
+
+        try {
+            $this->cache->setOrder($order);
+        } catch (CacheClientException) {
+            $this->cache->counters()->bypasses++;
         }
 
         return Response::json($order, 201, ['Location' => '/orders/' . $order->id]);

@@ -421,16 +421,24 @@ final class ServeIntegrationTest extends TestCase
     {
         $order = $this->postOrder('Alan Turing', 99.0);
 
-        $started = microtime(true);
+        $sequentialStarted = microtime(true);
+        new SequentialOrderLoader(self::orders(), new CatalogRepository(self::$database), 100)
+            ->load($order['id']);
+        $sequentialSeconds = microtime(true) - $sequentialStarted;
+
+        $forkedStarted = microtime(true);
         $snapshot = self::forkedLoader(100)->load($order['id']);
-        $seconds = microtime(true) - $started;
+        $forkedSeconds = microtime(true) - $forkedStarted;
 
         self::assertNotNull($snapshot);
         self::assertSame('bronze', $snapshot->customer?->tier);
 
         // Three 100ms waits that happened at the same time, not one after
-        // another - forking is what made them overlap.
-        self::assertLessThan(0.3, $seconds);
+        // another - forking is what made them overlap. Measured against the
+        // sequential loader in the same environment rather than a fixed
+        // budget, so a slow machine cannot turn the claim into a flake.
+        self::assertGreaterThan(0.3, $sequentialSeconds);
+        self::assertLessThan($sequentialSeconds, $forkedSeconds);
 
         // Nothing exited is left unreaped: every child was waited for.
         self::assertLessThanOrEqual(0, pcntl_waitpid(-1, $status, WNOHANG));

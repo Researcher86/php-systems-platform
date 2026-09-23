@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # The integration tests start the real stack - database server, cache
+    # server, worker pool Master, HTTP server - as child processes. A run
+    # that hangs on one of them must fail rather than sit on the runner.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5'
+          # Every extension composer.json requires: without them
+          # `composer install` refuses the platform outright. They are the
+          # union of what the integrated components need - pcntl/posix for
+          # forking and process control, sockets and the System V trio for
+          # IPC, shmop for the pool's shared-memory telemetry, ffi for the
+          # database component's platform config.
+          extensions: ffi, pcntl, posix, shmop, sockets, sysvmsg, sysvsem, sysvshm
+          coverage: none
+
+      - run: composer install --no-interaction --no-progress
+        env:
+          # The five Systems Lab components are VCS dependencies fetched from
+          # GitHub. Anonymous API requests share the runner's rate limit, so
+          # the workflow's own token is handed to Composer - no secret to
+          # configure, it is issued per run.
+          COMPOSER_AUTH: '{"github-oauth":{"github.com":"${{ secrets.GITHUB_TOKEN }}"}}'
+
+      - run: composer test
+
+      - run: composer analyse
+
+      - run: composer format:check

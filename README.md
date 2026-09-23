@@ -860,6 +860,20 @@ composer test
 
 The exact test commands may evolve with the implementation.
 
+Every push and pull request runs the same three commands on GitHub Actions
+(`.github/workflows/ci.yml`), on PHP 8.5 with the extensions the integrated
+components need:
+
+```bash
+composer test          # unit + integration against the real stack
+composer analyse       # PHPStan
+composer format:check  # PHP CS Fixer, no changes allowed
+```
+
+The integration tests start the real database, cache, worker pool and HTTP
+server as child processes, so CI exercises the same process model a local
+run does - no mocks standing in for a component.
+
 ---
 
 # Documentation

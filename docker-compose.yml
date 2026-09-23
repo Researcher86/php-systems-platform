@@ -1,0 +1,9 @@
+services:
+  php:
+    build: .
+    container_name: php-systems-platform
+    working_dir: /app
+    volumes:
+      - .:/app
+    stdin_open: true
+    tty: true

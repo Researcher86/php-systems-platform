@@ -1,0 +1,69 @@
+{
+    "name": "tanat/php-systems-platform",
+    "type": "project",
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "PhpSystemsPlatform\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "PhpSystemsPlatform\\Tests\\": "tests/"
+        }
+    },
+    "repositories": [
+        {
+            "type": "vcs",
+            "url": "https://github.com/Researcher86/php-mini-http-server.git"
+        },
+        {
+            "type": "vcs",
+            "url": "https://github.com/Researcher86/php-mini-database.git"
+        },
+        {
+            "type": "vcs",
+            "url": "https://github.com/Researcher86/php-mini-cache.git"
+        },
+        {
+            "type": "vcs",
+            "url": "https://github.com/Researcher86/php-job-queue.git"
+        },
+        {
+            "type": "vcs",
+            "url": "https://github.com/Researcher86/php-worker-pool.git"
+        }
+    ],
+    "require": {
+        "php": "^8.5",
+        "ext-ffi": "*",
+        "ext-pcntl": "*",
+        "ext-posix": "*",
+        "ext-shmop": "*",
+        "ext-sockets": "*",
+        "ext-sysvmsg": "*",
+        "ext-sysvsem": "*",
+        "ext-sysvshm": "*",
+        "tanat/php-job-queue": "dev-master",
+        "tanat/php-mini-cache": "dev-master",
+        "tanat/php-mini-database": "dev-master",
+        "tanat/php-mini-http-server": "dev-master",
+        "tanat/php-worker-pool": "dev-master"
+    },
+    "require-dev": {
+        "friendsofphp/php-cs-fixer": "^3.0",
+        "phpstan/phpstan": "^2.2",
+        "phpunit/phpunit": "^11.5"
+    },
+    "scripts": {
+        "test": "phpunit",
+        "analyse": "phpstan analyse --memory-limit=1G",
+        "format": "php-cs-fixer fix --diff",
+        "format:check": "php-cs-fixer fix --diff --dry-run"
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}

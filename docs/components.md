@@ -15,7 +15,7 @@ platform only ever calls the entry points listed here.
 | ----------------------------- | --------------------------------- | ------------------- |
 | php-mini-http-server          | HTTP server, port 8080            | `127.0.0.1:8080`    |
 | php-mini-database             | `bin/minidb start` (platform entry) | `127.0.0.1:5433`   |
-| php-mini-cache                | `bin/server.php` (`CACHE_PORT`)   | `127.0.0.1:6380`    |
+| php-mini-cache                | `bin/cache` (platform entry)      | `127.0.0.1:6380`    |
 | php-job-queue                 | none (in-process)                 | -                   |
 | php-worker-pool               | `Master` Unix socket              | `/tmp/php-worker-pool.sock` |
 
@@ -120,6 +120,36 @@ Placeholders in `query()` are positional (`$parameters` is `list<mixed>`).
 ## php-mini-cache
 
 Namespace `PhpMiniCache`. Client side only (RESP over TCP).
+
+The component's own `bin/server.php` has the same `require
+__DIR__.'/../vendor/autoload.php'` flaw as the database's — it only resolves
+while the component *is* the root project. The platform runs the server
+through its own one-file entry `bin/cache`, which boots the platform
+autoloader and runs `PhpMiniCache\Server\CacheServer` with the component's
+own environment contract (`CACHE_HOST`, `CACHE_PORT`, plus a `CACHE_SNAPSHOT`
+path that enables persistence).
+
+The cache component has **no daemon mode**: its server is a foreground
+process. `PlatformCli::serve()` therefore owns the cache as a direct child —
+it spawns `bin/cache` with stdout/stderr redirected into the cache data
+directory, waits for the TCP port to answer, and SIGTERMs it on shutdown only
+if this `serve` started it (an already-answering server is reused and left up,
+probed with a short-timeout `CacheClient::ping()`). SIGTERM is the cache's
+graceful shutdown: it stops accepting, drains, writes a final snapshot, and
+exits. The snapshot is loaded on boot and rewritten periodically, so a
+planned restart keeps the entries written since the last snapshot — same
+durability story as the database.
+
+The read path is **cache-first since the cache phase, with the database as
+the source of truth and the cache as derived state**: `OrderReadHandler`
+looks up `order:{id}` first — a hit answers with the cached representation
+and never touches the repository, a miss reads the authoritative row, refills
+the cache (TTL 60s), and answers (`X-Cache: hit|miss` on every response). A
+cache that cannot answer is a bypass, not a failure: the request is still
+served from the database. `Cache\CacheCounters` records `hits`, `misses`,
+`sets`, `deletes` and `bypasses` next to the read path. A write does not yet
+invalidate the entry — that is the invalidation phase; until then an entry is
+stale until its TTL.
 
 ```php
 use PhpMiniCache\Sdk\CacheClient;

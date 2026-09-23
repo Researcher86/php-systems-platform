@@ -47,7 +47,7 @@ final readonly class OrderCreateHandler
             return Response::json(['error' => $e->getMessage()], 400);
         }
 
-        return Response::json($order->toArray(), 201, ['Location' => '/orders/' . $order->id]);
+        return Response::json($order, 201, ['Location' => '/orders/' . $order->id]);
     }
 
     /**

@@ -44,6 +44,6 @@ final readonly class OrderUpdateHandler
             return Response::json(['error' => 'Order not found.'], 404);
         }
 
-        return Response::json($order->toArray());
+        return Response::json($order);
     }
 }

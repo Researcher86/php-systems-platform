@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Cli;
 
+use PhpMiniCache\Sdk\CacheClient;
+use PhpMiniCache\Sdk\CacheClientException;
 use PhpMiniDatabase\Client\ClientConfig;
 use PhpMiniHttpServer\EventLoop\SelectLoop;
 use PhpMiniHttpServer\Http\Protocol\HttpParser;
@@ -19,6 +21,7 @@ use PhpSystemsPlatform\Application\Handlers\HealthHandler;
 use PhpSystemsPlatform\Application\Handlers\OrderCreateHandler;
 use PhpSystemsPlatform\Application\Handlers\OrderReadHandler;
 use PhpSystemsPlatform\Application\Handlers\OrderUpdateHandler;
+use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Http\Router;
 use PhpSystemsPlatform\Storage\Database;
@@ -52,6 +55,15 @@ final class PlatformCli
         'workers:memory' => 'Measure worker process memory (1, 2, 4, 8 workers).',
         'failure:demo' => 'Reproduce the failure scenarios end to end.',
     ];
+
+    /**
+     * The cache server this serve spawned, when it spawned one. The database
+     * server is tracked by pid file; the cache has no daemon mode, so its
+     * process is owned directly and must not outlive the HTTP process.
+     *
+     * @var resource|null
+     */
+    private mixed $cacheProcess = null;
 
     /**
      * @param list<string> $argv
@@ -129,6 +141,22 @@ final class PlatformCli
             return 1;
         }
 
+        $cacheConfig = $config['cache'];
+
+        $cache = CacheService::fromConfig($cacheConfig);
+
+        $ownsCacheServer = false;
+
+        try {
+            $ownsCacheServer = $this->ensureCacheServer($cacheConfig);
+        } catch (RuntimeException $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            $database->close();
+            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
+
+            return 1;
+        }
+
         $http = $config['http'];
 
         $serverConfig = new ServerConfig(
@@ -147,6 +175,8 @@ final class PlatformCli
         } catch (ServerStartException $e) {
             fwrite(STDERR, $e->getMessage() . PHP_EOL);
             $database->close();
+            $cache->close();
+            $this->stopCacheServerIfOwned($ownsCacheServer);
             $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
 
             return 1;
@@ -158,7 +188,7 @@ final class PlatformCli
         $metrics = new ServerMetrics();
         $loop = new SelectLoop();
 
-        $application = $this->application($database);
+        $application = $this->application($database, $cache);
 
         $loop->onReadable($server->socket(), static function () use ($loop, $server, $parser, $encoder, $application, $metrics, $logger): void {
             $connection = $server->accept();
@@ -197,6 +227,8 @@ final class PlatformCli
 
         $server->stop();
         $database->close();
+        $cache->close();
+        $this->stopCacheServerIfOwned($ownsCacheServer);
         $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
         printf("Shutdown complete.\n");
 
@@ -205,17 +237,18 @@ final class PlatformCli
 
     /**
      * The platform's routes, in their Application. Serves as the wiring note
-     * for the platform as well: the health endpoint landed in Phase 3 and the
-     * order endpoints land in Phase 4 on top of the injected Database.
+     * for the platform as well: the health endpoint landed in Phase 3, the
+     * order endpoints in Phase 4 on top of the injected Database, and the
+     * cache-first read path in Phase 5 on top of the injected CacheService.
      */
-    private function application(Database $database): Application
+    private function application(Database $database, CacheService $cache): Application
     {
         $orders = new OrderService(new OrderRepository($database));
 
         $router = new Router();
         $router->get('/health', (new HealthHandler())(...));
         $router->post('/orders', (new OrderCreateHandler($orders))(...));
-        $router->get('/orders/{id}', (new OrderReadHandler($orders))(...));
+        $router->get('/orders/{id}', (new OrderReadHandler($orders, $cache))(...));
         $router->put('/orders/{id}', (new OrderUpdateHandler($orders))(...));
 
         return new Application($router);
@@ -325,6 +358,112 @@ final class PlatformCli
     private function databaseServerBinary(): string
     {
         return dirname(__DIR__, 2) . '/bin/minidb';
+    }
+
+    private function cacheServerBinary(): string
+    {
+        return dirname(__DIR__, 2) . '/bin/cache';
+    }
+
+    /**
+     * Make sure a mini cache server answers on the configured host/port for
+     * the duration of this serve, and return whether this process is the one
+     * that started it (and therefore the one that must stop it). A server
+     * that was already running is reused and stays up afterwards.
+     *
+     * The cache component has no daemon mode - its bin is a foreground
+     * server - so unlike the database this process owns the cache as a
+     * child: it spawns it with stdout/stderr redirected into the data
+     * directory, keeps the process handle in $cacheProcess, and terminates
+     * it on shutdown. The host/port/snapshot reach the child as environment
+     * variables, the same contract the component's own bin/server.php uses.
+     *
+     * @param array<string, mixed> $config
+     */
+    private function ensureCacheServer(array $config): bool
+    {
+        if ($this->cacheServerAnswers($config)) {
+            printf("Cache server already running on tcp://%s:%d\n", $config['host'], $config['port']);
+
+            return false;
+        }
+
+        $dataDir = $config['data_dir'];
+
+        if (!is_dir($dataDir) && !@mkdir($dataDir, 0o777, true) && !is_dir($dataDir)) {
+            throw new RuntimeException(sprintf('Could not create cache data directory "%s".', $dataDir));
+        }
+
+        $process = proc_open(
+            [PHP_BINARY, $this->cacheServerBinary()],
+            [
+                1 => ['file', $dataDir . '/cache.out', 'a'],
+                2 => ['file', $dataDir . '/cache.err', 'a'],
+            ],
+            $pipes,
+            null,
+            [
+                'CACHE_HOST' => $config['host'],
+                'CACHE_PORT' => (string) $config['port'],
+                'CACHE_SNAPSHOT' => $dataDir . '/cache.snapshot',
+            ],
+        );
+
+        if (!is_resource($process)) {
+            throw new RuntimeException('Could not start the cache server process.');
+        }
+
+        $this->cacheProcess = $process;
+
+        if (!$this->waitForPort($config['host'], (int) $config['port'])) {
+            $this->stopCacheServerIfOwned(true);
+
+            throw new RuntimeException(sprintf(
+                'Cache server did not start listening on tcp://%s:%d in time.',
+                $config['host'],
+                $config['port'],
+            ));
+        }
+
+        printf("Cache server listening on tcp://%s:%d\n", $config['host'], $config['port']);
+
+        return true;
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     */
+    private function cacheServerAnswers(array $config): bool
+    {
+        $client = new CacheClient(host: $config['host'], port: $config['port'], timeoutSeconds: 0.5);
+
+        try {
+            $client->ping();
+            $client->close();
+
+            return true;
+        } catch (CacheClientException) {
+            return false;
+        }
+    }
+
+    /**
+     * Stop the cache server this serve started, if it started one: SIGTERM
+     * is the cache's graceful shutdown (final snapshot included), so the
+     * child is left to drain and exit before the handle is released.
+     */
+    private function stopCacheServerIfOwned(bool $owns): void
+    {
+        if (!$owns || !is_resource($this->cacheProcess)) {
+            return;
+        }
+
+        $process = $this->cacheProcess;
+        $this->cacheProcess = null;
+
+        proc_terminate($process);
+        proc_close($process);
+        printf("Cache server stopped\n");
     }
 
     private function waitForPort(string $host, int $port, float $timeoutSeconds = 10.0): bool

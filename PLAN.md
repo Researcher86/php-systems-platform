@@ -2344,9 +2344,9 @@ Phase 5 is complete when all of the following are true.
 
 ## Cache
 
-* [ ] Cache hit works.
-* [ ] Cache miss works.
-* [ ] Database fallback works.
+* [x] Cache hit works.
+* [x] Cache miss works.
+* [x] Database fallback works.
 * [ ] Invalidation works.
 
 ## Queue

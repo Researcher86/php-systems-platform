@@ -2352,10 +2352,10 @@ Phase 5 is complete when all of the following are true.
 ## Queue
 
 * [x] Jobs can be published.
-* [ ] Jobs can be consumed.
-* [ ] Queue depth is observable.
-* [ ] Failed jobs are handled.
-* [ ] Retry policy works.
+* [x] Jobs can be consumed.
+* [x] Queue depth is observable.
+* [x] Failed jobs are handled.
+* [x] Retry policy works.
 * [ ] Idempotency is demonstrated.
 
 ## Worker pool

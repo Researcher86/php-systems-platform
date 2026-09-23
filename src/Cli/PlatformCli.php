@@ -4,12 +4,15 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Cli;
 
+use PhpJobQueue\Dispatcher\JobDispatcher;
 use PhpJobQueue\Metrics\MetricsCollector;
 use PhpJobQueue\Persistence\FileStorage;
 use PhpJobQueue\Producer\JobFactory;
 use PhpJobQueue\Producer\Producer;
 use PhpJobQueue\Queue\InMemoryQueue;
+use PhpJobQueue\Retry\FixedDelayRetry;
 use PhpJobQueue\Support\SystemClock;
+use PhpJobQueue\Worker\WorkerPool;
 use PhpMiniCache\Sdk\CacheClient;
 use PhpMiniCache\Sdk\CacheClientException;
 use PhpMiniDatabase\Client\ClientConfig;
@@ -28,9 +31,13 @@ use PhpSystemsPlatform\Application\Handlers\OrderCreateHandler;
 use PhpSystemsPlatform\Application\Handlers\OrderReadHandler;
 use PhpSystemsPlatform\Application\Handlers\OrderUpdateHandler;
 use PhpSystemsPlatform\Application\Handlers\ParallelHandler;
+use PhpSystemsPlatform\Application\Handlers\QueueStatusHandler;
 use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Http\Router;
+use PhpSystemsPlatform\Queue\JobExecutor;
+use PhpSystemsPlatform\Queue\QueueConsumer;
+use PhpSystemsPlatform\Queue\QueueJournal;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Migrator;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
@@ -100,7 +107,7 @@ final class PlatformCli
             return 1;
         }
 
-        return $this->dispatch($command);
+        return $this->dispatch($command, $argv);
     }
 
     private function printHelp(): int
@@ -120,10 +127,17 @@ final class PlatformCli
         return 0;
     }
 
-    private function dispatch(string $command): int
+    /**
+     * @param list<string> $argv
+     */
+    private function dispatch(string $command, array $argv): int
     {
         return match ($command) {
             'serve' => $this->serve(),
+            'queue:publish' => $this->queuePublish(array_slice($argv, 2)),
+            'queue:consume' => $this->queueConsume(),
+            'queue:status' => $this->queueStatus(),
+
             // Real handlers land with their implementation phase.
             default => $this->notImplemented($command),
         };
@@ -241,7 +255,7 @@ final class PlatformCli
         $metrics = new ServerMetrics();
         $loop = new SelectLoop();
 
-        $application = $this->application($database, $cache, $producer, $runner);
+        $application = $this->application($database, $cache, $producer, $runner, $config['queue']['data_dir'] . '/queue.log');
 
         $loop->onReadable($server->socket(), static function () use ($loop, $server, $parser, $encoder, $application, $metrics, $logger): void {
             $connection = $server->accept();
@@ -300,8 +314,10 @@ final class PlatformCli
      * a CPU task split into chunks and run side by side on the pool in
      * parallel, exposed as GET /parallel (again null-tolerant - without a
      * pool the handler answers "not configured" instead of crashing serve).
+     * The queue phase adds GET /queue/status, the journal-derived counters
+     * the queue:status CLI prints, on top of the queue's data dir.
      */
-    private function application(Database $database, CacheService $cache, ?Producer $producer = null, ?ConcurrentTaskRunner $runner = null): Application
+    private function application(Database $database, CacheService $cache, ?Producer $producer = null, ?ConcurrentTaskRunner $runner = null, string $queueLogPath = ''): Application
     {
         $orders = new OrderService(new OrderRepository($database), $producer);
 
@@ -311,6 +327,7 @@ final class PlatformCli
         $router->get('/orders/{id}', (new OrderReadHandler($orders, $cache))(...));
         $router->put('/orders/{id}', (new OrderUpdateHandler($orders, $cache))(...));
         $router->get('/parallel', (new ParallelHandler($runner))(...));
+        $router->get('/queue/status', (new QueueStatusHandler($queueLogPath))(...));
 
         return new Application($router);
     }
@@ -318,11 +335,11 @@ final class PlatformCli
     /**
      * Build the platform's producer: an in-memory queue that journals every
      * push into the queue's append-only log, fronted by the component's
-     * Producer. In this phase the queue lives for the duration of serve and
-     * the log is its observable artifact - the next step (queue:consume)
-     * restores the journal into its own process, which is where the
-     * at-least-once replay that this phase's last-attempt semantics rely on
-     * happens.
+     * Producer. Within one process the queue lives in memory; across
+     * processes the log is the source of truth - queue:consume restores it
+     * with InMemoryQueue::restoreFromStorage() and replays READY jobs, which
+     * is where the at-least-once replay that this producer's last-attempt
+     * semantics rely on happens.
      *
      * @param array<string, mixed> $config
      */
@@ -364,8 +381,15 @@ final class PlatformCli
         $output = '';
         $hadServer = $this->runServerCli([$script, 'status', '--pid-file', $pidFile], $output) === 0;
 
-        if ($hadServer) {
-            printf("Database server already running (pid %s)\n", trim($output));
+        // The pid file is the authoritative "who owns it" answer, but a
+        // server can be up without a reliable pid file (a stale one from a
+        // crashed process, or another platform process that started it).
+        // The port is the ground truth for "a server is running": only when
+        // neither signal says so may we start one and own it. Otherwise two
+        // processes each think they own the same server, and the second one
+        // stops the first's infrastructure on the way out.
+        if ($hadServer || $this->waitForPort($config['host'], (int) $config['port'], 0.3)) {
+            printf("Database server already running on tcp://%s:%d\n", $config['host'], $config['port']);
 
             return false;
         }
@@ -691,6 +715,209 @@ final class PlatformCli
 
         return false;
 
+    }
+
+    /**
+     * Publish one job into the journal-backed queue and exit. The producer
+     * here is the same wiring serve() uses: an InMemoryQueue that appends
+     * every push to the queue's log, so a job published this way is consumed
+     * by the very same queue:consume that would handle a job enqueued over
+     * HTTP.
+     *
+     * @param list<string> $args
+     */
+    private function queuePublish(array $args): int
+    {
+        $type = $args[0] ?? null;
+
+        if ($type === null) {
+            fwrite(STDERR, "Usage: php bin/platform.php queue:publish <type> [payload-json]\n");
+
+            return 1;
+        }
+
+        $payload = [];
+
+        if (isset($args[1])) {
+            $decoded = json_decode($args[1], true);
+
+            if (!is_array($decoded)) {
+                fwrite(STDERR, "Payload must be a JSON object.\n");
+
+                return 1;
+            }
+
+            $payload = $decoded;
+        }
+
+        $config = $this->config();
+
+        try {
+            $producer = $this->producer($config['queue']);
+        } catch (RuntimeException $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+
+            return 1;
+        }
+
+        $job = $producer->dispatch($type, $payload, maxAttempts: (int) $config['queue']['max_attempts']);
+
+        printf(
+            "Published job %s (type=%s, %d max attempts) to %s\n",
+            $job->getId(),
+            $type,
+            $job->getMaxAttempts(),
+            $config['queue']['data_dir'] . '/queue.log',
+        );
+
+        return 0;
+    }
+
+    /**
+     * The long-running queue consumer: the second side of the queue phase.
+     *
+     * It restores the append-only journal into a queue (InMemoryQueue::
+     * restoreFromStorage()), replays every READY job it finds through the
+     * platform's JobExecutor workers, and keeps pulling jobs that arrive
+     * while it lives - the QueueConsumer loop re-reads the journal, so a
+     * job published by another process is picked up on the next pass. It
+     * answers to SIGTERM/SIGINT, which stop accepting, let busy workers
+     * finish within a grace period, and only then return here for the
+     * cleanup of whatever infrastructure this process started.
+     *
+     * The workers run platform jobs against the real database and cache, so
+     * - like serve() - the consumer makes sure those servers answer before
+     * it starts and stops them again if it was the one that started them.
+     */
+    private function queueConsume(): int
+    {
+        $config = $this->config();
+        $queueConfig = $config['queue'];
+        $databaseConfig = $config['database'];
+        $cacheConfig = $config['cache'];
+
+        $dataDir = $queueConfig['data_dir'];
+
+        if (!is_dir($dataDir) && !@mkdir($dataDir, 0o777, true) && !is_dir($dataDir)) {
+            fwrite(STDERR, sprintf('Could not create queue data directory "%s".', $dataDir) . PHP_EOL);
+
+            return 1;
+        }
+
+        $clock = new SystemClock();
+        $logPath = $dataDir . '/queue.log';
+
+        $storage = new FileStorage($logPath);
+
+        // Seed the consumer with every job the journal already knew about,
+        // then restore them into the queue; the consumer's loop then picks
+        // up only rows that arrive after this moment.
+        $knownIds = [];
+        foreach ($storage->load() as $id => $data) {
+            $knownIds[$id] = true;
+        }
+
+        $queue = InMemoryQueue::restoreFromStorage($storage, $clock);
+
+        $restored = new QueueJournal($logPath)->snapshot();
+        printf("Consumer restoring queue from %s\n", $logPath);
+        printf("  %d published, %d ready/delayed/processing\n", $restored['published'], $restored['depth']);
+
+        $database = Database::fromConfig(new ClientConfig(
+            host: $databaseConfig['host'],
+            port: $databaseConfig['port'],
+            connectTimeoutSeconds: $databaseConfig['timeout'],
+        ));
+
+        $ownsDatabaseServer = false;
+        $ownsCacheServer = false;
+
+        try {
+            $ownsDatabaseServer = $this->ensureDatabaseServer($databaseConfig);
+            Migrator::migrate($database);
+            $ownsCacheServer = $this->ensureCacheServer($cacheConfig);
+        } catch (RuntimeException $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            $database->close();
+            $this->stopCacheServerIfOwned($ownsCacheServer);
+            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
+
+            return 1;
+        }
+
+        $metrics = new MetricsCollector();
+        $executor = new JobExecutor($databaseConfig, $cacheConfig);
+        $pool = new WorkerPool(
+            size: (int) $queueConfig['consumers'],
+            handler: fn (\PhpJobQueue\Job\Job $job): mixed => $executor->__invoke($job),
+            metrics: $metrics,
+        );
+        $dispatcher = new JobDispatcher(
+            queue: $queue,
+            workerPool: $pool,
+            retryPolicy: new FixedDelayRetry((int) $queueConfig['retry_delay']),
+            clock: $clock,
+            visibilityTimeout: (int) $queueConfig['timeout'],
+            storage: new FileStorage($logPath),
+            metrics: $metrics,
+        );
+        $consumer = new QueueConsumer(
+            dispatcher: $dispatcher,
+            queue: $queue,
+            logPath: $logPath,
+            clock: $clock,
+            shutdownGrace: 10.0,
+            knownIds: $knownIds,
+        );
+
+        printf(
+            "Consumer started (workers=%d, max attempts=%d, retry delay=%ds, visibility=%ds). SIGTERM/SIGINT to stop.\n",
+            $queueConfig['consumers'],
+            $queueConfig['max_attempts'],
+            (int) $queueConfig['retry_delay'],
+            (int) $queueConfig['timeout'],
+        );
+
+        $consumer->run();
+
+        printf("Consumer stopped.\n");
+
+        $counters = $metrics->getCounters();
+        printf(
+            "  completed=%d failed=%d retried=%d\n",
+            $counters[MetricsCollector::JOBS_COMPLETED] ?? 0,
+            $counters[MetricsCollector::JOBS_FAILED] ?? 0,
+            $counters[MetricsCollector::JOBS_RETRIED] ?? 0,
+        );
+
+        $database->close();
+        $this->stopCacheServerIfOwned($ownsCacheServer);
+        $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
+
+        return 0;
+    }
+
+    /**
+     * Print the queue counters derived from the journal - the same shape
+     * GET /queue/status answers with - pairing the metric names PLAN.md
+     * Step 9 asks for (queue.depth / queue.published / queue.completed /
+     * queue.failed / queue.retried) with their current values.
+     */
+    private function queueStatus(): int
+    {
+        $config = $this->config();
+        $logPath = $config['queue']['data_dir'] . '/queue.log';
+
+        $snapshot = new QueueJournal($logPath)->snapshot();
+
+        printf("Queue status (%s)\n", $logPath);
+        printf("  queue.depth     %d\n", $snapshot['depth']);
+        printf("  queue.published %d\n", $snapshot['published']);
+        printf("  queue.completed %d\n", $snapshot['completed']);
+        printf("  queue.failed    %d\n", $snapshot['failed']);
+        printf("  queue.retried   %d\n", $snapshot['retried']);
+
+        return 0;
     }
 
     /**

@@ -30,6 +30,7 @@ return [
         'timeout' => 2.0,
         'max_attempts' => 3,
         'retry_delay' => 0.1,
+        'consumers' => 4,
     ],
     'workers' => [
         'data_dir' => sys_get_temp_dir() . '/php-systems-platform/worker',

@@ -182,8 +182,8 @@ Methods the platform uses:
 
 ## php-job-queue
 
-Namespace `PhpJobQueue`. In-process; the platform owns both producer and
-consumer sides.
+Namespace `PhpJobQueue`. Producer and consumer are separate platform
+processes; the append-only journal is the only shared state between them.
 
 ```php
 use PhpJobQueue\Queue\InMemoryQueue;
@@ -227,21 +227,50 @@ Key facts:
   and a real `Job` for metadata (`getType()`, `getPayload()`, `getId()`,
   `getAttempts()`, `getMaxAttempts()`, `getIdempotencyKey()`).
 - `JobDispatcher::observe(): QueueMetrics` yields ready/delayed/processing/
-  workers/busyWorkers/deadLettered — the platform's `queue:status`.
+  workers/busyWorkers/deadLettered — the component's live view of one
+  consumer. The platform's own `queue:status` and `GET /queue/status`
+  (below) are journal-derived instead, so any process can read them without
+  owning the consumer.
 - `JobPriority`, `JobResult`, `DeadLetterQueue`, `JobStorage`,
   `Scheduler\DelayedJobScheduler` exist for the later reliability phases.
 
+### Platform queue lifecycle (Step 9, shipped)
+
+The queue is split across processes, with the append-only journal
+(`queue/queue.log`, one JSON record per state change, last write per job
+wins) as the source of truth:
+
+```text
+serve (HTTP) ──producer──► journal ◄──consumer──► WorkerPool ──► JobExecutor
+   │                              ▲                                    │
+   └──────── GET /queue/status ───┘                 JobRegistry → OrderCreatedJob
+```
+
+- `serve` wires an `InMemoryQueue` over a `FileStorage` journal and a
+  `Producer`, and hands the producer to `OrderService` as an optional seam.
+  A POST runs **write database → enqueue `order.created` → respond**.
+- `queue:publish <type> [payload-json]` is the same producer in a CLI: it
+  appends one job to the same journal the consumer reads.
+- `queue:consume` restores the journal (`InMemoryQueue::restoreFromStorage()`),
+  then runs a `QueueConsumer` loop: the component's tick (dispatch pending →
+  apply answers → requeue expired) plus a journal re-sync every 100ms, so a
+  job published by another process while the consumer lives is picked up
+  without a restart. `Queue\JobExecutor` is the WorkerPool handler: it builds
+  its own Database/CacheService per forked worker (nothing inherited from the
+  parent), and `Queue\JobRegistry` maps a carrier's type string to the
+  platform `Job` that runs it. SIGTERM/SIGINT stop the loop gracefully.
+- `queue:status` / `GET /queue/status` read `Queue\QueueJournal` — the same
+  replay the consumer restores from — and expose the metrics PLAN Step 9
+  names: `queue.depth` (non-terminal jobs), `queue.published`, plus
+  `queue.completed`, `queue.failed`, `queue.retried` (attempts > 1).
+
 ### Platform job model (Step 8, shipped)
 
-`serve` wires an `InMemoryQueue` over an append-only `FileStorage` journal
-(`queue/queue.log`, one JSON record per push) and a `Producer`, and hands the
-producer to `OrderService` as an optional seam. A POST runs
-**write database → enqueue `order.created` → respond**; the handlers never
-know a queue exists and a service built without a producer (tests, future
-read-only commands) stays a plain synchronous write path.
-
-The platform separates the carrier from the behavior, the way every phase
-does:
+The write → enqueue → respond seam (the lifecycle section above wires it):
+the handlers never know a queue exists, and a service built without a
+producer (tests, future read-only commands) stays a plain synchronous write
+path. The platform separates the carrier from the behavior, the way every
+phase does:
 
 - `PhpJobQueue\Job\Job` — the component's carrier: type, payload, attempt
   bookkeeping. `Producer::dispatch()` creates it.
@@ -354,8 +383,11 @@ chunks overlapped instead of stacking into ~200ms.
 | `Queue\Job`                    | platform interface; runs a `PhpJobQueue\Job\Job` via `JobContext` |
 | `Queue\JobContext`             | carrier + `OrderService` + `CacheService` for one execution |
 | `Queue\Jobs\OrderCreatedJob`   | executes an `order.created` carrier     |
-| `Queue\JobDispatcher`          | `Producer` + `Queue`                   |
-| `Queue\JobConsumer`            | `WorkerPool` + `JobDispatcher`         |
+| `Queue\JobRegistry`            | maps a carrier type to the platform `Job` that runs it |
+| `Queue\JobExecutor`            | WorkerPool handler; builds per-worker services, runs registry |
+| `Queue\QueueConsumer`          | `JobDispatcher` loop + journal re-sync (cross-process handoff) |
+| `Queue\QueueJournal`           | `FileStorage` replay → `queue.*` counters |
+| `Application\Handlers\QueueStatusHandler` | `QueueJournal` over HTTP (`GET /queue/status`) |
 | `Workers\WorkerManager`        | `WorkerPoolClient`                     |
 | `Workers\ConcurrentTaskRunner` | `WorkerPoolClient` fan-out (`send`/`allWithin`) |
 | `Workers\WorkerTasks`          | per-worker task handler (`ping`, `hash_chunk`) |

@@ -4,16 +4,22 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Tests\Integration;
 
+use PhpJobQueue\Dispatcher\JobDispatcher;
 use PhpJobQueue\Metrics\MetricsCollector;
+use PhpJobQueue\Persistence\FileStorage;
 use PhpJobQueue\Producer\JobFactory;
 use PhpJobQueue\Producer\Producer;
 use PhpJobQueue\Queue\InMemoryQueue;
+use PhpJobQueue\Retry\FixedDelayRetry;
 use PhpJobQueue\Support\SystemClock;
+use PhpJobQueue\Worker\WorkerPool;
 use PhpMiniDatabase\Client\ClientConfig;
 use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Queue\JobContext;
+use PhpSystemsPlatform\Queue\JobExecutor;
 use PhpSystemsPlatform\Queue\Jobs\OrderCreatedJob;
+use PhpSystemsPlatform\Queue\QueueJournal;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
 use PHPUnit\Framework\TestCase;
@@ -250,6 +256,139 @@ final class ServeIntegrationTest extends TestCase
         self::assertStringContainsString('split', $body);
     }
 
+    public function testQueueStatusEndpointReportsTheJournalCounters(): void
+    {
+        // Delta-based: earlier tests may already have published jobs into the
+        // shared journal, so assert on what THIS post adds.
+        $before = new QueueJournal(self::DATA_DIR . '/queue/queue.log')->snapshot();
+
+        $this->postOrder('Dennis Ritchie', 6.0);
+
+        [$status, $body] = $this->request('GET', '/queue/status');
+        self::assertSame(200, $status);
+
+        $payload = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+        self::assertArrayHasKey('queue', $payload);
+        self::assertSame(
+            ['depth', 'published', 'completed', 'failed', 'retried'],
+            array_keys($payload['queue']),
+        );
+
+        // Exactly one more published job, still ready for a consumer.
+        self::assertSame($before['published'] + 1, $payload['queue']['published']);
+        self::assertSame($before['depth'] + 1, $payload['queue']['depth']);
+        self::assertSame($before['completed'], $payload['queue']['completed']);
+        self::assertSame($before['failed'], $payload['queue']['failed']);
+        self::assertSame($before['retried'], $payload['queue']['retried']);
+    }
+
+    public function testConsumerReplaysTheJournalAndCompletesEveryReadyJob(): void
+    {
+        $order = $this->postOrder('Alan Kay', 3.5);
+
+        $this->drainQueue();
+
+        $rows = new QueueJournal(self::DATA_DIR . '/queue/queue.log')->rows();
+
+        // The journal is keyed by job id; find this order's job by payload.
+        $jobRow = null;
+
+        foreach ($rows as $data) {
+            if (($data['payload']['order_id'] ?? null) === $order['id']) {
+                $jobRow = $data;
+                break;
+            }
+        }
+
+        self::assertNotNull($jobRow);
+        self::assertSame('COMPLETED', $jobRow['state']);
+        self::assertSame(1, $jobRow['attempts']);
+
+        // Everything published before the drain is terminal now: nothing is
+        // left waiting for a worker.
+        $snapshot = new QueueJournal(self::DATA_DIR . '/queue/queue.log')->snapshot();
+        self::assertSame(0, $snapshot['depth']);
+        self::assertSame(
+            $snapshot['published'],
+            $snapshot['completed'] + $snapshot['failed'],
+        );
+    }
+
+    public function testConsumerFailsAMalformedJobAfterItsRetriesAreSpent(): void
+    {
+        $clock = new SystemClock();
+        $logPath = self::DATA_DIR . '/queue/queue.log';
+
+        // The journal may already hold jobs from earlier tests, so assert on
+        // the delta this malformed job adds.
+        $before = new QueueJournal($logPath)->snapshot();
+
+        // An order.created job without an order_id - a job the handler must
+        // fail on - published straight into the real journal.
+        $job = new Producer(
+            new InMemoryQueue($clock, new FileStorage($logPath)),
+            new JobFactory($clock, new MetricsCollector()),
+        )->dispatch(OrderCreatedJob::TYPE, [], maxAttempts: 3);
+
+        $this->drainQueue();
+
+        $rows = new QueueJournal($logPath)->rows();
+        self::assertArrayHasKey((string) $job->getId(), $rows);
+        self::assertSame('FAILED', $rows[(string) $job->getId()]['state']);
+        self::assertSame(3, $rows[(string) $job->getId()]['attempts']);
+
+        // And the same journal a queue:status read counts exactly this one
+        // new job as failed and retried.
+        $snapshot = new QueueJournal($logPath)->snapshot();
+        self::assertSame($before['failed'] + 1, $snapshot['failed']);
+        self::assertSame($before['retried'] + 1, $snapshot['retried']);
+    }
+
+    public function testLiveConsumerPicksUpJobsPublishedWhileItRuns(): void
+    {
+        $logPath = self::DATA_DIR . '/queue/queue.log';
+        $order = $this->postOrder('Bjarne Stroustrup', 12.75);
+
+        // Run the real queue:consume CLI as a subprocess, then publish a job
+        // after it has started: the consumer's loop re-reads the journal, so
+        // the job must be picked up and completed without a restart.
+        $process = proc_open(
+            [PHP_BINARY, dirname(__DIR__, 2) . '/bin/platform.php', 'queue:consume'],
+            [
+                1 => ['file', self::LOG_DIR . '/consume.out', 'a'],
+                2 => ['file', self::LOG_DIR . '/consume.err', 'a'],
+            ],
+            $pipes,
+        );
+
+        self::assertIsResource($process);
+
+        try {
+            $clock = new SystemClock();
+            $job = new Producer(
+                new InMemoryQueue($clock, new FileStorage($logPath)),
+                new JobFactory($clock, new MetricsCollector()),
+            )->dispatch(OrderCreatedJob::TYPE, ['order_id' => $order['id']], maxAttempts: 3);
+
+            $deadline = microtime(true) + 15.0;
+            $state = null;
+
+            do {
+                $rows = new QueueJournal($logPath)->rows();
+                $state = $rows[(string) $job->getId()]['state'] ?? null;
+                usleep(100_000);
+            } while (microtime(true) < $deadline && $state !== 'COMPLETED');
+
+            self::assertSame('COMPLETED', $state, sprintf(
+                'Consumer output: %s',
+                (string) file_get_contents(self::LOG_DIR . '/consume.out'),
+            ));
+        } finally {
+            proc_terminate($process);
+            proc_close($process);
+        }
+    }
+
     private static function orders(): OrderService
     {
         return new OrderService(new OrderRepository(self::$database));
@@ -263,6 +402,45 @@ final class ServeIntegrationTest extends TestCase
             new InMemoryQueue($clock),
             new JobFactory($clock, new MetricsCollector()),
         )->dispatch($type, $payload);
+    }
+
+    /**
+     * Run the same machinery queue:consume wires: restore the journal into a
+     * queue, fork a small WorkerPool whose handlers run platform jobs through
+     * JobExecutor, and dispatch every ready job to completion. Returns when
+     * no job is left that a worker can take.
+     */
+    private function drainQueue(): void
+    {
+        $clock = new SystemClock();
+        $logPath = self::DATA_DIR . '/queue/queue.log';
+
+        $queue = InMemoryQueue::restoreFromStorage(new FileStorage($logPath), $clock);
+
+        $executor = new JobExecutor(
+            ['host' => self::HOST, 'port' => self::DB_PORT, 'timeout' => 2.0],
+            ['host' => self::HOST, 'port' => self::CACHE_PORT, 'timeout' => 2.0],
+        );
+        $pool = new WorkerPool(
+            size: 2,
+            handler: fn (\PhpJobQueue\Job\Job $job): mixed => $executor->__invoke($job),
+        );
+        $dispatcher = new JobDispatcher(
+            queue: $queue,
+            workerPool: $pool,
+            retryPolicy: new FixedDelayRetry(0),
+            clock: $clock,
+            visibilityTimeout: 2,
+            storage: new FileStorage($logPath),
+        );
+
+        $dispatcher->start();
+
+        while ($dispatcher->dispatchNext()) {
+            // Drain until nothing is ready to dispatch.
+        }
+
+        $pool->shutdown();
     }
 
     /**

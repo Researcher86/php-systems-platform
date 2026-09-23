@@ -271,16 +271,26 @@ php bin/platform.php worker
 Start workers.
 
 ```bash
+php bin/platform.php queue:publish order.created '{"order_id":"<id>"}'
+```
+
+Publish one job into the journal-backed queue (also enqueued by every
+`POST /orders` while `serve` runs).
+
+```bash
 php bin/platform.php queue:consume
 ```
 
-Start the queue consumer.
+Start the queue consumer: restores the journal, replays READY jobs, and
+keeps picking up jobs published while it runs. SIGTERM/SIGINT stop it
+gracefully.
 
 ```bash
 php bin/platform.php queue:status
 ```
 
-Inspect queue state.
+Inspect queue state (published / depth / completed / failed / retried), the
+same counters `GET /queue/status` answers over HTTP.
 
 ```bash
 php bin/platform.php status

@@ -28,7 +28,7 @@ format-check: up
 	docker compose exec php composer format:check
 
 run: up
-	docker compose exec php php bin/platform $(ARGS)
+	docker compose exec php php bin/platform.php $(ARGS)
 
 demo: up
-	docker compose exec php php bin/platform demo
+	docker compose exec php php bin/platform.php demo

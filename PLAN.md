@@ -372,7 +372,7 @@ Add:
 Initial command:
 
 ```bash
-php bin/platform
+php bin/platform.php
 ```
 
 Expected:
@@ -396,7 +396,7 @@ Do not implement real functionality yet.
 
 ```text
 composer install
-php bin/platform
+php bin/platform.php
 ```
 
 works from a clean checkout.
@@ -721,9 +721,9 @@ job execution
 Add CLI commands:
 
 ```bash
-php bin/platform queue:publish
-php bin/platform queue:consume
-php bin/platform queue:status
+php bin/platform.php queue:publish
+php bin/platform.php queue:consume
+php bin/platform.php queue:status
 ```
 
 Expose queue metrics:
@@ -954,7 +954,7 @@ The platform should expose memory behavior rather than turning `php-memory-lab` 
 Add a diagnostic command:
 
 ```bash
-php bin/platform memory:demo
+php bin/platform.php memory:demo
 ```
 
 Demonstrate:
@@ -984,7 +984,7 @@ This connects the worker architecture to the memory model.
 Create:
 
 ```bash
-php bin/platform workers:memory
+php bin/platform.php workers:memory
 ```
 
 Run:
@@ -1378,7 +1378,7 @@ A small educational tracing system is enough.
 Implement:
 
 ```bash
-php bin/platform status
+php bin/platform.php status
 ```
 
 Example output:
@@ -1427,7 +1427,7 @@ This becomes the simplest way to see the whole platform.
 Create:
 
 ```bash
-php bin/platform demo
+php bin/platform.php demo
 ```
 
 The demo should automatically:
@@ -1996,25 +1996,25 @@ Example:
 The final CLI should expose the important concepts.
 
 ```bash
-php bin/platform serve
+php bin/platform.php serve
 
-php bin/platform worker
+php bin/platform.php worker
 
-php bin/platform queue:consume
+php bin/platform.php queue:consume
 
-php bin/platform queue:status
+php bin/platform.php queue:status
 
-php bin/platform status
+php bin/platform.php status
 
-php bin/platform demo
+php bin/platform.php demo
 
-php bin/platform benchmark
+php bin/platform.php benchmark
 
-php bin/platform memory:demo
+php bin/platform.php memory:demo
 
-php bin/platform workers:memory
+php bin/platform.php workers:memory
 
-php bin/platform failure:demo
+php bin/platform.php failure:demo
 ```
 
 The CLI itself should remain small.
@@ -2047,7 +2047,7 @@ docker compose up
 and then:
 
 ```bash
-php bin/platform demo
+php bin/platform.php demo
 ```
 
 should work.
@@ -2067,7 +2067,7 @@ Then:
 
 ```bash
 docker compose up -d
-php bin/platform demo
+php bin/platform.php demo
 ```
 
 Run:
@@ -2351,7 +2351,7 @@ Phase 5 is complete when all of the following are true.
 
 ## Queue
 
-* [ ] Jobs can be published.
+* [x] Jobs can be published.
 * [ ] Jobs can be consumed.
 * [ ] Queue depth is observable.
 * [ ] Failed jobs are handled.
@@ -2360,15 +2360,15 @@ Phase 5 is complete when all of the following are true.
 
 ## Worker pool
 
-* [ ] Multiple workers can execute jobs.
+* [x] Multiple workers can execute jobs.
 * [ ] Worker lifecycle is observable.
 * [ ] Worker failure is detected.
 * [ ] Worker replacement works.
-* [ ] Graceful shutdown works.
+* [x] Graceful shutdown works.
 
 ## Concurrency
 
-* [ ] At least one real concurrent workload is demonstrated.
+* [x] At least one real concurrent workload is demonstrated.
 * [ ] Sequential vs concurrent behavior can be compared.
 * [ ] Concurrency limits are explicit.
 

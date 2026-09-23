@@ -14,10 +14,10 @@ platform only ever calls the entry points listed here.
 | Component                     | Entry point                       | Default listen addr |
 | ----------------------------- | --------------------------------- | ------------------- |
 | php-mini-http-server          | HTTP server, port 8080            | `127.0.0.1:8080`    |
-| php-mini-database             | `bin/minidb start` (platform entry) | `127.0.0.1:5433`   |
-| php-mini-cache                | `bin/cache` (platform entry)      | `127.0.0.1:6380`    |
+| php-mini-database             | `bin/minidb.php start` (platform entry) | `127.0.0.1:5433`   |
+| php-mini-cache                | `bin/cache.php` (platform entry)      | `127.0.0.1:6380`    |
 | php-job-queue                 | none (in-process)                 | -                   |
-| php-worker-pool               | `Master` Unix socket              | `/tmp/php-worker-pool.sock` |
+| php-worker-pool               | `bin/worker.php` (platform entry)     | `/tmp/php-worker-pool.sock` |
 
 `config/platform.php` mirrors these addresses; wherever a value differs from
 what a component defaults to, the component's own default wins.
@@ -71,7 +71,7 @@ The component's own `bin/minidb-server` boots with
 `require __DIR__.'/../vendor/autoload.php'`, which only resolves while the
 component *is* the root project; as a Composer dependency the path points at
 the component's own vendor directory and does not exist. The platform runs
-the server through its own one-file entry `bin/minidb`, which loads the
+the server through its own one-file entry `bin/minidb.php`, which loads the
 platform autoloader and calls `PhpMiniDatabase\Cli\ServerApplication` with the
 same arguments the component's bin script would receive.
 
@@ -124,14 +124,14 @@ Namespace `PhpMiniCache`. Client side only (RESP over TCP).
 The component's own `bin/server.php` has the same `require
 __DIR__.'/../vendor/autoload.php'` flaw as the database's — it only resolves
 while the component *is* the root project. The platform runs the server
-through its own one-file entry `bin/cache`, which boots the platform
+through its own one-file entry `bin/cache.php`, which boots the platform
 autoloader and runs `PhpMiniCache\Server\CacheServer` with the component's
 own environment contract (`CACHE_HOST`, `CACHE_PORT`, plus a `CACHE_SNAPSHOT`
 path that enables persistence).
 
 The cache component has **no daemon mode**: its server is a foreground
 process. `PlatformCli::serve()` therefore owns the cache as a direct child —
-it spawns `bin/cache` with stdout/stderr redirected into the cache data
+it spawns `bin/cache.php` with stdout/stderr redirected into the cache data
 directory, waits for the TCP port to answer, and SIGTERMs it on shutdown only
 if this `serve` started it (an already-answering server is reused and left up,
 probed with a short-timeout `CacheClient::ping()`). SIGTERM is the cache's
@@ -231,6 +231,36 @@ Key facts:
 - `JobPriority`, `JobResult`, `DeadLetterQueue`, `JobStorage`,
   `Scheduler\DelayedJobScheduler` exist for the later reliability phases.
 
+### Platform job model (Step 8, shipped)
+
+`serve` wires an `InMemoryQueue` over an append-only `FileStorage` journal
+(`queue/queue.log`, one JSON record per push) and a `Producer`, and hands the
+producer to `OrderService` as an optional seam. A POST runs
+**write database → enqueue `order.created` → respond**; the handlers never
+know a queue exists and a service built without a producer (tests, future
+read-only commands) stays a plain synchronous write path.
+
+The platform separates the carrier from the behavior, the way every phase
+does:
+
+- `PhpJobQueue\Job\Job` — the component's carrier: type, payload, attempt
+  bookkeeping. `Producer::dispatch()` creates it.
+- `Queue\Job` — the platform's interface; `execute(JobContext)` is what a
+  job DOES.
+- `Queue\JobContext` — what a running job may reach: its own carrier plus
+  the `OrderService` and `CacheService`.
+- `Queue\Jobs\OrderCreatedJob` — the first job, type `order.created` with
+  payload `['order_id' => ...]`. It re-reads the authoritative row from the
+  database and warms the derived cache entry (idempotent; heals the window
+  when the write path had to bypass a down cache). A missing/unknown order
+  throws `RuntimeException` — a failed attempt for the next phase's
+  retry/DLQ story, never a silent skip.
+
+Recovery shape, stated up front: the journal keeps the last word on every
+job, so a later consumer restores it and replays READY jobs (at-least-once);
+`OrderCreatedJob` is idempotent by design, so a duplicate execution only
+refreshes the cache.
+
 ## php-worker-pool
 
 Namespace `PhpWorkerPool`. A Master process owns a pool of forked workers;
@@ -275,6 +305,43 @@ Key facts:
   answering `server_overloaded` past it — the platform's `WorkerManager` and
   `ConcurrentTaskRunner` sit on top of this SDK.
 
+## The controller example (shipped)
+
+A concrete example of a CPU task split into parts and run side by side on
+several workers, reached from the HTTP control plane:
+
+`GET /parallel?work=200000&split=4` folds 200k sha256 iterations, split into
+four chunks, one per worker. The handler sends every chunk before awaiting
+any of them, so they genuinely run concurrently, then aggregates by slot; a
+chunk that times out or is rejected degrades into a missing slot
+(`allWithin`'s bargain) and is reported in `degraded` instead of failing the
+request (206 with some, 503 when none complete, 400 on bad `work`/`split`).
+
+The wiring, platform-side:
+
+- `bin/worker.php` — the Master process. One file that loads the platform
+  autoloader and runs `Master(minWorkers: 2, maxWorkers: 16, handler:
+  WorkerTasks::handler())`. Like the cache, the pool has no daemon mode, so
+  `PlatformCli::serve()` spawns it as a child when no pool answers a ping on
+  the configured socket (`workerPoolAnswers()`), owns it, and SIGTERMs it on
+  shutdown (`stopWorkerPoolIfOwned()`) — graceful: settle in-flight tasks,
+  exit workers, remove the socket.
+- `Workers\WorkerTasks` — the only code a worker runs: `ping` and `hash_chunk`
+  (a deterministic sha256 chain reporting its `iterations`, elapsed
+  `microseconds` and `checksum`). A payload that cannot describe a task is
+  answered with `Response::error('bad_params')`, not a thrown exception, so
+  the controller sees a degraded chunk instead of a crashed worker.
+- `Workers\ConcurrentTaskRunner` — the fan-out over one `WorkerPoolClient`
+  connection: `run()` is all-or-fail (`all`), `runWithin($seconds, ...)`
+  shares one budget over the group and returns whatever answers arrived,
+  keyed by position.
+- `Application\Handlers\ParallelHandler` — the controller above, with the
+  runner injected from `serve()`; without one it answers 503 "not configured".
+
+The observable proof of concurrency: four 50k chunks each report ~50ms of
+worker time while the request's `wallMicroseconds` is also ~50-60ms — the
+chunks overlapped instead of stacking into ~200ms.
+
 ## Adapter mapping (used by later phases)
 
 | Platform class                 | Wraps                                  |
@@ -284,7 +351,11 @@ Key facts:
 | `Storage\Database`             | `Connection`/`ConnectionPool`          |
 | `Storage\Repositories\*`       | `Database` + `ResultSet`               |
 | `Cache\CacheService`           | `CacheClient`                          |
+| `Queue\Job`                    | platform interface; runs a `PhpJobQueue\Job\Job` via `JobContext` |
+| `Queue\JobContext`             | carrier + `OrderService` + `CacheService` for one execution |
+| `Queue\Jobs\OrderCreatedJob`   | executes an `order.created` carrier     |
 | `Queue\JobDispatcher`          | `Producer` + `Queue`                   |
 | `Queue\JobConsumer`            | `WorkerPool` + `JobDispatcher`         |
 | `Workers\WorkerManager`        | `WorkerPoolClient`                     |
 | `Workers\ConcurrentTaskRunner` | `WorkerPoolClient` fan-out (`send`/`allWithin`) |
+| `Workers\WorkerTasks`          | per-worker task handler (`ping`, `hash_chunk`) |

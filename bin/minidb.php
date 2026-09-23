@@ -18,4 +18,4 @@ require __DIR__ . '/../vendor/autoload.php';
  * process does is the component's; this file only points at it.
  */
 
-exit((new ServerApplication())->run(array_slice($argv, 1)));
+exit(new ServerApplication()->run(array_slice($argv ?? [], 1)));

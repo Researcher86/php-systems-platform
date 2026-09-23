@@ -25,12 +25,14 @@ return [
         'timeout' => 2.0,
     ],
     'queue' => [
+        'data_dir' => sys_get_temp_dir() . '/php-systems-platform/queue',
         'max_size' => 500,
         'timeout' => 2.0,
         'max_attempts' => 3,
         'retry_delay' => 0.1,
     ],
     'workers' => [
+        'data_dir' => sys_get_temp_dir() . '/php-systems-platform/worker',
         'count' => 4,
         'bootstrap_timeout' => 10.0,
         'task_timeout' => 5.0,

@@ -6,4 +6,4 @@ use PhpSystemsPlatform\Cli\PlatformCli;
 
 require __DIR__ . '/../vendor/autoload.php';
 
-exit((new PlatformCli())->run($argv));
+exit(new PlatformCli()->run($argv ?? []));

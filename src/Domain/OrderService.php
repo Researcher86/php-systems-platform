@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Domain;
 
 use InvalidArgumentException;
+use PhpJobQueue\Producer\Producer;
+use PhpSystemsPlatform\Queue\Jobs\OrderCreatedJob;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
 use Ramsey\Uuid\Uuid;
 
@@ -12,13 +14,17 @@ use Ramsey\Uuid\Uuid;
  * The whole synchronous order lifecycle, on top of the repository: validates
  * the domain invariants (what a customer and an amount are), generates the
  * UUID v7 id, books the timestamps, and lets the handler stay a thin HTTP
- * translation layer. The queue phase turns this into the write → enqueue →
- * respond path by adding a Publisher seam here without touching the handlers.
+ * translation layer. Writing an order is strictly: persist the authoritative
+ * row first, then offer the fact up to the queue through the producer seam.
+ * The seam is optional - the database stays the source of truth for anything
+ * that is handed a service without a producer (tests, a future read-only
+ * command) - and the handlers never know a queue exists.
  */
 final readonly class OrderService
 {
     public function __construct(
         private OrderRepository $orders,
+        private ?Producer $producer = null,
     ) {
     }
 
@@ -41,6 +47,8 @@ final readonly class OrderService
         if (!$this->orders->create($order)) {
             throw new \RuntimeException('Could not persist the order.');
         }
+
+        $this->producer?->dispatch(OrderCreatedJob::TYPE, ['order_id' => $order->id]);
 
         return $order;
     }

@@ -4,6 +4,12 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Cli;
 
+use PhpJobQueue\Metrics\MetricsCollector;
+use PhpJobQueue\Persistence\FileStorage;
+use PhpJobQueue\Producer\JobFactory;
+use PhpJobQueue\Producer\Producer;
+use PhpJobQueue\Queue\InMemoryQueue;
+use PhpJobQueue\Support\SystemClock;
 use PhpMiniCache\Sdk\CacheClient;
 use PhpMiniCache\Sdk\CacheClientException;
 use PhpMiniDatabase\Client\ClientConfig;
@@ -21,12 +27,18 @@ use PhpSystemsPlatform\Application\Handlers\HealthHandler;
 use PhpSystemsPlatform\Application\Handlers\OrderCreateHandler;
 use PhpSystemsPlatform\Application\Handlers\OrderReadHandler;
 use PhpSystemsPlatform\Application\Handlers\OrderUpdateHandler;
+use PhpSystemsPlatform\Application\Handlers\ParallelHandler;
 use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Http\Router;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Migrator;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
+use PhpSystemsPlatform\Workers\ConcurrentTaskRunner;
+use PhpWorkerPool\IPC\ConnectionClosedException;
+use PhpWorkerPool\Protocol\Request as WorkerRequest;
+use PhpWorkerPool\Sdk\ConnectionFailedException;
+use PhpWorkerPool\Sdk\WorkerPoolClient;
 use RuntimeException;
 
 /**
@@ -59,11 +71,16 @@ final class PlatformCli
     /**
      * The cache server this serve spawned, when it spawned one. The database
      * server is tracked by pid file; the cache has no daemon mode, so its
-     * process is owned directly and must not outlive the HTTP process.
+     * process is owned directly and must not outlive the HTTP process. Same
+     * for the worker pool Master (bin/worker.php): no daemon mode, so serve owns
+     * it as a child and stops it on the way out.
      *
      * @var resource|null
      */
     private mixed $cacheProcess = null;
+
+    /** @var resource|null */
+    private mixed $workerProcess = null;
 
     /**
      * @param list<string> $argv
@@ -78,7 +95,7 @@ final class PlatformCli
 
         if (!isset(self::COMMANDS[$command])) {
             fwrite(STDERR, sprintf("Unknown command: %s\n", $command));
-            fwrite(STDERR, "Run 'php bin/platform help' for the command list.\n");
+            fwrite(STDERR, "Run 'php bin/platform.php help' for the command list.\n");
 
             return 1;
         }
@@ -98,7 +115,7 @@ final class PlatformCli
         }
 
         fwrite(STDOUT, "\nRun a command with\n");
-        fwrite(STDOUT, "  php bin/platform <command>\n");
+        fwrite(STDOUT, "  php bin/platform.php <command>\n");
 
         return 0;
     }
@@ -157,7 +174,43 @@ final class PlatformCli
             return 1;
         }
 
+        $workersConfig = $config['workers'];
+
+        $ownsWorkerPool = false;
+        $runner = null;
+
+        try {
+            $ownsWorkerPool = $this->ensureWorkerPoolServer($workersConfig);
+            $runner = new ConcurrentTaskRunner(new WorkerPoolClient(
+                $workersConfig['socket'],
+                (float) $workersConfig['task_timeout'],
+            ));
+        } catch (RuntimeException $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            $database->close();
+            $cache->close();
+            $this->stopCacheServerIfOwned($ownsCacheServer);
+            $this->stopWorkerPoolIfOwned($ownsWorkerPool);
+            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
+
+            return 1;
+        }
+
         $http = $config['http'];
+
+        $producer = null;
+
+        try {
+            $producer = $this->producer($config['queue']);
+        } catch (RuntimeException $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            $database->close();
+            $cache->close();
+            $this->stopCacheServerIfOwned($ownsCacheServer);
+            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
+
+            return 1;
+        }
 
         $serverConfig = new ServerConfig(
             host: $http['host'],
@@ -188,7 +241,7 @@ final class PlatformCli
         $metrics = new ServerMetrics();
         $loop = new SelectLoop();
 
-        $application = $this->application($database, $cache);
+        $application = $this->application($database, $cache, $producer, $runner);
 
         $loop->onReadable($server->socket(), static function () use ($loop, $server, $parser, $encoder, $application, $metrics, $logger): void {
             $connection = $server->accept();
@@ -228,6 +281,7 @@ final class PlatformCli
         $server->stop();
         $database->close();
         $cache->close();
+        $this->stopWorkerPoolIfOwned($ownsWorkerPool);
         $this->stopCacheServerIfOwned($ownsCacheServer);
         $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
         printf("Shutdown complete.\n");
@@ -238,20 +292,54 @@ final class PlatformCli
     /**
      * The platform's routes, in their Application. Serves as the wiring note
      * for the platform as well: the health endpoint landed in Phase 3, the
-     * order endpoints in Phase 4 on top of the injected Database, and the
-     * cache-first read path in Phase 5 on top of the injected CacheService.
+     * order endpoints in Phase 4 on top of the injected Database, the
+     * cache-first read path in Phase 5 on top of the injected CacheService,
+     * and the write → enqueue → respond seam in the queue phase on top of the
+     * injected Producer (null until the queue is wired, in which case writes
+     * stay plain synchronous persists). The worker example in the same wire:
+     * a CPU task split into chunks and run side by side on the pool in
+     * parallel, exposed as GET /parallel (again null-tolerant - without a
+     * pool the handler answers "not configured" instead of crashing serve).
      */
-    private function application(Database $database, CacheService $cache): Application
+    private function application(Database $database, CacheService $cache, ?Producer $producer = null, ?ConcurrentTaskRunner $runner = null): Application
     {
-        $orders = new OrderService(new OrderRepository($database));
+        $orders = new OrderService(new OrderRepository($database), $producer);
 
         $router = new Router();
         $router->get('/health', (new HealthHandler())(...));
         $router->post('/orders', (new OrderCreateHandler($orders, $cache))(...));
         $router->get('/orders/{id}', (new OrderReadHandler($orders, $cache))(...));
         $router->put('/orders/{id}', (new OrderUpdateHandler($orders, $cache))(...));
+        $router->get('/parallel', (new ParallelHandler($runner))(...));
 
         return new Application($router);
+    }
+
+    /**
+     * Build the platform's producer: an in-memory queue that journals every
+     * push into the queue's append-only log, fronted by the component's
+     * Producer. In this phase the queue lives for the duration of serve and
+     * the log is its observable artifact - the next step (queue:consume)
+     * restores the journal into its own process, which is where the
+     * at-least-once replay that this phase's last-attempt semantics rely on
+     * happens.
+     *
+     * @param array<string, mixed> $config
+     */
+    private function producer(array $config): Producer
+    {
+        $dataDir = $config['data_dir'];
+
+        if (!is_dir($dataDir) && !@mkdir($dataDir, 0o777, true) && !is_dir($dataDir)) {
+            throw new RuntimeException(sprintf('Could not create queue data directory "%s".', $dataDir));
+        }
+
+        $clock = new SystemClock();
+
+        return new Producer(
+            new InMemoryQueue($clock, new FileStorage($dataDir . '/queue.log')),
+            new JobFactory($clock, new MetricsCollector()),
+        );
     }
 
     /**
@@ -357,12 +445,12 @@ final class PlatformCli
 
     private function databaseServerBinary(): string
     {
-        return dirname(__DIR__, 2) . '/bin/minidb';
+        return dirname(__DIR__, 2) . '/bin/minidb.php';
     }
 
     private function cacheServerBinary(): string
     {
-        return dirname(__DIR__, 2) . '/bin/cache';
+        return dirname(__DIR__, 2) . '/bin/cache.php';
     }
 
     /**
@@ -488,6 +576,121 @@ final class PlatformCli
         }
 
         return false;
+    }
+
+    /**
+     * Make sure a worker pool answers on the configured socket for the
+     * duration of this serve, and return whether this process is the one
+     * that started it (and therefore the one that must stop it). A pool
+     * already running is reused and stays up afterwards - the probe is one
+     * ping over the socket, the same channel the HTTP control plane uses.
+     *
+     * Like the cache, the pool has no daemon mode: the platform spawns the
+     * component's Master (bin/worker.php) as its own process and owns it
+     * until shutdown, rather than swallowing the pool into the HTTP process
+     * and losing the process boundary the lab wants to point at.
+     *
+     * @param array<string, mixed> $config
+     */
+    private function ensureWorkerPoolServer(array $config): bool
+    {
+        if ($this->workerPoolAnswers($config)) {
+            printf("Worker pool already running on %s\n", $config['socket']);
+
+            return false;
+        }
+
+        $dataDir = $config['data_dir'];
+
+        if (!is_dir($dataDir) && !@mkdir($dataDir, 0o777, true) && !is_dir($dataDir)) {
+            throw new RuntimeException(sprintf('Could not create worker data directory "%s".', $dataDir));
+        }
+
+        $process = proc_open(
+            [PHP_BINARY, dirname(__DIR__, 2) . '/bin/worker.php'],
+            [
+                1 => ['file', $dataDir . '/worker.out', 'a'],
+                2 => ['file', $dataDir . '/worker.err', 'a'],
+            ],
+            $pipes,
+        );
+
+        if (!is_resource($process)) {
+            throw new RuntimeException('Could not start the worker pool process.');
+        }
+
+        $this->workerProcess = $process;
+
+        if (!$this->waitForSocket($config['socket'])) {
+            $this->stopWorkerPoolIfOwned(true);
+
+            throw new RuntimeException(sprintf('Worker pool did not start listening on "%s" in time.', $config['socket']));
+        }
+
+        printf("Worker pool listening on %s\n", $config['socket']);
+
+        return true;
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     */
+    private function workerPoolAnswers(array $config): bool
+    {
+        $client = new WorkerPoolClient($config['socket'], (float) $config['task_timeout']);
+
+        try {
+            $client->call(new WorkerRequest('ping'));
+            $client->close();
+
+            return true;
+        } catch (ConnectionFailedException | ConnectionClosedException) {
+            return false;
+        }
+    }
+
+    /**
+     * Stop the worker pool Master this serve started, if it started one:
+     * SIGTERM triggers the component's graceful shutdown (drain in-flight
+     * tasks, exit the workers), then the handle is released.
+     */
+    private function stopWorkerPoolIfOwned(bool $owns): void
+    {
+        if (!$owns || !is_resource($this->workerProcess)) {
+            return;
+        }
+
+        $process = $this->workerProcess;
+        $this->workerProcess = null;
+
+        proc_terminate($process);
+        proc_close($process);
+        printf("Worker pool stopped\n");
+    }
+
+    private function waitForSocket(string $socketPath, float $timeoutSeconds = 10.0): bool
+    {
+        $deadline = microtime(true) + $timeoutSeconds;
+
+        while (microtime(true) < $deadline) {
+            $socket = @stream_socket_client(
+                sprintf('unix://%s', $socketPath),
+                $errorCode,
+                $errorMessage,
+                0.2,
+            );
+
+            if ($socket !== false) {
+                fclose($socket);
+
+                return true;
+            }
+
+            usleep(100_000);
+        }
+
+        return false;
+
     }
 
     /**

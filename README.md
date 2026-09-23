@@ -171,7 +171,7 @@ docker compose up -d
 Check the platform:
 
 ```bash
-php bin/platform status
+php bin/platform.php status
 ```
 
 ---
@@ -181,7 +181,7 @@ php bin/platform status
 The easiest way to see the entire system working together is:
 
 ```bash
-php bin/platform demo
+php bin/platform.php demo
 ```
 
 The demo performs an end-to-end scenario:
@@ -259,55 +259,55 @@ Final statistics...
 The platform provides a small CLI for running different parts of the system.
 
 ```bash
-php bin/platform serve
+php bin/platform.php serve
 ```
 
 Start the HTTP server.
 
 ```bash
-php bin/platform worker
+php bin/platform.php worker
 ```
 
 Start workers.
 
 ```bash
-php bin/platform queue:consume
+php bin/platform.php queue:consume
 ```
 
 Start the queue consumer.
 
 ```bash
-php bin/platform queue:status
+php bin/platform.php queue:status
 ```
 
 Inspect queue state.
 
 ```bash
-php bin/platform status
+php bin/platform.php status
 ```
 
 Show the current platform status.
 
 ```bash
-php bin/platform demo
+php bin/platform.php demo
 ```
 
 Run the complete integration demo.
 
 ```bash
-php bin/platform benchmark
+php bin/platform.php benchmark
 ```
 
 Run platform benchmarks.
 
 ```bash
-php bin/platform memory:demo
+php bin/platform.php memory:demo
 ```
 
 Run memory and copy-on-write experiments.
 
 ```bash
-php bin/platform workers:memory
+php bin/platform.php workers:memory
 ```
 
 Measure worker process memory.

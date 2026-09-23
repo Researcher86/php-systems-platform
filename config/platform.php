@@ -14,13 +14,13 @@ return [
     ],
     'database' => [
         'host' => '127.0.0.1',
-        'port' => 5000,
+        'port' => 5433,
         'data_dir' => sys_get_temp_dir() . '/php-systems-platform/db',
         'timeout' => 2.0,
     ],
     'cache' => [
         'host' => '127.0.0.1',
-        'port' => 5001,
+        'port' => 6380,
         'data_dir' => sys_get_temp_dir() . '/php-systems-platform/cache',
         'timeout' => 2.0,
     ],
@@ -34,6 +34,7 @@ return [
         'count' => 4,
         'bootstrap_timeout' => 10.0,
         'task_timeout' => 5.0,
+        'socket' => '/tmp/php-worker-pool.sock',
     ],
     'jobs' => [
         'idempotency_store' => sys_get_temp_dir() . '/php-systems-platform/idempotency.json',

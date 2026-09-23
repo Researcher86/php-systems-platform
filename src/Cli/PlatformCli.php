@@ -46,6 +46,7 @@ use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
 use PhpSystemsPlatform\Workers\ConcurrentOrderLoader;
 use PhpSystemsPlatform\Workers\ConcurrentTaskRunner;
+use PhpSystemsPlatform\Workers\ForkedOrderLoader;
 use PhpSystemsPlatform\Workers\OrderLoadBenchmark;
 use PhpSystemsPlatform\Workers\QueueBenchmark;
 use PhpSystemsPlatform\Workers\WorkerManager;
@@ -1088,12 +1089,14 @@ final class PlatformCli
     }
 
     /**
-     * PLAN Step 13's measurement: the same order snapshot loaded both ways.
+     * PLAN Steps 13 and 14's measurement: the same order snapshot loaded by
+     * every execution model the platform has - sequential, forked (the raw
+     * primitive: one process per part), pooled (workers that already exist).
      *
      * Two passes, deliberately. The first loads three local catalog rows,
-     * where a pool round trip per part costs more than the overlap saves -
-     * the case the plan warns about ("do not add concurrency merely because
-     * it is possible"). The second gives every part a simulated external
+     * where a round trip per part costs more than the overlap saves - the
+     * case the plan warns about ("do not add concurrency merely because it
+     * is possible"). The second gives every part a simulated external
      * dependency, which is the case the fan-out exists for: three waits that
      * happen at the same time instead of one after another.
      *
@@ -1158,15 +1161,17 @@ final class PlatformCli
         try {
             $order = $orders->createOrder('Ada Lovelace', '19.99');
 
-            $local = new OrderLoadBenchmark(
-                new SequentialOrderLoader($orders, $catalog),
-                new ConcurrentOrderLoader($orders, $runner),
-            )->run($order->id, $rounds);
+            $local = new OrderLoadBenchmark([
+                'sequential' => new SequentialOrderLoader($orders, $catalog),
+                'forked' => new ForkedOrderLoader($orders, $databaseConfig),
+                'pooled' => new ConcurrentOrderLoader($orders, $runner),
+            ])->run($order->id, $rounds);
 
-            $waiting = new OrderLoadBenchmark(
-                new SequentialOrderLoader($orders, $catalog, $delayMs),
-                new ConcurrentOrderLoader($orders, $runner, $delayMs),
-            )->run($order->id, $rounds);
+            $waiting = new OrderLoadBenchmark([
+                'sequential' => new SequentialOrderLoader($orders, $catalog, $delayMs),
+                'forked' => new ForkedOrderLoader($orders, $databaseConfig, $delayMs),
+                'pooled' => new ConcurrentOrderLoader($orders, $runner, $delayMs),
+            ])->run($order->id, $rounds);
         } catch (RuntimeException | ConnectionFailedException $e) {
             fwrite(STDERR, $e->getMessage() . PHP_EOL);
             $database->close();
@@ -1183,7 +1188,9 @@ final class PlatformCli
         $this->printComparison($waiting);
         printf(
             "\nThree local rows are cheaper to read in one process than to hand to three;\n"
-            . "the fan-out starts paying once a part actually waits.\n",
+            . "the fan-out starts paying once a part actually waits. forked pays a process\n"
+            . "and a connection per load, pooled pays them once - same overlap, different\n"
+            . "amortization.\n",
         );
 
         $database->close();
@@ -1194,13 +1201,21 @@ final class PlatformCli
     }
 
     /**
-     * @param array{rounds: int, sequential_ms: float, concurrent_ms: float, speedup: float} $result
+     * One line per execution model, the first of them the baseline the
+     * others are reported against.
+     *
+     * @param list<array{name: string, ms: float, speedup: float}> $results
      */
-    private function printComparison(array $result): void
+    private function printComparison(array $results): void
     {
-        printf("    sequential   %.3f ms\n", $result['sequential_ms']);
-        printf("    concurrent   %.3f ms\n", $result['concurrent_ms']);
-        printf("    speedup      %.2fx\n", $result['speedup']);
+        foreach ($results as $index => $result) {
+            printf(
+                "    %-11s %9.3f ms   %s\n",
+                $result['name'],
+                $result['ms'],
+                $index === 0 ? 'baseline' : sprintf('%.2fx', $result['speedup']),
+            );
+        }
     }
 
     /**

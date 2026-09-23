@@ -311,10 +311,9 @@ workers shows the speedup is not linear.
 php bin/platform.php orders:compare 5 50
 ```
 
-Compare the two ways of loading one order's whole picture (rounds,
-simulated external latency per part in ms): the same snapshot read
-sequentially in one process, and with its independent parts fanned out to
-worker processes.
+Compare the three ways of loading one order's whole picture (rounds,
+simulated external latency per part in ms): sequentially in one process,
+with a forked process per independent part, and on the worker pool.
 
 ```bash
 php bin/platform.php status
@@ -489,38 +488,51 @@ order ──────┼── product    (database)
             └── stock      (database)
 ```
 
-Both ways of doing that work live in the platform and answer with exactly the
-same snapshot:
+Three ways of doing that work live in the platform, all answering with
+exactly the same snapshot (`Domain\OrderLoader`):
 
 * `Domain\SequentialOrderLoader` - the three reads one after another, in one
   process.
-* `Workers\ConcurrentOrderLoader` - the three reads sent to the worker pool
-  together, each executed by its own worker process on its own database
-  connection, then collected.
+* `Workers\ForkedOrderLoader` - one `pcntl_fork()` per part, results carried
+  back over a `socketpair()`, children reaped with `pcntl_waitpid()`. This is
+  where the concurrency primitive itself is visible in platform code rather
+  than borrowed from a component.
+* `Workers\ConcurrentOrderLoader` - the same three parts sent to the worker
+  pool, each executed by a worker process that already exists, on its own
+  database connection.
 
-`orders:compare` measures both, twice: once against plain local reads, and
-once with a simulated external dependency per part - the kind of enrichment
-that waits on something slower than a local table.
+`orders:compare` measures all three, twice: once against plain local reads,
+and once with a simulated external dependency per part - the kind of
+enrichment that waits on something slower than a local table.
 
 ```text
 Order load comparison: 5 rounds
 
   local reads only
-    sequential   0.766 ms
-    concurrent   1.906 ms
-    speedup      0.40x
+    sequential      0.713 ms   baseline
+    forked          7.507 ms   0.09x
+    pooled          0.973 ms   0.73x
 
   with a 50 ms simulated external dependency per part
-    sequential   161.050 ms
-    concurrent    52.656 ms
-    speedup      3.06x
+    sequential    161.200 ms   baseline
+    forked         65.568 ms   2.46x
+    pooled         54.898 ms   2.94x
 ```
 
-The lesson is the pair of numbers, not the second one. Fanning out costs a
-pool round trip per part, so three sub-millisecond reads get **slower**; the
-same fan-out is worth roughly 3x once each part actually waits. The database
-server itself is a single event loop, so concurrency here overlaps *waiting*,
-it does not multiply database throughput.
+Two lessons, not one:
+
+* **Fanning out is not free.** Three sub-millisecond reads get *slower* both
+  ways - and forking, which pays a whole process and a fresh database
+  connection per part, is an order of magnitude worse than the obvious loop.
+  Concurrency has to buy something.
+* **What it buys is overlapped waiting.** Once every part waits 50ms, both
+  models win, and the pool wins by more: same overlap, but the process
+  creation was paid once instead of on every load. That is the difference
+  between the raw primitive and a pool - visible here as a number rather than
+  asserted.
+
+The database server is a single event loop, so what overlaps is the *waiting*;
+concurrency here does not multiply database throughput.
 
 This is also why the background job does not fan out: `OrderProcessJob`
 already runs inside a pool worker, and a worker that hands work back to its

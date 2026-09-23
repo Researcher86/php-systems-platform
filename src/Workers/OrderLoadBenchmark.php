@@ -8,38 +8,51 @@ use PhpSystemsPlatform\Domain\OrderLoader;
 use RuntimeException;
 
 /**
- * The measurement behind PLAN Step 13: load the same order snapshot both
- * ways and report what each execution model costs.
+ * The measurement behind PLAN Steps 13 and 14: load the same order snapshot
+ * with every execution model the platform has and report what each one costs.
  *
- * Both loaders answer the same type, so the only difference between the two
- * numbers is where the waiting happened - in this process, one read after
- * another, or spread over worker processes. One untimed warm-up per loader
- * keeps one-off costs (the pool connection, the pool growing to fit the
- * fan-out, a cold connection) out of the average instead of letting them be
- * charged to the first round.
+ * All loaders answer the same type, so the only difference between the
+ * numbers is where the waiting happened - one read after another in this
+ * process, three processes forked for this one load, or three pool workers
+ * that already existed. The first model given is the baseline every other is
+ * reported against, because "faster" is only meaningful next to the obvious
+ * way of doing the work.
+ *
+ * One untimed warm-up per loader keeps one-off costs (a pool connection, the
+ * pool growing to fit the fan-out, a cold database connection) out of the
+ * average instead of charging them to the first round.
  */
 final readonly class OrderLoadBenchmark
 {
+    /**
+     * @param array<string, OrderLoader> $loaders baseline first
+     */
     public function __construct(
-        private OrderLoader $sequential,
-        private OrderLoader $concurrent,
+        private array $loaders,
     ) {
     }
 
     /**
-     * @return array{rounds: int, sequential_ms: float, concurrent_ms: float, speedup: float}
+     * @return list<array{name: string, ms: float, speedup: float}> in the
+     *         order the loaders were given
      */
     public function run(string $orderId, int $rounds): array
     {
-        $sequential = $this->measure($this->sequential, $orderId, $rounds);
-        $concurrent = $this->measure($this->concurrent, $orderId, $rounds);
+        $baseline = null;
+        $results = [];
 
-        return [
-            'rounds' => $rounds,
-            'sequential_ms' => round($sequential * 1_000, 3),
-            'concurrent_ms' => round($concurrent * 1_000, 3),
-            'speedup' => round($sequential / max(1e-9, $concurrent), 2),
-        ];
+        foreach ($this->loaders as $name => $loader) {
+            $seconds = $this->measure($loader, $orderId, $rounds);
+            $baseline ??= $seconds;
+
+            $results[] = [
+                'name' => $name,
+                'ms' => round($seconds * 1_000, 3),
+                'speedup' => round($baseline / max(1e-9, $seconds), 2),
+            ];
+        }
+
+        return $results;
     }
 
     /**

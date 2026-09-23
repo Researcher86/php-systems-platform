@@ -27,6 +27,7 @@ use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
 use PhpSystemsPlatform\Workers\ConcurrentOrderLoader;
 use PhpSystemsPlatform\Workers\ConcurrentTaskRunner;
+use PhpSystemsPlatform\Workers\ForkedOrderLoader;
 use PhpSystemsPlatform\Workers\WorkerManager;
 use PhpSystemsPlatform\Workers\WorkerRegistry;
 use PHPUnit\Framework\TestCase;
@@ -400,6 +401,45 @@ final class ServeIntegrationTest extends TestCase
         self::assertSame('completed', $rows[0]['status']);
     }
 
+    public function testForkedLoaderAnswersExactlyWhatTheSequentialOneDoes(): void
+    {
+        $order = $this->postOrder('Ada Lovelace', 19.99);
+
+        $sequential = new SequentialOrderLoader(self::orders(), new CatalogRepository(self::$database))
+            ->load($order['id']);
+        $forked = self::forkedLoader()->load($order['id']);
+
+        self::assertEquals($sequential, $forked);
+    }
+
+    public function testForkedLoaderAnswersNullForAnUnknownOrder(): void
+    {
+        self::assertNull(self::forkedLoader()->load($this->missingOrderId()));
+    }
+
+    public function testForkedLoaderOverlapsTheWaitReapsItsChildrenAndLeavesTheParentConnected(): void
+    {
+        $order = $this->postOrder('Alan Turing', 99.0);
+
+        $started = microtime(true);
+        $snapshot = self::forkedLoader(100)->load($order['id']);
+        $seconds = microtime(true) - $started;
+
+        self::assertNotNull($snapshot);
+        self::assertSame('bronze', $snapshot->customer?->tier);
+
+        // Three 100ms waits that happened at the same time, not one after
+        // another - forking is what made them overlap.
+        self::assertLessThan(0.3, $seconds);
+
+        // Nothing exited is left unreaped: every child was waited for.
+        self::assertLessThanOrEqual(0, pcntl_waitpid(-1, $status, WNOHANG));
+
+        // And the parent's own database connection survived the forks - the
+        // children never touched it, they opened their own.
+        self::assertNotNull(self::orders()->getOrder($order['id']));
+    }
+
     public function testParallelSplitsAHashTaskAcrossWorkers(): void
     {
         [$status, $body] = $this->request('GET', '/parallel?work=4000&split=4');
@@ -750,13 +790,17 @@ final class ServeIntegrationTest extends TestCase
         $output = (string) file_get_contents($out);
         self::assertStringContainsString('local reads only', $output);
         self::assertStringContainsString('50 ms simulated', $output);
-        self::assertStringContainsString('sequential', $output);
-        self::assertStringContainsString('concurrent', $output);
 
-        // Two measured pairs, and with a waiting part the fan-out wins.
-        preg_match_all('/speedup\s+([\d.]+)x/', $output, $speedups);
-        self::assertCount(2, $speedups[1]);
-        self::assertGreaterThan(1.0, (float) $speedups[1][1]);
+        foreach (['sequential', 'forked', 'pooled'] as $model) {
+            self::assertStringContainsString($model, $output);
+        }
+
+        // Two blocks, each reporting the two fan-out models against the
+        // sequential baseline - and once the parts wait, both beat it.
+        preg_match_all('/([\d.]+)x/', $output, $speedups);
+        self::assertCount(4, $speedups[1]);
+        self::assertGreaterThan(1.0, (float) $speedups[1][2]);
+        self::assertGreaterThan(1.0, (float) $speedups[1][3]);
     }
 
     public function testQueueBenchmarkRunsTheFullPipelineAndReportsMetrics(): void
@@ -819,6 +863,15 @@ final class ServeIntegrationTest extends TestCase
     private static function orders(): OrderService
     {
         return new OrderService(new OrderRepository(self::$database));
+    }
+
+    private static function forkedLoader(int $simulatedLatencyMs = 0): ForkedOrderLoader
+    {
+        return new ForkedOrderLoader(
+            self::orders(),
+            ['host' => self::HOST, 'port' => self::DB_PORT, 'timeout' => 2.0],
+            $simulatedLatencyMs,
+        );
     }
 
     private static function loader(): SequentialOrderLoader

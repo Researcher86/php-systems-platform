@@ -442,13 +442,40 @@ independent of each other.
   settles the order from it: stock the catalog can cover completes it,
   anything else cancels it, then the stale cached copy is dropped.
 - `Workers\OrderLoadBenchmark` + `orders:compare <rounds> <delay-ms>` — the
-  measurement, one untimed warm-up per loader, printed for both local reads
-  and a simulated external dependency per part.
+  measurement: every loader given, the first as baseline, one untimed warm-up
+  each, printed for both local reads and a simulated external dependency per
+  part.
 
-Measured (5 rounds, container): local reads 0.77ms sequential vs 1.91ms
-concurrent (**0.40x** — the fan-out loses), 50ms simulated dependency per
-part 161ms vs 53ms (**3.06x**). The database server is a single event loop,
-so the fan-out overlaps *waiting*; it does not multiply database throughput.
+### php-concurrency (Step 14, shipped)
+
+`php-concurrency` is a 38-lesson course, not a package — there is no
+`composer.json` to require. It is integrated the only way a course can be:
+the platform implements one path with the primitives itself, instead of
+letting php-worker-pool own every fork.
+
+`Workers\ForkedOrderLoader` is that path — the same `OrderLoader` contract as
+the other two, built from `stream_socket_pair()` before the fork,
+`pcntl_fork()`, closing the end each process does not own (or the parent's
+reads never see EOF), and `pcntl_waitpid()` for every child. Each child
+resets the signal handlers it inherited (`serve` and `queue:consume` install
+handlers over their own state) and opens its own database connection — a
+forked socket answered by two processes is how a protocol dies. A child that
+throws answers with its message and exit code 1, so a failed part is a failed
+load rather than a silently empty one.
+
+Measured (5 rounds, container), the same snapshot by all three models:
+
+| model | local reads | 50ms simulated dependency per part |
+| --- | --- | --- |
+| sequential | 0.713 ms (baseline) | 161.200 ms (baseline) |
+| forked | 7.507 ms (0.09x) | 65.568 ms (2.46x) |
+| pooled | 0.973 ms (0.73x) | 54.898 ms (2.94x) |
+
+Which is the argument for the pool, made with numbers: forking overlaps the
+waiting just as well, but pays a process and a connection on every load,
+while the pool paid them once. The database server is a single event loop, so
+what overlaps is *waiting* — concurrency does not multiply database
+throughput.
 
 ## Adapter mapping (used by later phases)
 
@@ -475,3 +502,11 @@ so the fan-out overlaps *waiting*; it does not multiply database throughput.
 | `Application\Handlers\WorkersStatusHandler` | `WorkerRegistry` snapshot over HTTP (`GET /workers`) |
 | `Workers\ConcurrentTaskRunner` | `WorkerPoolClient` fan-out (`send`/`allWithin`) |
 | `Workers\WorkerTasks`          | per-worker task handler (`ping`, `hash_chunk`) |
+| `Workers\CatalogTasks`         | per-worker reference reads (`catalog.customer/product/stock`) |
+| `Storage\Repositories\CatalogRepository` | `Database` → customers / products / inventory |
+| `Domain\OrderLoader`           | platform interface; one order snapshot, three execution models |
+| `Domain\SequentialOrderLoader` | the reads one after another, in this process |
+| `Workers\ForkedOrderLoader`    | `pcntl_fork` + `stream_socket_pair` + `pcntl_waitpid` (no component) |
+| `Workers\ConcurrentOrderLoader` | `ConcurrentTaskRunner` fan-out over `catalog.*` |
+| `Queue\Jobs\OrderProcessJob`   | executes an `order.process` carrier from a snapshot |
+| `Workers\OrderLoadBenchmark`   | the loaders side by side, baseline-relative |

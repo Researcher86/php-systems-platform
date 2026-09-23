@@ -14,7 +14,7 @@ platform only ever calls the entry points listed here.
 | Component                     | Entry point                       | Default listen addr |
 | ----------------------------- | --------------------------------- | ------------------- |
 | php-mini-http-server          | HTTP server, port 8080            | `127.0.0.1:8080`    |
-| php-mini-database             | `bin/minidb-server start`         | `127.0.0.1:5433`    |
+| php-mini-database             | `bin/minidb start` (platform entry) | `127.0.0.1:5433`   |
 | php-mini-cache                | `bin/server.php` (`CACHE_PORT`)   | `127.0.0.1:6380`    |
 | php-job-queue                 | none (in-process)                 | -                   |
 | php-worker-pool               | `Master` Unix socket              | `/tmp/php-worker-pool.sock` |
@@ -66,6 +66,25 @@ interface RequestHandler {
 
 Namespace `PhpMiniDatabase`. Client side only — the server is started as a
 process and talked to over TCP.
+
+The component's own `bin/minidb-server` boots with
+`require __DIR__.'/../vendor/autoload.php'`, which only resolves while the
+component *is* the root project; as a Composer dependency the path points at
+the component's own vendor directory and does not exist. The platform runs
+the server through its own one-file entry `bin/minidb`, which loads the
+platform autoloader and calls `PhpMiniDatabase\Cli\ServerApplication` with the
+same arguments the component's bin script would receive.
+
+`PlatformCli::serve()` owns the server process: it spawns it daemonized
+(`start --host --port --data --daemon --pid-file --log-file`), waits for the
+TCP port to answer, applies the schema through `Storage\Migrator`, and stops
+the server on shutdown only if this `serve` started it (a server that was
+already running on the same data directory is reused and left up). Data
+survives serve restarts in the data directory from `config/platform.php`.
+
+The mini database has no auto-increment. Order ids are UUID v7 (`ramsey/uuid`,
+time-ordered like a ULID), generated in `OrderService`; `orders.id` is
+`VARCHAR(36)`.
 
 ```php
 use PhpMiniDatabase\Client\ClientConfig;

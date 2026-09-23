@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Cli;
 
+use PhpMiniDatabase\Client\ClientConfig;
 use PhpMiniHttpServer\EventLoop\SelectLoop;
 use PhpMiniHttpServer\Http\Protocol\HttpParser;
 use PhpMiniHttpServer\Http\Protocol\ResponseEncoder;
@@ -15,7 +16,15 @@ use PhpMiniHttpServer\Server\ServerStartException;
 use PhpMiniHttpServer\Support\StderrLogger;
 use PhpSystemsPlatform\Application\Application;
 use PhpSystemsPlatform\Application\Handlers\HealthHandler;
+use PhpSystemsPlatform\Application\Handlers\OrderCreateHandler;
+use PhpSystemsPlatform\Application\Handlers\OrderReadHandler;
+use PhpSystemsPlatform\Application\Handlers\OrderUpdateHandler;
+use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Http\Router;
+use PhpSystemsPlatform\Storage\Database;
+use PhpSystemsPlatform\Storage\Migrator;
+use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
+use RuntimeException;
 
 /**
  * The whole CLI surface of the platform, in one place.
@@ -99,7 +108,28 @@ final class PlatformCli
      */
     private function serve(): int
     {
-        $http = $this->config()['http'];
+        $config = $this->config();
+        $databaseConfig = $config['database'];
+
+        $database = Database::fromConfig(new ClientConfig(
+            host: $databaseConfig['host'],
+            port: $databaseConfig['port'],
+            connectTimeoutSeconds: $databaseConfig['timeout'],
+        ));
+
+        $ownsDatabaseServer = false;
+
+        try {
+            $ownsDatabaseServer = $this->ensureDatabaseServer($databaseConfig);
+            Migrator::migrate($database);
+        } catch (RuntimeException $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            $database->close();
+
+            return 1;
+        }
+
+        $http = $config['http'];
 
         $serverConfig = new ServerConfig(
             host: $http['host'],
@@ -116,6 +146,8 @@ final class PlatformCli
             $server->start();
         } catch (ServerStartException $e) {
             fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            $database->close();
+            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
 
             return 1;
         }
@@ -126,7 +158,7 @@ final class PlatformCli
         $metrics = new ServerMetrics();
         $loop = new SelectLoop();
 
-        $application = $this->application();
+        $application = $this->application($database);
 
         $loop->onReadable($server->socket(), static function () use ($loop, $server, $parser, $encoder, $application, $metrics, $logger): void {
             $connection = $server->accept();
@@ -164,6 +196,8 @@ final class PlatformCli
         $loop->run();
 
         $server->stop();
+        $database->close();
+        $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
         printf("Shutdown complete.\n");
 
         return 0;
@@ -171,15 +205,150 @@ final class PlatformCli
 
     /**
      * The platform's routes, in their Application. Serves as the wiring note
-     * for the platform as well: this is where the health endpoint lands in
-     * Phase 3 and where the order routes join in Phase 4.
+     * for the platform as well: the health endpoint landed in Phase 3 and the
+     * order endpoints land in Phase 4 on top of the injected Database.
      */
-    private function application(): Application
+    private function application(Database $database): Application
     {
+        $orders = new OrderService(new OrderRepository($database));
+
         $router = new Router();
         $router->get('/health', (new HealthHandler())(...));
+        $router->post('/orders', (new OrderCreateHandler($orders))(...));
+        $router->get('/orders/{id}', (new OrderReadHandler($orders))(...));
+        $router->put('/orders/{id}', (new OrderUpdateHandler($orders))(...));
 
         return new Application($router);
+    }
+
+    /**
+     * Make sure a mini database server answers on the configured host/port
+     * for the duration of this serve, and return whether this process is the
+     * one that started it (and therefore the one that must stop it). A
+     * server that was already running is reused and stays up afterwards.
+     *
+     * The platform owns the decision to run the database as its own process
+     * - the component's CLI keeps that process, lifecycle and data separate
+     * from the HTTP process, which is exactly the process boundary the lab
+     * wants to be able to point at.
+     *
+     * @param array<string, mixed> $config
+     */
+    private function ensureDatabaseServer(array $config): bool
+    {
+        $script = $this->databaseServerBinary();
+        $pidFile = $config['data_dir'] . '/minidb.pid';
+        $logFile = $config['data_dir'] . '/minidb.log';
+
+        $output = '';
+        $hadServer = $this->runServerCli([$script, 'status', '--pid-file', $pidFile], $output) === 0;
+
+        if ($hadServer) {
+            printf("Database server already running (pid %s)\n", trim($output));
+
+            return false;
+        }
+
+        if (!is_dir($config['data_dir']) && !@mkdir($config['data_dir'], 0o777, true) && !is_dir($config['data_dir'])) {
+            throw new RuntimeException(sprintf('Could not create database data directory "%s".', $config['data_dir']));
+        }
+
+        $code = $this->runServerCli([
+            $script,
+            'start',
+            '--host', $config['host'],
+            '--port', (string) $config['port'],
+            '--data', $config['data_dir'],
+            '--daemon',
+            '--pid-file', $pidFile,
+            '--log-file', $logFile,
+        ], $output);
+
+        if ($code !== 0) {
+            throw new RuntimeException('Could not start the database server: ' . rtrim($output));
+        }
+
+        if (!$this->waitForPort($config['host'], (int) $config['port'])) {
+            throw new RuntimeException(sprintf(
+                'Database server did not start listening on tcp://%s:%d in time.',
+                $config['host'],
+                $config['port'],
+            ));
+        }
+
+        printf("Database server listening on tcp://%s:%d\n", $config['host'], $config['port']);
+
+        return true;
+    }
+
+    /** @param array<string, mixed> $config */
+    private function stopDatabaseServerIfOwned(bool $owns, array $config): void
+    {
+        if (!$owns) {
+            return;
+        }
+
+        $pidFile = $config['data_dir'] . '/minidb.pid';
+        $output = '';
+
+        if ($this->runServerCli([$this->databaseServerBinary(), 'stop', '--pid-file', $pidFile], $output) === 0) {
+            printf("Database server stopped\n");
+
+            return;
+        }
+
+        fwrite(STDERR, 'Database server could not be stopped: ' . rtrim($output) . PHP_EOL);
+    }
+
+    /**
+     * @param list<string> $command
+     */
+    private function runServerCli(array $command, string &$output): int
+    {
+        $process = proc_open([PHP_BINARY, ...$command], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+
+        if (!is_resource($process)) {
+            throw new RuntimeException(sprintf('Could not run "%s".', implode(' ', $command)));
+        }
+
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $code = proc_close($process);
+
+        $output = trim($stdout . "\n" . $stderr);
+
+        return $code;
+    }
+
+    private function databaseServerBinary(): string
+    {
+        return dirname(__DIR__, 2) . '/bin/minidb';
+    }
+
+    private function waitForPort(string $host, int $port, float $timeoutSeconds = 10.0): bool
+    {
+        $deadline = microtime(true) + $timeoutSeconds;
+
+        while (microtime(true) < $deadline) {
+            $socket = @stream_socket_client(
+                sprintf('tcp://%s:%d', $host, $port),
+                $errorCode,
+                $errorMessage,
+                0.2,
+            );
+
+            if ($socket !== false) {
+                fclose($socket);
+
+                return true;
+            }
+
+            usleep(100_000);
+        }
+
+        return false;
     }
 
     /**

@@ -2333,14 +2333,14 @@ Phase 5 is complete when all of the following are true.
 * [x] HTTP server works.
 * [x] Routing works.
 * [x] Health endpoint works.
-* [ ] Order API works.
+* [x] Order API works.
 
 ## Database
 
-* [ ] Orders can be created.
-* [ ] Orders can be read.
-* [ ] Updates work.
-* [ ] Database errors are handled.
+* [x] Orders can be created.
+* [x] Orders can be read.
+* [x] Updates work.
+* [x] Database errors are handled.
 
 ## Cache
 

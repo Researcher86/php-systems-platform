@@ -32,10 +32,10 @@ use Throwable;
  * Route misses and handler failures are translated into their HTTP answers
  * at the same boundary, so one bad request never stops the server.
  */
-final class Application implements RequestHandler
+final readonly class Application implements RequestHandler
 {
     public function __construct(
-        private readonly Router $router,
+        private Router $router,
     ) {
     }
 

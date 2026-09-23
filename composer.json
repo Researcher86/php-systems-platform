@@ -44,6 +44,7 @@
         "ext-sysvmsg": "*",
         "ext-sysvsem": "*",
         "ext-sysvshm": "*",
+        "ramsey/uuid": "^4.9",
         "tanat/php-job-queue": "dev-master",
         "tanat/php-mini-cache": "dev-master",
         "tanat/php-mini-database": "dev-master",

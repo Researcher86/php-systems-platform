@@ -603,9 +603,52 @@ The queue grows:
 queue depth ↑
 ```
 
-until the configured limit is reached.
+until the configured limit is reached: `config/platform.php`'s `queue.max_size`
+(default 500).
 
-The platform then applies an explicit backpressure policy instead of allowing unbounded resource consumption.
+The platform's policy is **reject**, checked at the one place an HTTP producer
+meets the queue - `POST /orders`, before anything is written or enqueued:
+
+```text
+POST /orders
+     │
+     ▼
+queue depth >= max_size?
+     │
+     ├── yes ──► 429, Retry-After: 1, nothing written, nothing enqueued
+     │
+     └── no ───► create the order, enqueue the job, 201
+```
+
+Not block, and not a silent drop: the platform has exactly one HTTP worker
+(the component's server is single-threaded), so blocking it on a queue it
+cannot itself drain would stall every other request too, and a 201 for work
+that was quietly thrown away would tell a caller their order exists when it
+does not. A 429 (`Queue\BackpressurePolicy`, which
+`Application\Handlers\OrderCreateHandler` checks first) is the caller's own
+signal to slow down, with the numbers to explain why:
+
+```json
+{"error": "Queue is at capacity.", "queueDepth": 500, "queueMaxSize": 500}
+```
+
+Depth is read straight off the same durable journal `GET /queue/status`
+already answers with - never an in-memory counter, because the HTTP
+process's own queue handle only ever grows (the consumer that actually
+drains jobs runs in a different process); the journal is the one place
+both sides agree on how much work is outstanding.
+
+To see it trip, lower the limit and cross it:
+
+```bash
+QUEUE_MAX_SIZE=3 php bin/platform.php serve &   # small limit for the demo
+for i in 1 2 3 4; do
+  php bin/platform.php queue:publish order.created '{"order_id":"'"$i"'"}'
+done
+curl -i -X POST localhost:8080/orders -d '{"customer":"Overflow","amount":1}'
+# HTTP/1.1 429
+# {"error":"Queue is at capacity.","queueDepth":4,"queueMaxSize":3}
+```
 
 This makes it possible to experiment with:
 

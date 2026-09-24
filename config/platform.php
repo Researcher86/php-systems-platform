@@ -26,7 +26,10 @@ return [
     ],
     'queue' => [
         'data_dir' => sys_get_temp_dir() . '/php-systems-platform/queue',
-        'max_size' => 500,
+        // The MAX_QUEUE_SIZE Step 17's backpressure policy checks - the one
+        // value here worth overriding without editing this file, since
+        // reproducing an overload means running `serve` with a small one.
+        'max_size' => (int) (getenv('QUEUE_MAX_SIZE') ?: 500),
         'timeout' => 2.0,
         'max_attempts' => 3,
         'retry_delay' => 0.1,

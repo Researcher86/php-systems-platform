@@ -14,9 +14,13 @@ use PhpJobQueue\Retry\FixedDelayRetry;
 use PhpJobQueue\Support\SystemClock;
 use PhpJobQueue\Worker\WorkerPool;
 use PhpMiniDatabase\Client\ClientConfig;
+use PhpSystemsPlatform\Application\Handlers\OrderCreateHandler;
 use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Domain\SequentialOrderLoader;
+use PhpSystemsPlatform\Http\Request;
+use PhpSystemsPlatform\Http\RequestMethod;
+use PhpSystemsPlatform\Queue\BackpressurePolicy;
 use PhpSystemsPlatform\Queue\JobContext;
 use PhpSystemsPlatform\Queue\JobExecutor;
 use PhpSystemsPlatform\Queue\Jobs\OrderCreatedJob;
@@ -446,6 +450,58 @@ final class ServeIntegrationTest extends TestCase
         // And the parent's own database connection survived the forks - the
         // children never touched it, they opened their own.
         self::assertNotNull(self::orders()->getOrder($order['id']));
+    }
+
+    public function testOrderCreationIsRejectedWithoutTouchingAnythingWhenTheQueueIsAtCapacity(): void
+    {
+        $scratchLog = self::LOG_DIR . '/backpressure.log';
+        @unlink($scratchLog);
+        $this->publishJobs($scratchLog, 2);
+
+        $handler = new OrderCreateHandler(
+            self::orders(),
+            self::$cache,
+            new BackpressurePolicy(new QueueJournal($scratchLog), maxSize: 2),
+        );
+
+        $before = self::$database->read('SELECT COUNT(*) AS n FROM orders')[0]['n'];
+
+        $response = $handler(new Request(RequestMethod::POST, '/orders', body: json_encode([
+            'customer' => 'Overloaded Customer',
+            'amount' => 1,
+        ], JSON_THROW_ON_ERROR)), []);
+
+        self::assertSame(429, $response->status);
+        self::assertNotNull($response->header('Retry-After'));
+
+        $payload = json_decode($response->body, true, 512, JSON_THROW_ON_ERROR);
+        self::assertSame(2, $payload['queueDepth']);
+        self::assertSame(2, $payload['queueMaxSize']);
+
+        // Rejected means rejected: nothing was persisted and nothing was
+        // enqueued because of this request.
+        $after = self::$database->read('SELECT COUNT(*) AS n FROM orders')[0]['n'];
+        self::assertSame($before, $after);
+    }
+
+    public function testOrderCreationSucceedsWhenTheQueueIsUnderCapacity(): void
+    {
+        $scratchLog = self::LOG_DIR . '/backpressure-ok.log';
+        @unlink($scratchLog);
+        $this->publishJobs($scratchLog, 1);
+
+        $handler = new OrderCreateHandler(
+            self::orders(),
+            self::$cache,
+            new BackpressurePolicy(new QueueJournal($scratchLog), maxSize: 2),
+        );
+
+        $response = $handler(new Request(RequestMethod::POST, '/orders', body: json_encode([
+            'customer' => 'Room To Spare',
+            'amount' => 1,
+        ], JSON_THROW_ON_ERROR)), []);
+
+        self::assertSame(201, $response->status);
     }
 
     public function testParallelSplitsAHashTaskAcrossWorkers(): void
@@ -885,6 +941,23 @@ final class ServeIntegrationTest extends TestCase
     private static function loader(): SequentialOrderLoader
     {
         return new SequentialOrderLoader(self::orders(), new CatalogRepository(self::$database));
+    }
+
+    /**
+     * Publish $count bare bench.noop jobs into a scratch journal - just
+     * enough to make BackpressurePolicy see a given depth, nothing more.
+     */
+    private function publishJobs(string $logPath, int $count): void
+    {
+        $clock = new SystemClock();
+        $producer = new Producer(
+            new InMemoryQueue($clock, new FileStorage($logPath)),
+            new JobFactory($clock, new MetricsCollector()),
+        );
+
+        for ($i = 0; $i < $count; $i++) {
+            $producer->dispatch(\PhpSystemsPlatform\Queue\Jobs\NoopJob::TYPE);
+        }
     }
 
     private function dispatchJob(string $type, array $payload = []): \PhpJobQueue\Job\Job

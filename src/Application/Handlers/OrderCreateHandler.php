@@ -10,6 +10,7 @@ use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Http\Request;
 use PhpSystemsPlatform\Http\Response;
+use PhpSystemsPlatform\Queue\BackpressurePolicy;
 
 /**
  * POST /orders - the synchronous write path: parse a {"customer", "amount"}
@@ -23,12 +24,21 @@ use PhpSystemsPlatform\Http\Response;
  * existing entry, so nothing is ever stale here - the authoritative row is
  * placed into the cache (cache.set) and the very first read is served by it.
  * If the cache cannot answer, the write proceeds as a bypass, never a failure.
+ *
+ * Backpressure (PLAN Step 17): the write path is where the platform's one
+ * HTTP producer meets the queue, so it is where the queue's capacity is
+ * enforced. A $backpressure policy checked BEFORE anything else runs turns
+ * an overloaded queue into a 429 with nothing written and nothing enqueued -
+ * reject, not block or silently drop - rather than adding one more order the
+ * consumer is already behind on. Null (the default) means unchecked, for
+ * callers that have no queue to protect.
  */
 final readonly class OrderCreateHandler
 {
     public function __construct(
         private OrderService $orders,
         private CacheService $cache,
+        private ?BackpressurePolicy $backpressure = null,
     ) {
     }
 
@@ -37,6 +47,16 @@ final readonly class OrderCreateHandler
      */
     public function __invoke(Request $request, array $params): Response
     {
+        $decision = $this->backpressure?->evaluate();
+
+        if ($decision?->atCapacity === true) {
+            return Response::json([
+                'error' => 'Queue is at capacity.',
+                'queueDepth' => $decision->depth,
+                'queueMaxSize' => $decision->maxSize,
+            ], 429, ['Retry-After' => '1']);
+        }
+
         $payload = $this->decode($request->body);
 
         if ($payload === null) {

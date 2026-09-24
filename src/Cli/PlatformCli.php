@@ -40,6 +40,7 @@ use PhpSystemsPlatform\Domain\SequentialOrderLoader;
 use PhpSystemsPlatform\Http\Router;
 use PhpSystemsPlatform\Memory\ForkedMemoryDemo;
 use PhpSystemsPlatform\Memory\MemorySnapshot;
+use PhpSystemsPlatform\Queue\BackpressurePolicy;
 use PhpSystemsPlatform\Queue\QueueConsumer;
 use PhpSystemsPlatform\Queue\QueueJournal;
 use PhpSystemsPlatform\Storage\Database;
@@ -274,7 +275,7 @@ final class PlatformCli
         $metrics = new ServerMetrics();
         $loop = new SelectLoop();
 
-        $application = $this->application($database, $cache, $producer, $runner, $config['queue']['data_dir'] . '/queue.log', $config['workers']['data_dir'] . '/workers.status.json');
+        $application = $this->application($database, $cache, $producer, $runner, $config['queue']['data_dir'] . '/queue.log', $config['workers']['data_dir'] . '/workers.status.json', (int) $config['queue']['max_size']);
 
         $loop->onReadable($server->socket(), static function () use ($loop, $server, $parser, $encoder, $application, $metrics, $logger): void {
             $connection = $server->accept();
@@ -336,15 +337,25 @@ final class PlatformCli
      * The queue phase adds GET /queue/status, the journal-derived counters
      * the queue:status CLI prints, on top of the queue's data dir; the
      * worker-lifecycle phase adds GET /workers, the queue consumer's
-     * forwarder snapshot.
+     * forwarder snapshot. The backpressure phase (Step 17) adds a policy in
+     * front of POST /orders itself - null-tolerant the same way, so a caller
+     * with no queue log or no configured limit gets the old unbounded write
+     * path back.
      */
-    private function application(Database $database, CacheService $cache, ?Producer $producer = null, ?ConcurrentTaskRunner $runner = null, string $queueLogPath = '', string $workersStatusPath = ''): Application
+    private function application(Database $database, CacheService $cache, ?Producer $producer = null, ?ConcurrentTaskRunner $runner = null, string $queueLogPath = '', string $workersStatusPath = '', ?int $maxQueueSize = null): Application
     {
         $orders = new OrderService(new OrderRepository($database), $producer);
 
+        // PLAN Step 17: only a real queue has a depth to be overloaded, so
+        // the policy exists exactly when the producer and the journal it
+        // writes to both do.
+        $backpressure = ($queueLogPath !== '' && $maxQueueSize !== null)
+            ? new BackpressurePolicy(new QueueJournal($queueLogPath), $maxQueueSize)
+            : null;
+
         $router = new Router();
         $router->get('/health', (new HealthHandler())(...));
-        $router->post('/orders', (new OrderCreateHandler($orders, $cache))(...));
+        $router->post('/orders', (new OrderCreateHandler($orders, $cache, $backpressure))(...));
         $router->get('/orders/{id}', (new OrderReadHandler($orders, $cache))(...));
         $router->put('/orders/{id}', (new OrderUpdateHandler($orders, $cache))(...));
         $router->get('/parallel', (new ParallelHandler($runner))(...));

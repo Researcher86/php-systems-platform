@@ -543,6 +543,29 @@ RSS summed across processes double-counts pages every worker still shares
 with its parent, which is why the *delta* between the two totals — not
 either alone — is the number that isolates what writing actually cost.
 
+### Backpressure (Step 17, shipped)
+
+Neither `Queue`'s `InMemoryQueue::push()` nor `Producer::dispatch()` enforces
+a capacity — the component queue is unbounded by design, so `MAX_QUEUE_SIZE`
+and what happens at it are entirely the platform's to decide.
+
+- `Queue\BackpressurePolicy` — `evaluate(): BackpressureDecision` reads
+  `QueueJournal::snapshot()['depth']` (the same durable, cross-process count
+  `GET /queue/status` answers with — never an in-memory counter, since the
+  HTTP process's own queue handle only ever grows) against a configured
+  `maxSize`.
+- `Application\Handlers\OrderCreateHandler` — checks the policy first, before
+  decoding the body or touching the database: at capacity, **reject** — `429`,
+  `Retry-After: 1`, `{queueDepth, queueMaxSize}`, nothing written, nothing
+  enqueued. Not block (the component's HTTP server is single-connection at a
+  time; blocking it on a queue it cannot itself drain would stall every other
+  request) and not a silent drop (a `201` for work that was thrown away would
+  lie to the caller). The policy is optional (`?BackpressurePolicy = null`) —
+  wired in `PlatformCli::application()` only when both a queue log and a
+  configured `max_size` exist.
+- `config/platform.php`'s `queue.max_size` (default 500) is the limit;
+  nothing else in the platform reads or writes it.
+
 ## Adapter mapping (used by later phases)
 
 | Platform class                 | Wraps                                  |
@@ -581,3 +604,4 @@ either alone — is the number that isolates what writing actually cost.
 | `Memory\ForkedMemoryDemo`      | `pcntl_fork` + `stream_socket_pair` over a shared array (no component) |
 | `Workers\WorkerMemoryTasks`    | pool-side `memory.hold` — snapshot, retain, snapshot |
 | `Workers\WorkerMemoryBenchmark` | `ConcurrentTaskRunner` fan-out over `memory.hold` → aggregated report |
+| `Queue\BackpressurePolicy`     | `QueueJournal` depth vs `max_size` → reject decision (no component) |

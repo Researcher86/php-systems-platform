@@ -2380,10 +2380,10 @@ Phase 5 is complete when all of the following are true.
 
 ## Backpressure
 
-* [ ] Queue overload can be reproduced.
-* [ ] Queue growth is observable.
-* [ ] Backpressure policy is explicit.
-* [ ] The system remains bounded under overload.
+* [x] Queue overload can be reproduced.
+* [x] Queue growth is observable.
+* [x] Backpressure policy is explicit.
+* [x] The system remains bounded under overload.
 
 ## Observability
 

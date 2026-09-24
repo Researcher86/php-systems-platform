@@ -7,6 +7,7 @@ namespace PhpSystemsPlatform\Queue\Jobs;
 use PhpMiniCache\Sdk\CacheClientException;
 use PhpSystemsPlatform\Queue\Job;
 use PhpSystemsPlatform\Queue\JobContext;
+use PhpSystemsPlatform\Queue\ValidatesPayload;
 use RuntimeException;
 
 /**
@@ -21,23 +22,42 @@ use RuntimeException;
  * the write path had to bypass the cache (it was down): once the cache is
  * reachable again, this job heals the gap.
  *
- * A payload without an order_id, or an order_id no longer in the database,
- * is a RuntimeException - the job is malformed or the truth it points at is
- * gone, and that must surface as a failed attempt for the retry/DLQ story
- * instead of being swallowed.
+ * Two ways to fail, two different futures (PLAN Step 19). A payload without
+ * an order_id can never work - retrying it asks the same unanswerable
+ * question again - so ValidatesPayload rejects it before this job is ever
+ * dispatched. An order_id the database does not know is different: in this
+ * platform's write-before-publish design that should never actually happen
+ * (the row exists before the job is even created), but it is not something
+ * a payload check can rule out - answering it needs the database this job
+ * already has open - so it stays a thrown RuntimeException on the normal
+ * retry path, the honest place for a condition that is unreachable in
+ * practice rather than provably permanent.
  */
-final readonly class OrderCreatedJob implements Job
+final readonly class OrderCreatedJob implements Job, ValidatesPayload
 {
     public const string TYPE = 'order.created';
 
+    public static function validate(array $payload): ?string
+    {
+        $orderId = $payload['order_id'] ?? null;
+
+        return is_string($orderId) && $orderId !== '' ? null : 'order.created payload is missing order_id.';
+    }
+
     public function execute(JobContext $context): void
     {
-        $orderId = $context->job->getPayload()['order_id'] ?? null;
+        // validate() already ruled this out for anything dispatched through
+        // ValidatingQueue; called again here so a job executed directly (a
+        // test, or any future path that bypasses the queue) gets the same
+        // answer instead of a silently different one.
+        $payload = $context->job->getPayload();
+        $reason = self::validate($payload);
 
-        if (!is_string($orderId) || $orderId === '') {
-            throw new RuntimeException('order.created payload is missing order_id.');
+        if ($reason !== null) {
+            throw new RuntimeException($reason);
         }
 
+        $orderId = (string) $payload['order_id'];
         $order = $context->orders->getOrder($orderId);
 
         if ($order === null) {

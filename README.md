@@ -293,6 +293,16 @@ Inspect queue state (published / depth / completed / failed / retried), the
 same counters `GET /queue/status` answers over HTTP.
 
 ```bash
+php bin/platform.php queue:job <id>
+```
+
+Show one job's full metadata - type, state, attempts/max_attempts,
+created_at - and its whole attempt history (started_at, completed_at,
+last_error per delivery), joined from the queue's own journal and the
+platform's own attempt journal (see Retry Policy below for why the second
+one exists).
+
+```bash
 php bin/platform.php workers:status
 ```
 
@@ -731,6 +741,84 @@ The database's own operation timeout (`read_timeout`/`write_timeout`) matches
 the component's own defaults exactly - naming them in config changes nothing
 about what already ran, it only makes the number a config reader can find
 instead of one buried in `php-mini-database`'s own source.
+
+---
+
+# Retry Policy
+
+```text
+attempt 1
+   ↓ failure
+attempt 2
+   ↓ failure
+attempt 3
+   ↓ failure
+dead / failed
+```
+
+`php-job-queue`'s own retry decision, read from its source rather than
+guessed, is exactly `attempts < maxAttempts` - a number fixed once, when a
+job is published, with no hook for "and don't bother, this one can never
+work." That is not a gap the platform can configure around; it is the whole
+of the component's retry logic. So **not every error gets to spend that
+budget**: some are rejected before a worker ever sees them.
+
+```text
+Queue::pop()
+     │
+     ▼
+ValidatesPayload::validate(payload)
+     │
+     ├── invalid ──► markFailed(), 1 attempt spent, never dispatched
+     │
+     └── valid ────► handed to a worker, normal retry-then-fail applies
+```
+
+`Queue\ValidatingQueue` wraps the queue the consumer pops from. A job whose
+type implements `ValidatesPayload` (`order.created`, `order.process` - both
+reject a payload missing `order_id`) is checked there, cheaply, from the
+payload alone, no database involved. Reject it and the job is FAILED with
+exactly one attempt consumed - the honest cost of the delivery it took to
+notice - not the three it would otherwise have wasted:
+
+```text
+$ php bin/platform.php queue:job <id>
+  type          order.created
+  state         FAILED
+  attempts      1 / 3
+  no attempt history recorded yet
+```
+
+**Retryable which failures, though?** A payload missing `order_id` never
+succeeds no matter how many times it runs - permanent. An `order_id`
+pointing at a row that does not exist is different: this platform writes the
+order before publishing the job, so in normal operation that should never
+actually happen, but *proving* it needs a database read a payload check
+cannot do - so it is left on the normal path, retried three times, then
+failed:
+
+```text
+$ php bin/platform.php queue:job <id>
+  type          order.created
+  state         FAILED
+  attempts      3 / 3
+
+  attempt history (.../queue.attempts.log)
+    attempt 1   started ...   completed ...   error: Order "..." not found for order.created.
+    attempt 2   started ...   completed ...   error: Order "..." not found for order.created.
+    attempt 3   started ...   completed ...   error: Order "..." not found for order.created.
+```
+
+That attempt history is job metadata `php-job-queue` does not keep at all -
+`Job::toArray()` has `attempts` and `maxAttempts` but no `started_at`,
+`completed_at` or `last_error`, verified by reading the class rather than
+assumed. `Queue\JobAttemptJournal` is the platform's own append-only record
+of it, one row per execution, written by `JobExecutor` (the one place every
+attempt - the real consumer and the benchmark alike - actually runs). A
+rejected job has none: it never reached a worker to have an attempt at all.
+`php bin/platform.php queue:job <id>` joins both journals into the full
+picture the plan asks for: `job_id`, `attempt`, `max_attempts`, `created_at`,
+`started_at`, `completed_at`, `last_error`.
 
 ---
 

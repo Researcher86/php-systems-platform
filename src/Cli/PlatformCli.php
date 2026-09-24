@@ -40,8 +40,10 @@ use PhpSystemsPlatform\Http\Router;
 use PhpSystemsPlatform\Memory\ForkedMemoryDemo;
 use PhpSystemsPlatform\Memory\MemorySnapshot;
 use PhpSystemsPlatform\Queue\BackpressurePolicy;
+use PhpSystemsPlatform\Queue\JobAttemptJournal;
 use PhpSystemsPlatform\Queue\QueueConsumer;
 use PhpSystemsPlatform\Queue\QueueJournal;
+use PhpSystemsPlatform\Queue\ValidatingQueue;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Migrator;
 use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
@@ -79,6 +81,7 @@ final class PlatformCli
         'queue:publish' => 'Publish sample jobs into the queue.',
         'queue:consume' => 'Run the queue consumer (pairs with worker pool).',
         'queue:status' => 'Show queue depth and job counters.',
+        'queue:job' => 'Show one job\'s full metadata and attempt history: queue:job <id>.',
         'workers:status' => 'Show the queue consumer worker lifecycle.',
         'status' => 'Show the state of every platform component.',
         'demo' => 'Run the complete end-to-end platform story.',
@@ -151,6 +154,7 @@ final class PlatformCli
             'queue:publish' => $this->queuePublish(array_slice($argv, 2)),
             'queue:consume' => $this->queueConsume(),
             'queue:status' => $this->queueStatus(),
+            'queue:job' => $this->queueJob(array_slice($argv, 2)),
             'workers:status' => $this->workersStatus(),
             'benchmark' => $this->queueBenchmark(array_slice($argv, 2)),
             'orders:compare' => $this->ordersCompare(array_slice($argv, 2)),
@@ -867,7 +871,10 @@ final class PlatformCli
             $knownIds[$id] = true;
         }
 
-        $queue = InMemoryQueue::restoreFromStorage($storage, $clock);
+        // PLAN Step 19: a job ValidatesPayload can already tell will never
+        // succeed is rejected here, before it is ever dispatched to a
+        // worker, instead of burning a full retry budget on it.
+        $queue = new ValidatingQueue(InMemoryQueue::restoreFromStorage($storage, $clock), $storage);
 
         $restored = new QueueJournal($logPath)->snapshot();
         printf("Consumer restoring queue from %s\n", $logPath);
@@ -1535,6 +1542,71 @@ final class PlatformCli
         printf("  queue.retried   %d\n", $snapshot['retried']);
 
         return 0;
+    }
+
+    /**
+     * PLAN Step 19's job metadata (job_id, attempt, max_attempts,
+     * created_at, started_at, completed_at, last_error), joined from the
+     * two journals that between them carry all of it: QueueJournal has
+     * everything the component's own Job tracks, JobAttemptJournal has the
+     * three fields it does not (see that class for why).
+     *
+     * @param list<string> $args the job id
+     */
+    private function queueJob(array $args): int
+    {
+        $id = $args[0] ?? null;
+
+        if ($id === null) {
+            fwrite(STDERR, "Usage: php bin/platform.php queue:job <id>\n");
+
+            return 1;
+        }
+
+        $config = $this->config();
+        $logPath = $config['queue']['data_dir'] . '/queue.log';
+        $rows = new QueueJournal($logPath)->rows();
+        $row = $rows[$id] ?? null;
+
+        if ($row === null) {
+            fwrite(STDERR, sprintf('No job "%s" in the journal at %s.', $id, $logPath) . PHP_EOL);
+
+            return 1;
+        }
+
+        printf("Job %s\n", $id);
+        printf("  type          %s\n", (string) $row['type']);
+        printf("  state         %s\n", (string) $row['state']);
+        printf("  attempts      %d / %d\n", (int) $row['attempts'], (int) $row['maxAttempts']);
+        printf("  created_at    %s\n", $this->formatTimestamp((float) $row['createdAt']));
+
+        $attemptsLogPath = $config['queue']['data_dir'] . '/queue.attempts.log';
+        $attempts = new JobAttemptJournal($attemptsLogPath)->forJob($id);
+
+        if ($attempts === []) {
+            printf("  no attempt history recorded yet\n");
+
+            return 0;
+        }
+
+        printf("\n  attempt history (%s)\n", $attemptsLogPath);
+
+        foreach ($attempts as $attempt) {
+            printf(
+                "    attempt %d   started %s   completed %s   error: %s\n",
+                $attempt['attempt'],
+                $this->formatTimestamp($attempt['started_at']),
+                $this->formatTimestamp($attempt['completed_at']),
+                $attempt['last_error'] ?? '-',
+            );
+        }
+
+        return 0;
+    }
+
+    private function formatTimestamp(float $unixTime): string
+    {
+        return gmdate('Y-m-d\TH:i:s\Z', (int) $unixTime);
     }
 
     /**

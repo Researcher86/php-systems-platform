@@ -629,6 +629,48 @@ Queue section above) — a job may legitimately sit in a worker's hands for up
 to one full round trip, and visibility has to span that or the queue would
 reclaim jobs that are still being worked on.
 
+### Retry policy (Step 19, shipped)
+
+`JobDispatcher::handleFailure()` — read from the component's own source, not
+guessed — decides retry-or-fail with exactly one condition,
+`attempts < maxAttempts`, fixed once at publish time. No per-error hook
+exists: a thrown exception's class does not even survive the trip back
+faithfully in this platform's own wiring (`WorkerManager::execute()` wraps
+every pool rejection in a plain `RuntimeException`), and `handleFailure()`
+would ignore it if it did. The only lever the platform actually has is
+choosing not to dispatch a job at all.
+
+- `Queue\ValidatesPayload` — a job type opts in with a static
+  `validate(array $payload): ?string`, checked from the payload alone, no
+  I/O. `OrderCreatedJob`/`OrderProcessJob` both implement it (missing
+  `order_id` → rejected); `NoopJob` does not (nothing to validate).
+- `Queue\ValidatingQueue implements PhpJobQueue\Queue\Queue` — decorates the
+  consumer's queue. `pop()` checks each job against
+  `JobRegistry::validate()`; a failing one is `markProcessing()` +
+  `markFailed()` (the same two transitions a real dispatch-then-exhausted-
+  retry would produce) + persisted, then skipped — the caller sees the next
+  job instead. One attempt consumed, never a worker occupied.
+  `QueueConsumer`'s own `$queue` property is typed to the component's
+  `Queue` interface (was `InMemoryQueue`) so it can hold the decorator.
+  Wired into `queue:consume`; the benchmark's own consumer is left
+  unwrapped — it only ever publishes `NoopJob`, which has nothing to
+  validate.
+- **What stays on the normal retry path, deliberately**: "order not found"
+  for either job. Answering it needs a database read a payload check
+  cannot do, and in this platform's write-before-publish design it is
+  already unreachable in normal operation — a real, if rare, condition
+  rather than a provably permanent one, which is exactly the distinction
+  `ValidatesPayload` is *for* drawing.
+- `Queue\JobAttemptJournal` — the job metadata the component does not keep
+  at all (`Job::toArray()` has no `started_at`/`completed_at`/`last_error` —
+  checked, not assumed). One append-only row per execution, written by
+  `JobExecutor` (the chokepoint every attempt funnels through, real consumer
+  and benchmark alike) around a try/finally so a thrown exception's message
+  is recorded before it propagates.
+- `queue:job <id>` CLI — joins `QueueJournal`'s row (id/type/state/
+  attempts/maxAttempts/createdAt) with `JobAttemptJournal::forJob()`'s
+  history into the full picture the plan's job-metadata list asks for.
+
 ## Adapter mapping (used by later phases)
 
 | Platform class                 | Wraps                                  |
@@ -670,3 +712,6 @@ reclaim jobs that are still being worked on.
 | `Queue\BackpressurePolicy`     | `QueueJournal` depth vs `max_size` → reject decision (no component) |
 | `Storage\Database::connect/configFrom` | array config → component `ClientConfig`, one place instead of seven |
 | `Workers\WorkerTasks::sleep`   | holds a worker busy for `ms` - the execution-timeout demo's task |
+| `Queue\ValidatesPayload`       | job-type opt-in pre-flight check (no component) |
+| `Queue\ValidatingQueue`        | `PhpJobQueue\Queue\Queue` decorator - rejects before dispatch |
+| `Queue\JobAttemptJournal`      | per-attempt started_at/completed_at/last_error (no component) |

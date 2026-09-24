@@ -21,11 +21,13 @@ use PhpSystemsPlatform\Domain\SequentialOrderLoader;
 use PhpSystemsPlatform\Http\Request;
 use PhpSystemsPlatform\Http\RequestMethod;
 use PhpSystemsPlatform\Queue\BackpressurePolicy;
+use PhpSystemsPlatform\Queue\JobAttemptJournal;
 use PhpSystemsPlatform\Queue\JobContext;
 use PhpSystemsPlatform\Queue\JobExecutor;
 use PhpSystemsPlatform\Queue\Jobs\OrderCreatedJob;
 use PhpSystemsPlatform\Queue\Jobs\OrderProcessJob;
 use PhpSystemsPlatform\Queue\QueueJournal;
+use PhpSystemsPlatform\Queue\ValidatingQueue;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
@@ -691,7 +693,7 @@ final class ServeIntegrationTest extends TestCase
         );
     }
 
-    public function testConsumerFailsAMalformedJobAfterItsRetriesAreSpent(): void
+    public function testConsumerRejectsAMalformedJobWithoutBurningItsRetryBudget(): void
     {
         $clock = new SystemClock();
         $logPath = self::DATA_DIR . '/queue/queue.log';
@@ -700,8 +702,9 @@ final class ServeIntegrationTest extends TestCase
         // the delta this malformed job adds.
         $before = new QueueJournal($logPath)->snapshot();
 
-        // An order.created job without an order_id - a job the handler must
-        // fail on - published straight into the real journal.
+        // An order.created job without an order_id can never work (PLAN
+        // Step 19) - published straight into the real journal, exactly as
+        // a malformed job would arrive from anywhere else.
         $job = new Producer(
             new InMemoryQueue($clock, new FileStorage($logPath)),
             new JobFactory($clock, new MetricsCollector()),
@@ -712,13 +715,76 @@ final class ServeIntegrationTest extends TestCase
         $rows = new QueueJournal($logPath)->rows();
         self::assertArrayHasKey((string) $job->getId(), $rows);
         self::assertSame('FAILED', $rows[(string) $job->getId()]['state']);
+
+        // Rejected before it ever reached a worker: one delivery consumed,
+        // not the full three-attempt budget a genuine retry would spend.
+        self::assertSame(1, $rows[(string) $job->getId()]['attempts']);
+
+        // Failed, but never actually retried - the whole point.
+        $snapshot = new QueueJournal($logPath)->snapshot();
+        self::assertSame($before['failed'] + 1, $snapshot['failed']);
+        self::assertSame($before['retried'], $snapshot['retried']);
+    }
+
+    public function testConsumerStillRetriesAWellFormedJobUntilItsBudgetIsSpent(): void
+    {
+        $clock = new SystemClock();
+        $logPath = self::DATA_DIR . '/queue/queue.log';
+
+        $before = new QueueJournal($logPath)->snapshot();
+
+        // A payload ValidatesPayload cannot rule out - well-formed, but
+        // pointing at an order that does not exist. Answering that needs a
+        // database read, so it is not rejected pre-flight and still gets
+        // the normal retry-then-fail treatment.
+        $job = new Producer(
+            new InMemoryQueue($clock, new FileStorage($logPath)),
+            new JobFactory($clock, new MetricsCollector()),
+        )->dispatch(OrderCreatedJob::TYPE, ['order_id' => $this->missingOrderId()], maxAttempts: 3);
+
+        $this->drainQueue();
+
+        $rows = new QueueJournal($logPath)->rows();
+        self::assertSame('FAILED', $rows[(string) $job->getId()]['state']);
         self::assertSame(3, $rows[(string) $job->getId()]['attempts']);
 
-        // And the same journal a queue:status read counts exactly this one
-        // new job as failed and retried.
         $snapshot = new QueueJournal($logPath)->snapshot();
         self::assertSame($before['failed'] + 1, $snapshot['failed']);
         self::assertSame($before['retried'] + 1, $snapshot['retried']);
+
+        // The job metadata the queue component itself does not keep (PLAN
+        // Step 19): one attempt-journal row per delivery, each carrying its
+        // own timing and the error that specific attempt hit.
+        $attempts = new JobAttemptJournal(self::DATA_DIR . '/queue/queue.attempts.log')
+            ->forJob((string) $job->getId());
+
+        self::assertCount(3, $attempts);
+
+        foreach ($attempts as $index => $attempt) {
+            self::assertSame($index + 1, $attempt['attempt']);
+            self::assertGreaterThanOrEqual($attempt['started_at'], $attempt['completed_at']);
+            self::assertStringContainsString('not found', (string) $attempt['last_error']);
+        }
+    }
+
+    public function testTheAttemptJournalRecordsACleanRunWithNoError(): void
+    {
+        $order = $this->postOrder('Attempt Journal', 5);
+        $clock = new SystemClock();
+        $logPath = self::DATA_DIR . '/queue/queue.log';
+
+        $job = new Producer(
+            new InMemoryQueue($clock, new FileStorage($logPath)),
+            new JobFactory($clock, new MetricsCollector()),
+        )->dispatch(OrderCreatedJob::TYPE, ['order_id' => $order['id']], maxAttempts: 3);
+
+        $this->drainQueue();
+
+        $attempts = new JobAttemptJournal(self::DATA_DIR . '/queue/queue.attempts.log')
+            ->forJob((string) $job->getId());
+
+        self::assertNotEmpty($attempts);
+        self::assertNull($attempts[0]['last_error']);
     }
 
     public function testLiveConsumerPicksUpJobsPublishedWhileItRuns(): void
@@ -955,6 +1021,60 @@ final class ServeIntegrationTest extends TestCase
         self::assertGreaterThan(1.0, (float) $speedups[1][3]);
     }
 
+    public function testQueueJobCommandShowsMetadataAndAttemptHistory(): void
+    {
+        $order = $this->postOrder('Queue Job Command', 3);
+        $clock = new SystemClock();
+        $logPath = self::DATA_DIR . '/queue/queue.log';
+
+        $job = new Producer(
+            new InMemoryQueue($clock, new FileStorage($logPath)),
+            new JobFactory($clock, new MetricsCollector()),
+        )->dispatch(OrderCreatedJob::TYPE, ['order_id' => $order['id']], maxAttempts: 3);
+
+        $this->drainQueue();
+
+        $process = proc_open(
+            [PHP_BINARY, dirname(__DIR__, 2) . '/bin/platform.php', 'queue:job', (string) $job->getId()],
+            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+        );
+
+        self::assertIsResource($process);
+
+        $output = stream_get_contents($pipes[1]);
+        $errors = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $code = proc_close($process);
+
+        self::assertSame(0, $code, $errors);
+        self::assertStringContainsString((string) $job->getId(), $output);
+        self::assertStringContainsString('order.created', $output);
+        self::assertStringContainsString('COMPLETED', $output);
+        self::assertStringContainsString('attempt 1', $output);
+        self::assertStringContainsString('error: -', $output);
+    }
+
+    public function testQueueJobCommandReportsAnUnknownId(): void
+    {
+        $process = proc_open(
+            [PHP_BINARY, dirname(__DIR__, 2) . '/bin/platform.php', 'queue:job', $this->missingOrderId()],
+            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+        );
+
+        self::assertIsResource($process);
+
+        $errors = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $code = proc_close($process);
+
+        self::assertSame(1, $code);
+        self::assertStringContainsString('No job', $errors);
+    }
+
     public function testQueueBenchmarkRunsTheFullPipelineAndReportsMetrics(): void
     {
         $out = self::LOG_DIR . '/bench.out';
@@ -1068,12 +1188,14 @@ final class ServeIntegrationTest extends TestCase
     {
         $clock = new SystemClock();
         $logPath = self::DATA_DIR . '/queue/queue.log';
+        $storage = new FileStorage($logPath);
 
-        $queue = InMemoryQueue::restoreFromStorage(new FileStorage($logPath), $clock);
+        $queue = new ValidatingQueue(InMemoryQueue::restoreFromStorage($storage, $clock), $storage);
 
         $executor = new JobExecutor(
             ['host' => self::HOST, 'port' => self::DB_PORT, 'timeout' => 2.0],
             ['host' => self::HOST, 'port' => self::CACHE_PORT, 'timeout' => 2.0],
+            self::DATA_DIR . '/queue/queue.attempts.log',
         );
         $pool = new WorkerPool(
             size: 2,

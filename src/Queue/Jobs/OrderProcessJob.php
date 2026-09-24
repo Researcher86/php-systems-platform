@@ -8,6 +8,7 @@ use PhpMiniCache\Sdk\CacheClientException;
 use PhpSystemsPlatform\Domain\OrderStatus;
 use PhpSystemsPlatform\Queue\Job;
 use PhpSystemsPlatform\Queue\JobContext;
+use PhpSystemsPlatform\Queue\ValidatesPayload;
 use RuntimeException;
 
 /**
@@ -27,18 +28,36 @@ use RuntimeException;
  * The outcome is a status: stock the catalog can cover completes the order,
  * anything else cancels it. Either way the cached copy is now stale and is
  * dropped, the same invalidate-on-write rule the HTTP update path follows.
+ *
+ * A missing order_id can never work (PLAN Step 19) - ValidatesPayload
+ * rejects it before this job ever reaches a worker. "Order not found" is
+ * different: this job, unlike order.created, has no write that guarantees
+ * the row exists first (it can be dispatched by hand, an operator's typo
+ * and all), so it is a real, reachable failure mode - and answering it needs
+ * a database read a payload check cannot do. It stays on the normal retry
+ * path.
  */
-final readonly class OrderProcessJob implements Job
+final readonly class OrderProcessJob implements Job, ValidatesPayload
 {
     public const string TYPE = 'order.process';
 
+    public static function validate(array $payload): ?string
+    {
+        $orderId = $payload['order_id'] ?? null;
+
+        return is_string($orderId) && $orderId !== '' ? null : 'order.process payload is missing order_id.';
+    }
+
     public function execute(JobContext $context): void
     {
-        $orderId = $context->job->getPayload()['order_id'] ?? null;
+        $payload = $context->job->getPayload();
+        $reason = self::validate($payload);
 
-        if (!is_string($orderId) || $orderId === '') {
-            throw new RuntimeException('order.process payload is missing order_id.');
+        if ($reason !== null) {
+            throw new RuntimeException($reason);
         }
+
+        $orderId = (string) $payload['order_id'];
 
         if ($context->loader === null) {
             throw new RuntimeException('order.process needs an order loader in its context.');

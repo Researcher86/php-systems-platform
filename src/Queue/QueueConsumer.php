@@ -9,7 +9,7 @@ use PhpJobQueue\Dispatcher\JobDispatcher;
 use PhpJobQueue\Job\Job;
 use PhpJobQueue\Job\JobState;
 use PhpJobQueue\Persistence\FileStorage;
-use PhpJobQueue\Queue\InMemoryQueue;
+use PhpJobQueue\Queue\Queue as ComponentQueue;
 use PhpJobQueue\Support\Clock;
 use PhpJobQueue\Support\SystemClock;
 use PhpSystemsPlatform\Workers\WorkerRegistry;
@@ -53,7 +53,7 @@ final class QueueConsumer
      */
     public function __construct(
         private JobDispatcher $dispatcher,
-        private InMemoryQueue $queue,
+        private ComponentQueue $queue,
         private string $logPath,
         private Clock $clock = new SystemClock(),
         private float $maxWait = self::DEFAULT_MAX_WAIT,

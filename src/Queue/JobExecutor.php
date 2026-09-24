@@ -11,6 +11,7 @@ use PhpSystemsPlatform\Domain\SequentialOrderLoader;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
+use Throwable;
 
 /**
  * The handler a queue WorkerPool runs - the worker's entry point into the
@@ -23,6 +24,15 @@ use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
  * answering on one socket is how protocols die. Rebuilding Database and
  * CacheService per worker keeps each worker's connection its own - the same
  * reason serve() builds its services fresh in its own process.
+ *
+ * It is also the one chokepoint every execution attempt funnels through -
+ * the real queue:consume path (via WorkerJobs) and the benchmark's
+ * drainQueue() alike - which makes it the right place to record what the
+ * queue component itself does not: started_at, completed_at and last_error
+ * (PLAN Step 19's job metadata; see JobAttemptJournal for why the component
+ * has none of these). $metadataLogPath is optional so a caller with nowhere
+ * durable to put it (a test measuring something else entirely) can skip it
+ * rather than be forced to supply one.
  */
 final class JobExecutor
 {
@@ -31,6 +41,7 @@ final class JobExecutor
     private ?CacheService $cache = null;
     private ?Database $database = null;
     private ?SequentialOrderLoader $loader = null;
+    private ?JobAttemptJournal $attempts = null;
 
     /**
      * @param array<string, mixed> $databaseConfig the `database` config block
@@ -39,6 +50,7 @@ final class JobExecutor
     public function __construct(
         private array $databaseConfig,
         private array $cacheConfig,
+        private ?string $metadataLogPath = null,
     ) {
     }
 
@@ -47,9 +59,36 @@ final class JobExecutor
         $context = new JobContext($job, $this->orders(), $this->cache(), $this->loader());
 
         $this->registry ??= new JobRegistry();
-        $this->registry->execute($job, $context);
+
+        $startedAt = microtime(true);
+        $error = null;
+
+        try {
+            $this->registry->execute($job, $context);
+        } catch (Throwable $e) {
+            $error = $e->getMessage();
+
+            throw $e;
+        } finally {
+            $this->attemptJournal()?->record(
+                $job->getId()->toString(),
+                $job->getAttempts(),
+                $startedAt,
+                microtime(true),
+                $error,
+            );
+        }
 
         return null;
+    }
+
+    private function attemptJournal(): ?JobAttemptJournal
+    {
+        if ($this->metadataLogPath === null) {
+            return null;
+        }
+
+        return $this->attempts ??= new JobAttemptJournal($this->metadataLogPath);
     }
 
     /**

@@ -42,4 +42,26 @@ final class JobRegistry
 
         new $class()->execute($context);
     }
+
+    /**
+     * PLAN Step 19's pre-flight check (see ValidatesPayload and
+     * ValidatingQueue): a reason this payload can never succeed, or null if
+     * either the type opted out of a check or the payload passed it. An
+     * unregistered type has no opinion here - execute() is where that
+     * becomes the failure it is.
+     *
+     * @param array<string, mixed> $payload
+     *
+     * @return non-empty-string|null
+     */
+    public static function validate(string $type, array $payload): ?string
+    {
+        $class = self::HANDLERS[$type] ?? null;
+
+        if ($class === null || !is_a($class, ValidatesPayload::class, true)) {
+            return null;
+        }
+
+        return $class::validate($payload);
+    }
 }

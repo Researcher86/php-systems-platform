@@ -66,6 +66,7 @@ final class WorkerJobs
         return $this->executor ??= new JobExecutor(
             (array) $this->config['database'],
             (array) $this->config['cache'],
+            $this->config['queue']['data_dir'] . '/queue.attempts.log',
         );
     }
 }

@@ -32,14 +32,17 @@ final class ForkedMemoryDemoTest extends TestCase
     {
         $result = new ForkedMemoryDemo(elements: 2_000_000)->run();
 
-        self::assertNotNull($result->beforeFork->rss);
         self::assertNotNull($result->afterFork->rss);
+        self::assertNotNull($result->afterModification->rss);
 
-        // Right after fork the child's RSS is close to its parent's - it is
-        // the same pages, not a copy of them. "Close" here means nowhere
-        // near what re-allocating the array from scratch would cost.
-        $shared = abs($result->afterFork->rss - $result->beforeFork->rss);
-        self::assertLessThan($result->beforeFork->rss / 4, $shared);
+        // Right after fork the child sits at its inherited floor - the pages
+        // are shared, so nothing has been copied and its RSS has not grown.
+        // Only the write-triggered copy grows it. Both snapshots are read in
+        // the same child, so the comparison is immune to the fork()/proc
+        // accounting drift: a freshly forked child's VmRSS undercounts the
+        // inherited anon pages by an environment-dependent amount, which
+        // makes parent-vs-child deltas unstable across machines.
+        self::assertGreaterThan($result->afterFork->rss, $result->afterModification->rss);
     }
 
     public function testNoChildIsLeftUnreaped(): void

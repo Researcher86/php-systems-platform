@@ -2374,8 +2374,8 @@ Phase 5 is complete when all of the following are true.
 
 ## Memory
 
-* [ ] Process memory can be measured.
-* [ ] Fork/COW behavior is demonstrated.
+* [x] Process memory can be measured.
+* [x] Fork/COW behavior is demonstrated.
 * [ ] Worker memory usage can be compared.
 
 ## Backpressure

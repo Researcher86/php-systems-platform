@@ -38,6 +38,8 @@ use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Domain\SequentialOrderLoader;
 use PhpSystemsPlatform\Http\Router;
+use PhpSystemsPlatform\Memory\ForkedMemoryDemo;
+use PhpSystemsPlatform\Memory\MemorySnapshot;
 use PhpSystemsPlatform\Queue\QueueConsumer;
 use PhpSystemsPlatform\Queue\QueueJournal;
 use PhpSystemsPlatform\Storage\Database;
@@ -151,6 +153,7 @@ final class PlatformCli
             'workers:status' => $this->workersStatus(),
             'benchmark' => $this->queueBenchmark(array_slice($argv, 2)),
             'orders:compare' => $this->ordersCompare(array_slice($argv, 2)),
+            'memory:demo' => $this->memoryDemo(),
 
             // Real handlers land with their implementation phase.
             default => $this->notImplemented($command),
@@ -1216,6 +1219,67 @@ final class PlatformCli
                 $index === 0 ? 'baseline' : sprintf('%.2fx', $result['speedup']),
             );
         }
+    }
+
+    /**
+     * PLAN Step 15: fork a child over a shared array and print how its
+     * memory footprint moves in three stages - before the fork (the
+     * parent), right after it (the child, still sharing pages), and after
+     * the child writes (copy-on-write has run). Needs no platform
+     * infrastructure - no database, cache, queue or pool - so it is the one
+     * command safe to run entirely on its own.
+     */
+    private function memoryDemo(): int
+    {
+        printf("Fork + copy-on-write demo\n\n");
+
+        $result = new ForkedMemoryDemo()->run();
+
+        $this->printMemorySnapshot('before fork    (parent)', $result->beforeFork);
+        $this->printMemorySnapshot('after fork     (child) ', $result->afterFork, $result->beforeFork);
+        $this->printMemorySnapshot('after modification (child)', $result->afterModification, $result->afterFork);
+
+        printf(
+            "\nRight after fork the child's RSS tracks its parent's - the pages are still\n"
+            . "shared, nothing was copied. Once the child writes, private memory grows: the\n"
+            . "kernel copied exactly the pages that write touched. That growth is\n"
+            . "copy-on-write, measured rather than asserted.\n",
+        );
+
+        return 0;
+    }
+
+    /**
+     * One line: this snapshot's PHP and OS memory, and - once a $previous is
+     * given - each field's signed delta from it.
+     */
+    private function printMemorySnapshot(string $label, MemorySnapshot $snapshot, ?MemorySnapshot $previous = null): void
+    {
+        printf(
+            "  %-26s  php %s   rss %s   shared %s   private memory %s\n",
+            $label,
+            $this->formatBytes($snapshot->phpUsage, $previous?->phpUsage),
+            $this->formatBytes($snapshot->rss, $previous?->rss),
+            $this->formatBytes($snapshot->sharedMemory, $previous?->sharedMemory),
+            $this->formatBytes($snapshot->privateMemory, $previous?->privateMemory),
+        );
+    }
+
+    private function formatBytes(?int $bytes, ?int $previous = null): string
+    {
+        if ($bytes === null) {
+            return 'n/a';
+        }
+
+        $value = sprintf('%.1fM', $bytes / 1_048_576);
+
+        if ($previous === null) {
+            return $value;
+        }
+
+        $delta = $bytes - $previous;
+
+        return sprintf('%s (%s%.1fM)', $value, $delta >= 0 ? '+' : '', $delta / 1_048_576);
     }
 
     /**

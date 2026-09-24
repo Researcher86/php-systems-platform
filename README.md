@@ -337,7 +337,9 @@ Run platform benchmarks.
 php bin/platform.php memory:demo
 ```
 
-Run memory and copy-on-write experiments.
+Fork a child over a shared array and print its memory footprint before the
+fork, right after it, and after it writes - copy-on-write, measured. Needs
+no platform infrastructure (no database, cache, queue or pool).
 
 ```bash
 php bin/platform.php workers:memory
@@ -771,30 +773,48 @@ This makes asynchronous work traceable across process boundaries.
 
 # Memory Experiments
 
-The platform also connects the application architecture with PHP's process and memory model.
+The platform also connects the application architecture with PHP's process and
+memory model - `php-memory-lab`'s subject, brought in as a re-implemented
+measurement rather than a runtime dependency (it is a 32-experiment lab, not
+a package; `composer require`-ing it would not fit any more than
+`php-concurrency` did in Step 14).
 
-For example:
+`php bin/platform.php memory:demo` allocates a large array, forks a child
+over it, and reads `/proc/<pid>/status` at three moments:
 
 ```text
-Parent Process
+parent allocates the array
       │
-     fork
+     fork()
       │
- ┌────┴────┐
- ▼         ▼
-Child A   Child B
+ ┌────┴─────────────────────┐
+ ▼                          ▼
+parent keeps its copy   child: snapshot (pages still shared)
+                              │
+                          child writes to the array
+                              │
+                          child: snapshot (kernel has now copied
+                                            the pages that write touched)
 ```
 
-The platform can measure:
+Real output:
 
-* parent RSS
-* worker RSS
-* total memory
-* memory before fork
-* memory after fork
-* memory after mutation
+```text
+  before fork    (parent)     php 33.7M   rss 59.7M   shared 0.0M   private memory 41.7M
+  after fork     (child)      php 33.7M (+0.0M)   rss 47.0M (-12.7M)   shared 0.0M (+0.0M)   private memory 41.7M (+0.0M)
+  after modification (child)  php 65.7M (+32.0M)   rss 79.4M (+32.4M)   shared 0.0M (+0.0M)   private memory 73.7M (+32.0M)
+```
 
-This demonstrates copy-on-write behavior and the memory trade-offs of process-based concurrency.
+The child's `private memory` (`RssAnon`) does not move at all right after
+`fork()` - it is still the parent's pages, read-only and shared at the OS
+level. Only once the child writes does it grow, by almost exactly the size
+of the array: the kernel copied the pages that write touched, and not a byte
+more. That growth **is** copy-on-write, measured rather than asserted.
+
+The mechanism is the same fork + `socketpair()` + `pcntl_waitpid()` idiom as
+Step 14's `Workers\ForkedOrderLoader` - `Memory\ForkedMemoryDemo` forks one
+child, has it report two snapshots of itself over the pipe, and the parent
+reaps it before printing the comparison.
 
 ---
 

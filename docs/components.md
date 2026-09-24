@@ -477,6 +477,35 @@ while the pool paid them once. The database server is a single event loop, so
 what overlaps is *waiting* — concurrency does not multiply database
 throughput.
 
+### php-memory-lab (Step 15, shipped)
+
+`php-memory-lab` is a 32-experiment lab (`composer.json` name
+`researcher86/php-memory-lab`, `type: project`) measuring PHP's process and
+memory model — not a package meant to be required, and PLAN Step 15 says so
+explicitly ("expose memory behavior rather than turning php-memory-lab into a
+runtime dependency"). The platform re-implements the one reader its demo
+needs instead of the lab's whole measurement stack.
+
+- `Memory\ProcStatusReader` — parses `/proc/<pid>/status` (`Key: value` lines,
+  `N kB` converted to bytes), the same shape and conversion as the lab's own
+  reader.
+- `Memory\MemoryReporter` — `snapshot()` joins `memory_get_usage()` /
+  `memory_get_usage(true)` (the PHP view) with `VmRSS`/`RssAnon`/`RssShmem`
+  (the OS view); `diff()` turns two snapshots into signed deltas. A failed
+  `/proc` read degrades OS fields to `null` rather than throwing.
+- `Memory\ForkedMemoryDemo` — the demo itself: allocates an array, then the
+  same fork + `socketpair()` + `pcntl_waitpid()` idiom as
+  `Workers\ForkedOrderLoader` (Step 14), except one child reporting two
+  snapshots of itself (right after `fork()`, and after writing to the
+  inherited array) instead of several children each reporting one read.
+- `memory:demo` CLI command — prints all three snapshots with running
+  deltas. Needs no platform infrastructure, so it is safe to run standalone.
+
+Measured (container): the child's private memory (`RssAnon`) does not move at
+all immediately after `fork()` — still the parent's pages, shared read-only —
+then grows by almost exactly the array's size once the child writes to it.
+That growth is copy-on-write, made visible instead of asserted.
+
 ## Adapter mapping (used by later phases)
 
 | Platform class                 | Wraps                                  |
@@ -510,3 +539,6 @@ throughput.
 | `Workers\ConcurrentOrderLoader` | `ConcurrentTaskRunner` fan-out over `catalog.*` |
 | `Queue\Jobs\OrderProcessJob`   | executes an `order.process` carrier from a snapshot |
 | `Workers\OrderLoadBenchmark`   | the loaders side by side, baseline-relative |
+| `Memory\ProcStatusReader`      | `/proc/<pid>/status` → bytes (no component) |
+| `Memory\MemoryReporter`        | PHP counters + `ProcStatusReader` → snapshot/diff |
+| `Memory\ForkedMemoryDemo`      | `pcntl_fork` + `stream_socket_pair` over a shared array (no component) |

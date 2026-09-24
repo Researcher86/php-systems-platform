@@ -2395,9 +2395,9 @@ Phase 5 is complete when all of the following are true.
 
 ## Failure handling
 
-* [ ] Worker crash can be reproduced.
-* [ ] Job failure can be reproduced.
-* [ ] Retry can be reproduced.
+* [x] Worker crash can be reproduced.
+* [x] Job failure can be reproduced.
+* [x] Retry can be reproduced.
 * [ ] Timeout can be reproduced.
 * [x] Graceful shutdown can be reproduced.
 

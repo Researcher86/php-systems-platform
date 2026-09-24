@@ -25,6 +25,7 @@ use PhpSystemsPlatform\Queue\BackpressurePolicy;
 use PhpSystemsPlatform\Queue\JobContext;
 use PhpSystemsPlatform\Queue\JobExecutor;
 use PhpSystemsPlatform\Queue\JobRegistry;
+use PhpSystemsPlatform\Queue\Jobs\FailingJob;
 use PhpSystemsPlatform\Queue\Jobs\OrderCreatedJob;
 use PhpSystemsPlatform\Queue\Jobs\OrderProcessJob;
 use PhpSystemsPlatform\Queue\QueueJournal;
@@ -35,10 +36,12 @@ use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
 use PhpSystemsPlatform\Workers\ConcurrentOrderLoader;
 use PhpSystemsPlatform\Workers\ConcurrentTaskRunner;
 use PhpSystemsPlatform\Workers\ForkedOrderLoader;
+use PhpSystemsPlatform\Workers\WorkerFailureInjector;
 use PhpSystemsPlatform\Workers\WorkerManager;
 use PhpSystemsPlatform\Workers\WorkerRegistry;
 use PHPUnit\Framework\TestCase;
 use PhpWorkerPool\Protocol\Request as WorkerRequest;
+use PhpWorkerPool\Sdk\ServerErrorException;
 use PhpWorkerPool\Sdk\WorkerPoolClient;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
@@ -616,6 +619,165 @@ final class ServeIntegrationTest extends TestCase
             proc_terminate($pool);
             proc_close($pool);
         }
+    }
+
+    public function testACrashedWorkerIsDetectedRemovedAndReplaced(): void
+    {
+        // PLAN Step 22's whole worker sequence in one shot, against a real
+        // pool on its own socket: crash a worker, and watch the pool's own
+        // bookkeeping prove each phase - it fails the request the dead worker
+        // held (worker_crashed), drops the dead pid, and forks a replacement.
+        $socketPath = '/tmp/php-crash-' . uniqid('', true) . '.sock';
+        $dir = self::LOG_DIR . '/crash-' . uniqid('', true);
+        mkdir($dir, 0o777, true);
+
+        $pool = proc_open(
+            [PHP_BINARY, dirname(__DIR__, 2) . '/bin/worker.php'],
+            [
+                1 => ['file', $dir . '/worker.out', 'a'],
+                2 => ['file', $dir . '/worker.err', 'a'],
+            ],
+            $pipes,
+            null,
+            [
+                'WORKER_POOL_SOCKET' => $socketPath,
+                'WORKER_POOL_MIN' => '2',
+                'WORKER_POOL_MAX' => '2',
+                'WORKER_POOL_TIMEOUT' => '5',
+            ],
+        );
+
+        self::assertIsResource($pool);
+
+        try {
+            $deadline = microtime(true) + 10.0;
+
+            while (microtime(true) < $deadline) {
+                $socket = @stream_socket_client(sprintf('unix://%s', $socketPath), $code, $message, 0.2);
+
+                if ($socket !== false) {
+                    fclose($socket);
+                    break;
+                }
+
+                usleep(100_000);
+            }
+
+            $report = new WorkerFailureInjector(new WorkerPoolClient($socketPath, 5.0))->crashOneWorker();
+
+            self::assertTrue($report['crash_detected'], 'crash not detected: ' . $report['error']);
+            self::assertTrue($report['worker_removed'], 'dead worker never left the pool');
+            self::assertTrue($report['replacement_started'], 'no replacement worker was forked');
+            self::assertSame(2, $report['pool_size']);
+            self::assertNotNull($report['crashed_pid']);
+            self::assertNotNull($report['replacement_pid']);
+            self::assertNotSame($report['crashed_pid'], $report['replacement_pid']);
+        } finally {
+            proc_terminate($pool);
+            proc_close($pool);
+        }
+    }
+
+    public function testAProductionPoolRefusesToCrash(): void
+    {
+        // PLAN Step 22's gate from the pool's side: a pool launched in a
+        // production environment must answer failure_injection_disabled to a
+        // worker.crash, not die - and must still be intact after doing so.
+        $socketPath = '/tmp/php-prodcrash-' . uniqid('', true) . '.sock';
+        $dir = self::LOG_DIR . '/prodcrash-' . uniqid('', true);
+        mkdir($dir, 0o777, true);
+
+        $pool = proc_open(
+            [PHP_BINARY, dirname(__DIR__, 2) . '/bin/worker.php'],
+            [
+                1 => ['file', $dir . '/worker.out', 'a'],
+                2 => ['file', $dir . '/worker.err', 'a'],
+            ],
+            $pipes,
+            null,
+            [
+                'WORKER_POOL_SOCKET' => $socketPath,
+                'WORKER_POOL_MIN' => '1',
+                'WORKER_POOL_MAX' => '1',
+                'WORKER_POOL_TIMEOUT' => '5',
+                'PLATFORM_ENV' => 'production',
+            ],
+        );
+
+        self::assertIsResource($pool);
+
+        try {
+            $deadline = microtime(true) + 10.0;
+
+            while (microtime(true) < $deadline) {
+                $socket = @stream_socket_client(sprintf('unix://%s', $socketPath), $code, $message, 0.2);
+
+                if ($socket !== false) {
+                    fclose($socket);
+                    break;
+                }
+
+                usleep(100_000);
+            }
+
+            $client = new WorkerPoolClient($socketPath, 5.0);
+
+            try {
+                $client->call(new WorkerRequest('worker.crash', []));
+                self::fail('A production pool answered a worker.crash instead of refusing it.');
+            } catch (ServerErrorException $e) {
+                self::assertSame('failure_injection_disabled', $e->error);
+            }
+
+            // The refusal is a clean answer, not a crash: the worker that
+            // refused is still there.
+            self::assertCount(1, $client->stats());
+        } finally {
+            proc_terminate($pool);
+            proc_close($pool);
+        }
+    }
+
+    public function testAFailingJobRetriesAndDiesInTheFailedState(): void
+    {
+        // PLAN Step 22's job sequence through the real journal -> dispatcher
+        // -> registry path: demo.failing is well-formed (no ValidatesPayload),
+        // so it may spend its whole attempts budget, and dies FAILED at
+        // exactly max_attempts instead of retrying forever.
+        $clock = new SystemClock();
+        $logPath = self::DATA_DIR . '/queue/queue.log';
+
+        $job = new Producer(
+            new InMemoryQueue($clock, new FileStorage($logPath)),
+            new JobFactory($clock, new MetricsCollector()),
+        )->dispatch(FailingJob::TYPE, [], maxAttempts: 3);
+
+        $this->drainQueue();
+
+        $row = new QueueJournal($logPath)->rows()[(string) $job->getId()] ?? [];
+
+        self::assertSame('FAILED', $row['state'] ?? null);
+        self::assertSame(3, $row['attempts'] ?? null);
+        self::assertSame('Injected failure (demo.failing).', $row['lastError'] ?? null);
+    }
+
+    public function testFailWorkerHttpEndpointCrashesAndReplacesASharedWorker(): void
+    {
+        // The step's example endpoint over HTTP, against the serve's real
+        // pool: one call answers with the whole evidence record of a worker
+        // crash and its replacement. This shares the serve's pool, so a
+        // transient one-worker replacement is exactly the scenario Step 22
+        // exists to make routine rather than accidental.
+        [$status, $body] = $this->request('POST', '/debug/fail-worker');
+
+        self::assertSame(200, $status, $body);
+
+        $report = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+        self::assertIsArray($report);
+
+        self::assertTrue($report['crash_detected']);
+        self::assertTrue($report['worker_removed']);
+        self::assertTrue($report['replacement_started']);
     }
 
     public function testForkedLoaderAnswersExactlyWhatTheSequentialOneDoes(): void

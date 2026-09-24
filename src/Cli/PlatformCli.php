@@ -26,6 +26,7 @@ use PhpMiniHttpServer\Server\ServerConfig;
 use PhpMiniHttpServer\Server\ServerStartException;
 use PhpMiniHttpServer\Support\StderrLogger;
 use PhpSystemsPlatform\Application\Application;
+use PhpSystemsPlatform\Application\Handlers\FailWorkerHandler;
 use PhpSystemsPlatform\Application\Handlers\HealthHandler;
 use PhpSystemsPlatform\Application\Handlers\OrderCreateHandler;
 use PhpSystemsPlatform\Application\Handlers\OrderReadHandler;
@@ -42,6 +43,7 @@ use PhpSystemsPlatform\Memory\MemorySnapshot;
 use PhpSystemsPlatform\Queue\BackpressurePolicy;
 use PhpSystemsPlatform\Queue\JobExecutor;
 use PhpSystemsPlatform\Queue\JobRegistry;
+use PhpSystemsPlatform\Queue\Jobs\FailingJob;
 use PhpSystemsPlatform\Queue\Jobs\OrderProcessJob;
 use PhpSystemsPlatform\Queue\QueueConsumer;
 use PhpSystemsPlatform\Queue\QueueJournal;
@@ -54,6 +56,7 @@ use PhpSystemsPlatform\Workers\ConcurrentTaskRunner;
 use PhpSystemsPlatform\Workers\ForkedOrderLoader;
 use PhpSystemsPlatform\Workers\OrderLoadBenchmark;
 use PhpSystemsPlatform\Workers\QueueBenchmark;
+use PhpSystemsPlatform\Workers\WorkerFailureInjector;
 use PhpSystemsPlatform\Workers\WorkerManager;
 use PhpSystemsPlatform\Workers\WorkerMemoryBenchmark;
 use PhpSystemsPlatform\Workers\WorkerRegistry;
@@ -164,6 +167,7 @@ final class PlatformCli
             'memory:demo' => $this->memoryDemo(),
             'workers:memory' => $this->workersMemory(array_slice($argv, 2)),
             'idempotency:demo' => $this->idempotencyDemo(),
+            'failure:demo' => $this->failureDemo(),
 
             // Real handlers land with their implementation phase.
             default => $this->notImplemented($command),
@@ -233,6 +237,16 @@ final class PlatformCli
             return 1;
         }
 
+        // PLAN Step 22: the /debug/fail-worker route exists only when the
+        // platform is in a development/demo environment. Otherwise the
+        // injector stays null and application() registers no such route.
+        $failureInjector = $config['failure_injection']['enabled']
+            ? new WorkerFailureInjector(new WorkerPoolClient(
+                $workersConfig['socket'],
+                (float) $workersConfig['task_timeout'],
+            ))
+            : null;
+
         $http = $config['http'];
 
         $producer = null;
@@ -281,7 +295,7 @@ final class PlatformCli
         $metrics = new ServerMetrics();
         $loop = new SelectLoop();
 
-        $application = $this->application($database, $cache, $producer, $runner, $config['queue']['data_dir'] . '/queue.log', $config['workers']['data_dir'] . '/workers.status.json', (int) $config['queue']['max_size']);
+        $application = $this->application($database, $cache, $producer, $runner, $config['queue']['data_dir'] . '/queue.log', $config['workers']['data_dir'] . '/workers.status.json', (int) $config['queue']['max_size'], $failureInjector);
 
         $loop->onReadable($server->socket(), static function () use ($loop, $server, $parser, $encoder, $application, $metrics, $logger): void {
             $connection = $server->accept();
@@ -361,9 +375,12 @@ final class PlatformCli
      * forwarder snapshot. The backpressure phase (Step 17) adds a policy in
      * front of POST /orders itself - null-tolerant the same way, so a caller
      * with no queue log or no configured limit gets the old unbounded write
-     * path back.
+     * path back. Step 22 adds POST /debug/fail-worker, but only when a
+     * failure injector exists to back it - i.e. only in development/demo
+     * environments, per the step's own "only enabled in development/demo
+     * mode" rule; a production serve has no such route at all.
      */
-    private function application(Database $database, CacheService $cache, ?Producer $producer = null, ?ConcurrentTaskRunner $runner = null, string $queueLogPath = '', string $workersStatusPath = '', ?int $maxQueueSize = null): Application
+    private function application(Database $database, CacheService $cache, ?Producer $producer = null, ?ConcurrentTaskRunner $runner = null, string $queueLogPath = '', string $workersStatusPath = '', ?int $maxQueueSize = null, ?WorkerFailureInjector $failureInjector = null): Application
     {
         $orders = new OrderService(new OrderRepository($database), $producer);
 
@@ -382,6 +399,13 @@ final class PlatformCli
         $router->get('/parallel', (new ParallelHandler($runner))(...));
         $router->get('/queue/status', (new QueueStatusHandler($queueLogPath))(...));
         $router->get('/workers', (new WorkersStatusHandler($workersStatusPath))(...));
+
+        // PLAN Step 22: the failure injection endpoint is not null-tolerant
+        // - its absence on purpose is the point. A serve without injection
+        // simply never registers the route.
+        if ($failureInjector !== null) {
+            $router->post('/debug/fail-worker', (new FailWorkerHandler($failureInjector))(...));
+        }
 
         return new Application($router);
     }
@@ -1633,6 +1657,233 @@ final class PlatformCli
                 $this->stopDatabaseServerIfOwned(true, $databaseConfig);
             }
         }
+    }
+
+    /**
+     * PLAN Step 22's failure scenarios, reproduced end to end (the step's
+     * own "Test:" sections):
+     *
+     *     worker crashes -> manager detects -> worker removed -> replacement started
+     *     job fails -> retry -> failure -> dead/failed state
+     *
+     * The worker crash runs against a throwaway pool on its own socket, so
+     * it can prove the sequence without disturbing anything already
+     * running; the failing job runs through the real dispatcher machinery
+     * (journal -> forwarders -> JobExecutor -> registry) on a fresh journal.
+     * Failure injection is armed only in development/demo environments
+     * (config failure_injection.enabled); in a production environment the
+     * command refuses instead of pretending a kill-and-replace is something
+     * a production platform reproduces on demand.
+     */
+    private function failureDemo(): int
+    {
+        $config = $this->config();
+
+        if (!$config['failure_injection']['enabled']) {
+            fwrite(STDERR, "Failure injection is disabled (PLATFORM_ENV is not a development/demo environment).\n");
+            fwrite(STDERR, "Run it armed, e.g. PLATFORM_ENV=dev php bin/platform.php failure:demo\n");
+
+            return 1;
+        }
+
+        printf("Failure injection (development mode)\n\n");
+
+        $crashExit = $this->failureDemoWorkerCrash();
+        $jobExit = $this->failureDemoFailingJob();
+
+        return $crashExit === 0 && $jobExit === 0 ? 0 : 1;
+    }
+
+    /**
+     * The PLAN worker-crash sequence, against a two-worker pool this command
+     * spawns and owns for the duration.
+     */
+    private function failureDemoWorkerCrash(): int
+    {
+        $dir = sys_get_temp_dir() . '/php-systems-platform/failuredemo-' . uniqid('', true);
+
+        if (!is_dir($dir) && !@mkdir($dir, 0o777, true) && !is_dir($dir)) {
+            fwrite(STDERR, sprintf('Could not create "%s".', $dir) . PHP_EOL);
+
+            return 1;
+        }
+
+        $socketPath = '/tmp/php-failuredemo-' . uniqid('', true) . '.sock';
+
+        $pool = proc_open(
+            [PHP_BINARY, dirname(__DIR__, 2) . '/bin/worker.php'],
+            [
+                1 => ['file', $dir . '/worker.out', 'a'],
+                2 => ['file', $dir . '/worker.err', 'a'],
+            ],
+            $pipes,
+            null,
+            [
+                'WORKER_POOL_SOCKET' => $socketPath,
+                'WORKER_POOL_MIN' => '2',
+                'WORKER_POOL_MAX' => '2',
+                'WORKER_POOL_TIMEOUT' => '5',
+            ],
+        );
+
+        if (!is_resource($pool)) {
+            fwrite(STDERR, 'Could not start the demo worker pool.' . PHP_EOL);
+
+            return 1;
+        }
+
+        if (!$this->waitForSocket($socketPath)) {
+            proc_terminate($pool);
+            proc_close($pool);
+            fwrite(STDERR, 'The demo worker pool did not start listening in time.' . PHP_EOL);
+
+            return 1;
+        }
+
+        $exit = 1;
+
+        try {
+            $injector = new WorkerFailureInjector(new WorkerPoolClient($socketPath, 5.0));
+            $report = $injector->crashOneWorker();
+
+            printf("1. A worker crashes.\n");
+            printf("   worker crashes        worker.crash SIGKILLed pid %s mid-request\n", $report['crashed_pid'] === null ? '?' : (string) $report['crashed_pid']);
+            printf("   manager detects       %s (%s, %.1f ms)\n", $report['crash_detected'] ? 'yes' : 'no', $report['error'], $report['detected_ms']);
+            printf("   worker removed        %s (%.1f ms after the crash)\n", $report['worker_removed'] ? 'yes' : 'no', $report['removed_ms'] ?? 0.0);
+            printf("   replacement started   %s (new pid %s, %.1f ms after the crash)\n", $report['replacement_started'] ? 'yes' : 'no', $report['replacement_pid'] ?? '?', $report['replaced_ms'] ?? 0.0);
+            printf("   pool size             %d workers (back to configured)\n\n", $report['pool_size']);
+
+            $exit = $report['crash_detected'] && $report['worker_removed'] && $report['replacement_started'] ? 0 : 1;
+        } finally {
+            proc_terminate($pool);
+            proc_close($pool);
+        }
+
+        return $exit;
+    }
+
+    /**
+     * The PLAN job-failure sequence: publish demo.failing onto a fresh
+     * journal and run the real dispatcher machinery until the journal shows
+     * the job dead. Needs the database itself only because the JobExecutor
+     * a forwarder runs connects eagerly - the job that fails never touches
+     * it.
+     */
+    private function failureDemoFailingJob(): int
+    {
+        $config = $this->config();
+        $databaseConfig = $config['database'];
+        $cacheConfig = $config['cache'];
+
+        $ownsDatabaseServer = false;
+        $ownsCacheServer = false;
+        $database = null;
+
+        try {
+            $ownsDatabaseServer = $this->ensureDatabaseServer($databaseConfig);
+            $database = Database::connect($databaseConfig);
+            Migrator::migrate($database);
+            $ownsCacheServer = $this->ensureCacheServer($cacheConfig);
+        } catch (RuntimeException $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            $database?->close();
+            $this->stopCacheServerIfOwned($ownsCacheServer);
+            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
+
+            return 1;
+        }
+
+        $exit = 1;
+
+        try {
+            $logPath = sys_get_temp_dir() . '/php-systems-platform/failingjob-' . uniqid('', true) . '.log';
+            $clock = new SystemClock();
+
+            $job = new Producer(
+                new InMemoryQueue($clock, new FileStorage($logPath)),
+                new JobFactory($clock, new MetricsCollector()),
+            )->dispatch(FailingJob::TYPE, [], maxAttempts: (int) $config['queue']['max_attempts']);
+
+            $queue = InMemoryQueue::restoreFromStorage(new FileStorage($logPath), $clock);
+            $executor = new JobExecutor($databaseConfig, $cacheConfig);
+            $pool = new WorkerPool(
+                size: 2,
+                handler: static fn (Job $job): mixed => $executor->__invoke($job),
+            );
+            $dispatcher = new JobDispatcher(
+                queue: $queue,
+                workerPool: $pool,
+                retryPolicy: new FixedDelayRetry((int) $config['queue']['retry_delay']),
+                clock: $clock,
+                visibilityTimeout: (int) $config['workers']['task_timeout'],
+                storage: new FileStorage($logPath),
+                metrics: new MetricsCollector(),
+                shouldRetry: JobRegistry::shouldRetry(),
+            );
+
+            $dispatcher->start();
+
+            printf("2. A job keeps failing.\n");
+            printf("   published demo.failing (%s, max %d attempts)\n", $job->getId(), $job->getMaxAttempts());
+
+            $journal = new QueueJournal($logPath);
+            $lastAttempts = 0;
+
+            // dispatchNext() returns false whenever nothing can move right
+            // now - including the retry delay a just-failed job sits out
+            // before it is visible again. So this is not a while(dispatch)
+            // loop (that would stop right after the first failure); it is a
+            // poll until the journal shows the job reached a terminal state.
+            $deadline = microtime(true) + 30.0;
+
+            while (microtime(true) < $deadline) {
+                if ($dispatcher->dispatchNext()) {
+                    $row = $journal->rows()[(string) $job->getId()] ?? [];
+                    $attempts = (int) ($row['attempts'] ?? 0);
+
+                    if ($attempts !== $lastAttempts) {
+                        printf("   attempt %d -> failed\n", $attempts);
+                        $lastAttempts = $attempts;
+                    }
+
+                    continue;
+                }
+
+                $state = (string) ($journal->rows()[(string) $job->getId()]['state'] ?? '');
+
+                if ($state === 'FAILED' || $state === 'COMPLETED') {
+                    break;
+                }
+
+                usleep(10_000);
+            }
+
+            $pool->shutdown();
+
+            $row = $journal->rows()[(string) $job->getId()] ?? [];
+            $snapshot = $journal->snapshot();
+            $state = (string) ($row['state'] ?? '?');
+
+            printf("   all %d attempts failed -> %s (dead state)\n", (int) ($row['attempts'] ?? 0), $state);
+            printf("   last error            %s\n", (string) ($row['lastError'] ?? '-'));
+            printf("   journal counters      failed=%d retried=%d depth=%d\n", $snapshot['failed'], $snapshot['retried'], $snapshot['depth']);
+            printf(
+                "   => retry worked: a well-formed but hopeless job spent its budget\n"
+                . "      and was retired into the FAILED state instead of retried forever.\n",
+            );
+
+            $exit = $state === 'FAILED' && (int) ($row['attempts'] ?? 0) === $job->getMaxAttempts() ? 0 : 1;
+        } finally {
+            $database->close();
+
+            $this->stopCacheServerIfOwned($ownsCacheServer);
+
+            if ($ownsDatabaseServer) {
+                $this->stopDatabaseServerIfOwned(true, $databaseConfig);
+            }
+        }
+
+        return $exit;
     }
 
     /**

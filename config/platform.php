@@ -83,4 +83,19 @@ return [
         // JSON document.
         'idempotency_store' => sys_get_temp_dir() . '/php-systems-platform/idempotency.log',
     ],
+    // PLAN Step 22's failure injection, and the notion of an environment it
+    // is gated on: the `worker.crash` pool task, POST /debug/fail-worker,
+    // and the demo.failing job are only armed in development/demo modes -
+    // PLAN says "Failure injection should only be enabled in
+    // development/demo mode." PLATFORM_ENV is the one switch: anything
+    // other than a dev/demo/test environment (production, say) disarms all
+    // of it without code changes, so an HTTP route that kills a worker
+    // cannot exist next to a deployment that is actually serving.
+    'failure_injection' => [
+        'enabled' => in_array(
+            (string) (getenv('PLATFORM_ENV') ?: 'dev'),
+            ['dev', 'development', 'demo', 'test'],
+            true,
+        ),
+    ],
 ];

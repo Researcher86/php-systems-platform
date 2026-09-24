@@ -787,6 +787,51 @@ one settles once across a fresh executor; and the real journal → consumer
 and `idempotency:demo`, which prints the same two-deliveries-twice story
 for a real order with and without a guard.
 
+### Failure injection (Step 22, shipped)
+
+Failure is a property worth turning on on purpose: a platform whose crash
+path is only ever exercised by accidents has never seen it work. Step 22
+gives the lab three coordinated injection points, all of them pinning one
+of the step's two sequences:
+
+- **`demo.failing` (`Queue\Jobs\FailingJob`)** — a registered job that
+  throws on every delivery, and deliberately does NOT implement
+  `ValidatesPayload`, so `shouldRetry()` lets it spend its whole attempts
+  budget. The sequence it reproduces is `job fails → retry → failure →
+  dead/failed state`: the dispatcher retries it `max_attempts` times and
+  retires it into the terminal `FAILED` journal row.
+- **`worker.crash` (`Workers\WorkerFailureTasks`)** — a pool task whose
+  worker SIGKILLs itself mid-request, with no chance to answer or clean
+  up: exactly what an OOM-kill looks like from the pool's side. The
+  Master's SIGCHLD path is the only witness — `reapCrashedWorkers()` fails
+  the request it held with `worker_crashed`, `reapDeadWorkers()` removes
+  the dead pid and immediately forks a replacement. The sequence is
+  `worker crashes → manager detects → worker removed → replacement
+  started`.
+- **`POST /debug/fail-worker`** — the step's example endpoint. Its handler
+  (`Application\Handlers\FailWorkerHandler`) drives the crash through
+  `Workers\WorkerFailureInjector`, which records every phase's evidence off
+  `WorkerPoolClient::stats()` (a Master-answered read that costs no pool
+  capacity): the `worker_crashed` error arrives, then the dead pid drops
+  out of `stats()`, then a never-before-seen pid appears. `failure:demo`
+  and the integration tests use exactly the same injector.
+
+The one switch is the environment, per the step's own rule ("Failure
+injection should only be enabled in development/demo mode"):
+`config/platform.php` derives `failure_injection.enabled` from
+`PLATFORM_ENV` (default `dev`; enabled for dev/demo/test, disabled
+otherwise). A production `serve` has no `/debug/fail-worker` route at all
+(404), and a production pool answers `failure_injection_disabled` to a
+`worker.crash` instead of dying — both verified (the disabled pool keeps
+its two workers across such a request) rather than asserted.
+
+Exercised by `tests/Integration/ServeIntegrationTest` (crash sequence on an
+isolated two-worker pool; the disabled pool refusing to crash; a real
+`demo.failing` job drained to `FAILED` at exactly `max_attempts`; the HTTP
+endpoint crashing and replacing a real shared-pool worker) and
+`tests/Integration/FailureDemoCommandTest`, which runs `failure:demo` end
+to end as a subprocess.
+
 ## Adapter mapping (used by later phases)
 
 | Platform class                 | Wraps                                  |

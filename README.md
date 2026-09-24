@@ -379,6 +379,18 @@ same two deliveries under a keyed guard settle once - see Idempotency
 below for what the numbers mean. Needs the database server the way
 `serve` does; starts one if none answers.
 
+```bash
+php bin/platform.php failure:demo
+```
+
+Reproduce Step 22's two failure sequences end to end: crash one worker of
+a throwaway two-worker pool (the manager detects it, removes it and starts
+a replacement - with each phase's timing), then publish a `demo.failing`
+job and run the real dispatcher until the journal retires it into the
+`FAILED` state after its full attempts budget. The lab arms failure
+injection only in development/demo environments; in a production one this
+command refuses with `PLATFORM_ENV=dev ...` as the hint.
+
 ---
 
 # Example API
@@ -454,6 +466,25 @@ Cache
         ▼
      Response
 ```
+
+---
+
+## Fail a worker (development/demo only)
+
+```http
+POST /debug/fail-worker
+```
+
+The Step 22 controlled failure mode. Crashes one pool worker with SIGKILL
+and answers with each phase's evidence, measured off the pool's own
+bookkeeping: `worker_crashed` detected → the dead pid removed from the
+worker list → a replacement started.
+
+The route exists only in development/demo environments. The lab gates
+failure injection on `PLATFORM_ENV`, so a production `serve` has no such
+route (404) and a production pool refuses the crash instead of dying:
+`{"error":"failure_injection_disabled"}`. Run `failure:demo` to watch the
+same sequence without touching a running serve.
 
 ---
 

@@ -19,6 +19,7 @@ final class PlatformConfigTest extends TestCase
     protected function tearDown(): void
     {
         putenv('QUEUE_MAX_SIZE');
+        putenv('PLATFORM_ENV');
     }
 
     public function testQueueMaxSizeDefaultsToFiveHundred(): void
@@ -37,5 +38,37 @@ final class PlatformConfigTest extends TestCase
         $config = require dirname(__DIR__, 2) . '/config/platform.php';
 
         self::assertSame(3, $config['queue']['max_size']);
+    }
+
+    public function testFailureInjectionIsArmedByDefault(): void
+    {
+        // PLAN Step 22: failure injection only in development/demo mode, and
+        // "dev" is the platform's default environment - the lab defaults to
+        // armed so the demos and debug endpoints work out of the box.
+        putenv('PLATFORM_ENV');
+
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+
+        self::assertTrue($config['failure_injection']['enabled']);
+    }
+
+    public function testFailureInjectionIsArmedInDemoAndTestEnvironments(): void
+    {
+        putenv('PLATFORM_ENV=demo');
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+        self::assertTrue($config['failure_injection']['enabled']);
+
+        putenv('PLATFORM_ENV=test');
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+        self::assertTrue($config['failure_injection']['enabled']);
+    }
+
+    public function testFailureInjectionIsDisarmedOutsideDevelopmentEnvironments(): void
+    {
+        putenv('PLATFORM_ENV=production');
+
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+
+        self::assertFalse($config['failure_injection']['enabled']);
     }
 }

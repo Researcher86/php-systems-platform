@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use PhpSystemsPlatform\Workers\CatalogTasks;
+use PhpSystemsPlatform\Workers\WorkerFailureTasks;
 use PhpSystemsPlatform\Workers\WorkerJobs;
 use PhpSystemsPlatform\Workers\WorkerMemoryTasks;
 use PhpSystemsPlatform\Workers\WorkerTasks;
@@ -24,10 +25,12 @@ require __DIR__ . '/../vendor/autoload.php';
  * Four task families live here: the hash tasks (ping/hash_chunk,
  * WorkerTasks) that back GET /parallel, job.execute (WorkerJobs) that runs
  * queue jobs on a worker process, the catalog.* reads (CatalogTasks) the
- * concurrent order loader fans out, and memory.hold (WorkerMemoryTasks,
+ * concurrent order loader fans out, memory.hold (WorkerMemoryTasks,
  * PLAN Step 16) that lets `workers:memory` measure and grow a worker's own
- * memory. The pool itself never knows what a task means - it only forks
- * processes and moves Request/Response between them.
+ * memory, and worker.crash (WorkerFailureTasks, PLAN Step 22) that kills a
+ * worker on demand in development/demo modes. The pool itself never knows
+ * what a task means - it only forks processes and moves Request/Response
+ * between them.
  */
 
 $config = require __DIR__ . '/../config/platform.php';
@@ -62,10 +65,17 @@ $catalogTasks = new CatalogTasks((array) $config['database'])->handler();
 // independent (empty) $held - the same copy-on-write the object's own
 // docblock is about, just watched from the outside this time.
 $memoryTasks = new WorkerMemoryTasks()->handler();
+// PLAN Step 22: armed only in development/demo environments - see the
+// task's docblock for why a production pool must not even answer.
+$failureTasks = new WorkerFailureTasks((bool) $config['failure_injection']['enabled'])->handler();
 
-$handler = static function (Request $request) use ($catalogTasks, $memoryTasks, $workerJobs, $workerTasks): Response {
+$handler = static function (Request $request) use ($catalogTasks, $failureTasks, $memoryTasks, $workerJobs, $workerTasks): Response {
     if ($request->action === 'job.execute') {
         return $workerJobs($request);
+    }
+
+    if (str_starts_with($request->action, 'worker.')) {
+        return $failureTasks($request);
     }
 
     if (str_starts_with($request->action, 'catalog.')) {

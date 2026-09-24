@@ -15,6 +15,7 @@ use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Queue\JobContext;
 use PhpSystemsPlatform\Queue\JobRegistry;
+use PhpSystemsPlatform\Queue\Jobs\FailingJob;
 use PhpSystemsPlatform\Queue\Jobs\OrderCreatedJob;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
@@ -85,6 +86,37 @@ final class JobRegistryTest extends TestCase
         )->dispatch(OrderCreatedJob::TYPE, ['order_id' => 'abc']);
 
         $eligible = (JobRegistry::shouldRetry())($job, new RuntimeException('order not found'));
+
+        self::assertTrue($eligible);
+    }
+
+    public function testFailingJobIsRegisteredAndFailsOnEveryExecution(): void
+    {
+        // PLAN Step 22: the deliberate failure is a registered job like any
+        // other, so the whole retry machinery treats it as a real failure -
+        // a well-formed but hopeless one that may spend its attempts budget.
+        $carrier = new Producer(
+            new InMemoryQueue(new SystemClock()),
+            new JobFactory(new SystemClock()),
+        )->dispatch(FailingJob::TYPE);
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Injected failure (demo.failing).');
+
+        new JobRegistry()->execute($carrier, $this->context());
+    }
+
+    public function testShouldRetryLetsTheFailingJobSpendItsBudget(): void
+    {
+        // The reason demo.failing reaches max_attempts instead of dying on
+        // attempt one: it has no ValidatesPayload, so validate() has no
+        // opinion and shouldRetry() keeps it eligible while attempts remain.
+        $job = new Producer(
+            new InMemoryQueue(new SystemClock()),
+            new JobFactory(new SystemClock()),
+        )->dispatch(FailingJob::TYPE);
+
+        $eligible = (JobRegistry::shouldRetry())($job, new RuntimeException('Injected failure (demo.failing).'));
 
         self::assertTrue($eligible);
     }

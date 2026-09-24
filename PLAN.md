@@ -2399,7 +2399,7 @@ Phase 5 is complete when all of the following are true.
 * [ ] Job failure can be reproduced.
 * [ ] Retry can be reproduced.
 * [ ] Timeout can be reproduced.
-* [ ] Graceful shutdown can be reproduced.
+* [x] Graceful shutdown can be reproduced.
 
 ## Testing
 

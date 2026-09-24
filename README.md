@@ -268,7 +268,11 @@ Start the HTTP server.
 php bin/platform.php worker
 ```
 
-Start workers.
+Start the worker pool and the queue consumer: the production shape of one
+worker node. The pool Master (`bin/worker.php`) runs as this process'
+child, and SIGTERM/SIGINT shut the whole node down gracefully - the
+consumer stops pulling, finishes and drains what a worker already holds,
+then the pool is told to leave (see Graceful shutdown below).
 
 ```bash
 php bin/platform.php queue:publish order.created '{"order_id":"<id>"}'
@@ -286,7 +290,10 @@ php bin/platform.php queue:consume
 
 Start the queue consumer: restores the journal, replays READY jobs, and
 keeps picking up jobs published while it runs. SIGTERM/SIGINT stop it
-gracefully.
+gracefully; the shutdown tail then prints the sequence it ran - no new
+work -> no new pulls -> finish executing -> drain workers -> stop workers
+-> close resources - scans the journal for jobs that could have been
+silently lost, and exits `0` only when there are none (Step 21).
 
 ```bash
 php bin/platform.php queue:status

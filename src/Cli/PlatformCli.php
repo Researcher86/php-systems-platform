@@ -153,6 +153,7 @@ final class PlatformCli
     {
         return match ($command) {
             'serve' => $this->serve(),
+            'worker' => $this->worker(),
             'queue:publish' => $this->queuePublish(array_slice($argv, 2)),
             'queue:consume' => $this->queueConsume(),
             'queue:status' => $this->queueStatus(),
@@ -854,7 +855,18 @@ final class PlatformCli
      * the pool Master that owns them, so - like serve() - the consumer makes
      * sure those servers answer before it starts and stops them again if it
      * was the one that started them.
+     *
+     * The shutdown tail (PLAN Step 21) is observable and verified: run() has
+     * stopped accepting and pulling, the dispatcher then finished executing,
+     * drained and stopped the workers, and this method closes the resources,
+     * checks the append-only journal for "not silently lost" and turns that
+     * invariant into the exit code.
      */
+    private function worker(): int
+    {
+        return $this->queueConsume();
+    }
+
     private function queueConsume(): int
     {
         $config = $this->config();
@@ -971,7 +983,16 @@ final class PlatformCli
 
         $consumer->run();
 
+        // PLAN Step 21, observable: run() has just stopped accepting new
+        // work and stopped pulling new jobs on its own signal-driven thread,
+        // and the dispatcher shutdown that ended it finished executing the
+        // jobs still running, drained the workers (idle out, busy left
+        // alone) and stopped them before returning. What remains here is the
+        // tail of the same sequence - close resources, verify, exit.
         printf("Consumer stopped.\n");
+        printf(
+            "  shutdown: no new work -> no new pulls -> finish executing -> drain workers -> stop workers -> close resources\n",
+        );
 
         // The final snapshot: the workers' last states after the shutdown
         // drained them (DRAINING/STOPPING/DEAD) are what the file keeps.
@@ -985,12 +1006,58 @@ final class PlatformCli
             $counters[MetricsCollector::JOBS_RETRIED] ?? 0,
         );
 
+        $cleanShutdown = $this->verifyNoJobLost($logPath);
+
         $database->close();
         $this->stopWorkerPoolIfOwned($ownsWorkerPool);
         $this->stopCacheServerIfOwned($ownsCacheServer);
         $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
 
-        return 0;
+        return $cleanShutdown ? 0 : 1;
+    }
+
+    /**
+     * PLAN Step 21's "verify that jobs are not silently lost": after the
+     * consumer drained, every row the append-only journal holds must still
+     * be there and in a state that is either already finished (a terminal
+     * outcome) or can be picked up again by a restart (recoverable). The
+     * journal is append-only, so a row can only be lost if the platform
+     * stopped tracking it - this check turns that invariant into an exit
+     * code instead of an assumption, and into the test that pins it.
+     */
+    private function verifyNoJobLost(string $logPath): bool
+    {
+        $rows = new QueueJournal($logPath)->rows();
+
+        $terminal = 0;
+        $recoverable = 0;
+        $lost = 0;
+
+        foreach ($rows as $row) {
+            $state = $row['state'];
+
+            if (in_array($state, ['COMPLETED', 'FAILED'], true)) {
+                $terminal++;
+            } elseif (in_array($state, ['READY', 'PROCESSING', 'DELAYED'], true)) {
+                $recoverable++;
+            } else {
+                $lost++;
+            }
+        }
+
+        printf(
+            "  shutdown verification: journal rows=%d terminal=%d recoverable=%d lost=%d\n",
+            count($rows),
+            $terminal,
+            $recoverable,
+            $lost,
+        );
+
+        if ($lost > 0) {
+            fwrite(STDERR, sprintf("  %d job(s) lost at shutdown%s", $lost, PHP_EOL));
+        }
+
+        return $lost === 0;
     }
 
     /**

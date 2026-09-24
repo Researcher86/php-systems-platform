@@ -291,6 +291,52 @@ serve (HTTP) ──producer──► journal ◄──consumer──► WorkerPo
   an answer lands. Running 100/4, 1000/4 and 1000/8 shows that doubling the
   workers does not halve the time.
 
+### Graceful shutdown (Step 21, shipped)
+
+`worker` ("start the worker pool and queue consumer") is the production
+shape of one worker node: the consumer it runs forwards to the pool Master
+(`bin/worker.php`) it owns as a child, so one process anchors the whole
+shutdown sequence and both sides of it drain in order. `queue:consume` is
+the same run for an operator who brings the pool themselves.
+
+SIGTERM/SIGINT are handled anywhere a long-running platform process lives:
+`serve` stops its `Server` + loop then releases the cache/pool/database
+children it owns, the `Master` (php-worker-pool) closes its socket, absorbs
+what clients already sent, drains pending requests inside its own shutdown
+budget, tells stragglers, and exits its workers, and the consumer follows
+`QueueRuntime`'s contract — the loop notices a stop flag on its next pass.
+
+The consumer shutdown sequence (what `PlatformCli::queueConsume()` prints
+on the way out) is the PLAN Step 21 sequence end to end:
+
+```text
+receive signal
+      ↓
+stop accepting new work          ← QueueConsumer loop exit (flag, one-shot)
+      ↓
+stop pulling new jobs            ← loop stops re-syncing the journal
+      ↓
+finish currently executing jobs  ← JobDispatcher::shutdown(grace 10s)
+      ↓
+drain workers                    ← idle forwarders out, busy left alone
+      ↓
+stop workers                     ← forwarder pool stopped, then the owned
+                                    pool Master gets SIGTERM → its own drain
+      ↓
+close resources                  ← registry snapshot, database, servers
+      ↓
+verify + exit                    ← exit 0 only if no job was silently lost
+```
+
+The verify step is PLAN's "Verify that jobs are not silently lost": the
+journal is append-only and replayed on restart, so after the drain every
+row must be either terminal (`COMPLETED`/`FAILED`) or recoverable
+(`READY`/`PROCESSING`/`DELAYED`) — nothing may sit in between. The tail
+prints `terminal=N recoverable=M lost=0` and the command exits non-zero
+when the invariant breaks; `testGracefulShutdownLosesNoJobs` in
+`ServeIntegrationTest` pins it by SIGTERMing a live consumer and draining
+the survivors with a fresh one.
+
 ### Platform job model (Step 8, shipped)
 
 The write → enqueue → respond seam (the lifecycle section above wires it):

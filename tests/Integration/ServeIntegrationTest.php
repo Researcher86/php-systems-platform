@@ -954,6 +954,166 @@ final class ServeIntegrationTest extends TestCase
         }
     }
 
+    public function testGracefulShutdownLosesNoJobs(): void
+    {
+        $logPath = self::DATA_DIR . '/queue/queue.log';
+        $clock = new SystemClock();
+        $queue = new InMemoryQueue($clock, new FileStorage($logPath));
+        $producer = new Producer($queue, new JobFactory($clock, new MetricsCollector()));
+
+        // Ten jobs that must survive the SIGTERM itself: after the shutdown every
+        // one of them still has a journal row - terminal, or in a state a
+        // restart can finish - and the exit code says so.
+        $ids = [];
+
+        for ($i = 0; $i < 10; $i++) {
+            $order = $this->postOrder('Graceful ' . $i, 3.0 + $i);
+            $ids[] = (string) $producer->dispatch(
+                OrderCreatedJob::TYPE,
+                ['order_id' => $order['id']],
+                maxAttempts: 3,
+            )->getId();
+        }
+
+        $process = proc_open(
+            [PHP_BINARY, dirname(__DIR__, 2) . '/bin/platform.php', 'queue:consume'],
+            [
+                1 => ['file', self::LOG_DIR . '/consume.out', 'a'],
+                2 => ['file', self::LOG_DIR . '/consume.err', 'a'],
+            ],
+            $pipes,
+        );
+
+        self::assertIsResource($process);
+
+        $processPid = (int) proc_get_status($process)['pid'];
+
+        try {
+            // "Consumer started" prints after the pool answers and just
+            // before the loop begins dispatching, so SIGTERM lands while the
+            // batch is still being worked through - the drain has to finish
+            // it (or leave it recoverable) without dropping anything.
+            $deadline = microtime(true) + 20.0;
+
+            do {
+                $started = str_contains((string) file_get_contents(self::LOG_DIR . '/consume.out'), 'Consumer started');
+                usleep(20_000);
+            } while (microtime(true) < $deadline && !$started);
+
+            self::assertTrue($started, sprintf(
+                'Consumer output: %s',
+                (string) file_get_contents(self::LOG_DIR . '/consume.out'),
+            ));
+
+            proc_terminate($process);
+
+            // proc_get_status()/proc_close() report -1 once a child has been
+            // reaped (waited-on), so the exit code is read with an explicit
+            // pcntl_waitpid instead - the consumer is our direct child.
+            $pid = $processPid;
+            $deadline = microtime(true) + 20.0;
+            $shutdownStartedAt = microtime(true);
+
+            do {
+                $reaped = pcntl_waitpid($pid, $waitStatus, WNOHANG);
+                usleep(50_000);
+            } while ($reaped !== $pid && microtime(true) < $deadline);
+
+            if ($reaped !== $pid) {
+                proc_terminate($process, 9);
+                $reaped = pcntl_waitpid($pid, $waitStatus);
+            }
+
+            $exit = $reaped === $pid ? pcntl_wexitstatus($waitStatus) : -1;
+            proc_close($process);
+            $output = (string) file_get_contents(self::LOG_DIR . '/consume.out');
+
+            self::assertSame(0, $exit, sprintf(
+                'Consumer did not exit 0 (%.1fs after SIGTERM). Output:%s%s',
+                microtime(true) - $shutdownStartedAt,
+                PHP_EOL,
+                $output,
+            ));
+            self::assertStringContainsString('lost=0', $output);
+
+            // The invariant: every published job still has a journal row in
+            // a state a restart can finish - none vanished in the shutdown.
+            $terminal = ['COMPLETED', 'FAILED'];
+            $recoverable = ['READY', 'PROCESSING', 'DELAYED'];
+            $rows = new QueueJournal($logPath)->rows();
+
+            foreach ($ids as $id) {
+                $state = $rows[$id]['state'] ?? null;
+
+                self::assertNotNull($state, "Job $id was lost at shutdown.");
+                self::assertContains($state, [...$terminal, ...$recoverable], "Job $id left in a dead state: $state");
+            }
+        } finally {
+            if (is_resource($process)) {
+                proc_terminate($process, 9);
+                proc_close($process);
+            }
+        }
+
+        // The recovery path, deterministically: a second batch published
+        // while the consumer is down can only be pulled by a restart. None
+        // of it may be lost either.
+        for ($i = 0; $i < 5; $i++) {
+            $order = $this->postOrder('Graceful restart ' . $i, 5.0 + $i);
+            $ids[] = (string) $producer->dispatch(
+                OrderCreatedJob::TYPE,
+                ['order_id' => $order['id']],
+                maxAttempts: 3,
+            )->getId();
+        }
+
+        // A fresh consumer drains what survived the shutdown and what was
+        // published while it was down; once every job is terminal, nothing
+        // was silently lost.
+        $second = proc_open(
+            [PHP_BINARY, dirname(__DIR__, 2) . '/bin/platform.php', 'queue:consume'],
+            [
+                1 => ['file', self::LOG_DIR . '/consume.out', 'a'],
+                2 => ['file', self::LOG_DIR . '/consume.err', 'a'],
+            ],
+            $pipes,
+        );
+
+        self::assertIsResource($second);
+
+        try {
+            $deadline = microtime(true) + 30.0;
+
+            do {
+                $rows = new QueueJournal($logPath)->rows();
+                $states = array_map(
+                    static fn (string $id): ?string => $rows[$id]['state'] ?? null,
+                    $ids,
+                );
+                usleep(100_000);
+            } while (
+                microtime(true) < $deadline
+                && !in_array(null, $states, true)
+                && count(array_diff($states, $terminal)) > 0
+            );
+
+            $rows = new QueueJournal($logPath)->rows();
+
+            foreach ($ids as $id) {
+                self::assertSame('COMPLETED', $rows[$id]['state'] ?? null, sprintf(
+                    'Job %s was not drained by the restart. Output: %s',
+                    $id,
+                    (string) file_get_contents(self::LOG_DIR . '/consume.out'),
+                ));
+            }
+        } finally {
+            if (is_resource($second)) {
+                proc_terminate($second, 9);
+                proc_close($second);
+            }
+        }
+    }
+
     public function testWorkerPoolExecutesAQueueJob(): void
     {
         $order = $this->postOrder('Linus Torvalds', 4.5);

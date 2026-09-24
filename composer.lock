@@ -226,12 +226,12 @@
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-job-queue.git",
-                "reference": "4698722a470536c699da7a74897739faac422fcc"
+                "reference": "eefc0bb094aca32bb0cd6b6cad1d355854f79103"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-job-queue/zipball/4698722a470536c699da7a74897739faac422fcc",
-                "reference": "4698722a470536c699da7a74897739faac422fcc",
+                "url": "https://api.github.com/repos/Researcher86/php-job-queue/zipball/eefc0bb094aca32bb0cd6b6cad1d355854f79103",
+                "reference": "eefc0bb094aca32bb0cd6b6cad1d355854f79103",
                 "shasum": ""
             },
             "require": {
@@ -278,7 +278,7 @@
                 "source": "https://github.com/Researcher86/php-job-queue/tree/master",
                 "issues": "https://github.com/Researcher86/php-job-queue/issues"
             },
-            "time": "2026-09-14T06:28:09+00:00"
+            "time": "2026-09-24T10:54:53+00:00"
         },
         {
             "name": "tanat/php-mini-cache",
@@ -286,12 +286,12 @@
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-mini-cache.git",
-                "reference": "9eb06214599711d3ea7ad9ca49a266b4c2a77595"
+                "reference": "1ae1af765667d54f1866b7aece11b2615a16b0f9"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-mini-cache/zipball/9eb06214599711d3ea7ad9ca49a266b4c2a77595",
-                "reference": "9eb06214599711d3ea7ad9ca49a266b4c2a77595",
+                "url": "https://api.github.com/repos/Researcher86/php-mini-cache/zipball/1ae1af765667d54f1866b7aece11b2615a16b0f9",
+                "reference": "1ae1af765667d54f1866b7aece11b2615a16b0f9",
                 "shasum": ""
             },
             "require": {
@@ -337,7 +337,7 @@
                 "source": "https://github.com/Researcher86/php-mini-cache/tree/master",
                 "issues": "https://github.com/Researcher86/php-mini-cache/issues"
             },
-            "time": "2026-09-14T06:56:32+00:00"
+            "time": "2026-09-24T11:18:57+00:00"
         },
         {
             "name": "tanat/php-mini-database",
@@ -345,12 +345,12 @@
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-mini-database.git",
-                "reference": "4fa7ac63f427eb8e51e5068121678e7f135928f7"
+                "reference": "d8aba01705de55ddbc521974e34e8c284294636d"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-mini-database/zipball/4fa7ac63f427eb8e51e5068121678e7f135928f7",
-                "reference": "4fa7ac63f427eb8e51e5068121678e7f135928f7",
+                "url": "https://api.github.com/repos/Researcher86/php-mini-database/zipball/d8aba01705de55ddbc521974e34e8c284294636d",
+                "reference": "d8aba01705de55ddbc521974e34e8c284294636d",
                 "shasum": ""
             },
             "require": {
@@ -405,7 +405,7 @@
                 "source": "https://github.com/Researcher86/php-mini-database/tree/master",
                 "issues": "https://github.com/Researcher86/php-mini-database/issues"
             },
-            "time": "2026-09-23T13:53:15+00:00"
+            "time": "2026-09-24T11:01:21+00:00"
         },
         {
             "name": "tanat/php-mini-http-server",
@@ -413,12 +413,12 @@
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-mini-http-server.git",
-                "reference": "94d7b77fb8e8666ae97a14b0149d8bfaddcb5f46"
+                "reference": "1a61eba64d4eaa7fa0f2c1b3905215d2d3b6751e"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-mini-http-server/zipball/94d7b77fb8e8666ae97a14b0149d8bfaddcb5f46",
-                "reference": "94d7b77fb8e8666ae97a14b0149d8bfaddcb5f46",
+                "url": "https://api.github.com/repos/Researcher86/php-mini-http-server/zipball/1a61eba64d4eaa7fa0f2c1b3905215d2d3b6751e",
+                "reference": "1a61eba64d4eaa7fa0f2c1b3905215d2d3b6751e",
                 "shasum": ""
             },
             "require": {
@@ -465,7 +465,7 @@
                 "source": "https://github.com/Researcher86/php-mini-http-server/tree/master",
                 "issues": "https://github.com/Researcher86/php-mini-http-server/issues"
             },
-            "time": "2026-09-14T06:31:47+00:00"
+            "time": "2026-09-24T11:02:42+00:00"
         },
         {
             "name": "tanat/php-worker-pool",
@@ -473,12 +473,12 @@
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-worker-pool.git",
-                "reference": "cce9b74449fdd50acf100ac185eaceaf3fffa5ff"
+                "reference": "4367f6639e645b152aa8c7982285336e609763e0"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-worker-pool/zipball/cce9b74449fdd50acf100ac185eaceaf3fffa5ff",
-                "reference": "cce9b74449fdd50acf100ac185eaceaf3fffa5ff",
+                "url": "https://api.github.com/repos/Researcher86/php-worker-pool/zipball/4367f6639e645b152aa8c7982285336e609763e0",
+                "reference": "4367f6639e645b152aa8c7982285336e609763e0",
                 "shasum": ""
             },
             "require": {
@@ -525,7 +525,7 @@
                 "source": "https://github.com/Researcher86/php-worker-pool/tree/master",
                 "issues": "https://github.com/Researcher86/php-worker-pool/issues"
             },
-            "time": "2026-09-14T06:33:41+00:00"
+            "time": "2026-09-24T11:16:29+00:00"
         }
     ],
     "packages-dev": [

@@ -4,12 +4,15 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Queue;
 
+use PhpJobQueue\Idempotency\IdempotencyGuard;
 use PhpJobQueue\Job\Job as QueueJob;
+use PhpJobQueue\Persistence\FileStorage;
 use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Domain\SequentialOrderLoader;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
+use PhpSystemsPlatform\Storage\Repositories\InventoryRepository;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
 
 /**
@@ -30,6 +33,16 @@ use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
  * stamped by JobDispatcher itself around the same dispatch this class
  * executes inside. This class only has to run the job; the metadata is the
  * caller's job object to persist.
+ *
+ * Step 20's idempotency guard is built here, per worker, the same lazy way
+ * the connections are: a shared IdempotencyGuard over a FileStorage at the
+ * configured `jobs.idempotency_store` path. Built once inside a worker, it
+ * deduplicates by what it has already recorded in this process; because its
+ * storage is the append-only journal other workers and past lives wrote, a
+ * worker that starts after an operation settled sees the persisted key and
+ * skips the redelivery - the "survives a restart" property Step 20 exists to
+ * exercise. A worker without a configured store (null path) hands every job
+ * a context with no guard, and nothing changes.
  */
 final class JobExecutor
 {
@@ -38,20 +51,31 @@ final class JobExecutor
     private ?CacheService $cache = null;
     private ?Database $database = null;
     private ?SequentialOrderLoader $loader = null;
+    private ?IdempotencyGuard $idempotency = null;
+    private ?InventoryRepository $inventory = null;
 
     /**
-     * @param array<string, mixed> $databaseConfig the `database` config block
-     * @param array<string, mixed> $cacheConfig     the `cache` config block
+     * @param array<string, mixed> $databaseConfig       the `database` config block
+     * @param array<string, mixed> $cacheConfig          the `cache` config block
+     * @param string|null          $idempotencyLogPath   the `jobs.idempotency_store` journal path, or null for no guard
      */
     public function __construct(
         private array $databaseConfig,
         private array $cacheConfig,
+        private ?string $idempotencyLogPath = null,
     ) {
     }
 
     public function __invoke(QueueJob $job): mixed
     {
-        $context = new JobContext($job, $this->orders(), $this->cache(), $this->loader());
+        $context = new JobContext(
+            $job,
+            $this->orders(),
+            $this->cache(),
+            $this->loader(),
+            $this->idempotency(),
+            $this->inventory(),
+        );
 
         $this->registry ??= new JobRegistry();
         $this->registry->execute($job, $context);
@@ -88,5 +112,19 @@ final class JobExecutor
     private function cache(): CacheService
     {
         return $this->cache ??= CacheService::fromConfig($this->cacheConfig);
+    }
+
+    private function idempotency(): ?IdempotencyGuard
+    {
+        if ($this->idempotencyLogPath === null) {
+            return null;
+        }
+
+        return $this->idempotency ??= new IdempotencyGuard(new FileStorage($this->idempotencyLogPath));
+    }
+
+    private function inventory(): InventoryRepository
+    {
+        return $this->inventory ??= new InventoryRepository($this->database());
     }
 }

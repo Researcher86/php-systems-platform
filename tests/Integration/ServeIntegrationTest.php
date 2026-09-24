@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Tests\Integration;
 
 use PhpJobQueue\Dispatcher\JobDispatcher;
+use PhpJobQueue\Idempotency\IdempotencyGuard;
 use PhpJobQueue\Metrics\MetricsCollector;
 use PhpJobQueue\Persistence\FileStorage;
 use PhpJobQueue\Producer\JobFactory;
@@ -29,6 +30,7 @@ use PhpSystemsPlatform\Queue\Jobs\OrderProcessJob;
 use PhpSystemsPlatform\Queue\QueueJournal;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
+use PhpSystemsPlatform\Storage\Repositories\InventoryRepository;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
 use PhpSystemsPlatform\Workers\ConcurrentOrderLoader;
 use PhpSystemsPlatform\Workers\ConcurrentTaskRunner;
@@ -425,6 +427,128 @@ final class ServeIntegrationTest extends TestCase
 
         $rows = self::$database->read('SELECT status FROM orders WHERE id = ?', [$order['id']]);
         self::assertSame('completed', $rows[0]['status']);
+    }
+
+    public function testCreateOrderKeysItsBackgroundJobWithTheOperation(): void
+    {
+        $order = $this->postOrder('Idempotency Key', 1);
+
+        // The key names the operation, not a delivery: any copy of
+        // "order X was created" deduplicates the same way (PLAN Step 20).
+        $journal = (string) file_get_contents(self::DATA_DIR . '/queue/queue.log');
+        self::assertStringContainsString(sprintf('"idempotencyKey":"order.created:%s"', $order['id']), $journal);
+    }
+
+    public function testOrderProcessWithoutAnIdempotencyKeySettlesStockTwiceOnRedelivery(): void
+    {
+        $order = $this->postOrder('Idempotency No Key', 2);
+        $inventory = new InventoryRepository(self::$database);
+        $stock = new CatalogRepository(self::$database);
+        $before = (int) ($stock->findStock((string) $order['product'])?->available ?? 0);
+
+        // No store wired -> the context's guard is null: redelivery is
+        // delivered, and delivered again.
+        $executor = new JobExecutor(
+            ['host' => self::HOST, 'port' => self::DB_PORT, 'timeout' => 2.0],
+            ['host' => self::HOST, 'port' => self::CACHE_PORT, 'timeout' => 2.0],
+        );
+        $producer = new Producer(new InMemoryQueue(new SystemClock()), new JobFactory(new SystemClock(), new MetricsCollector()));
+
+        $executor($producer->dispatch(OrderProcessJob::TYPE, ['order_id' => $order['id']], maxAttempts: 3));
+        $executor($producer->dispatch(OrderProcessJob::TYPE, ['order_id' => $order['id']], maxAttempts: 3));
+
+        // Two deliveries, two settles: the same operation applied twice.
+        $after = (int) ($stock->findStock((string) $order['product'])?->available ?? 0);
+        self::assertSame($before - 2, $after);
+    }
+
+    public function testOrderProcessWithAnOperationKeySettlesStockOnceAcrossRedeliveries(): void
+    {
+        $order = $this->postOrder('Idempotency Guarded', 3);
+        $store = self::LOG_DIR . '/idem-' . uniqid('', true) . '.log';
+        $key = 'order.process:' . $order['id'];
+        $stock = new CatalogRepository(self::$database);
+        $before = (int) ($stock->findStock((string) $order['product'])?->available ?? 0);
+
+        $producer = new Producer(
+            new InMemoryQueue(new SystemClock()),
+            new JobFactory(new SystemClock(), new MetricsCollector()),
+        );
+
+        // Delivery 1: a worker with a guard over the store settles the order
+        // and records the operation.
+        $first = new JobExecutor(
+            ['host' => self::HOST, 'port' => self::DB_PORT, 'timeout' => 2.0],
+            ['host' => self::HOST, 'port' => self::CACHE_PORT, 'timeout' => 2.0],
+            $store,
+        );
+        $first($producer->dispatch(
+            OrderProcessJob::TYPE,
+            ['order_id' => $order['id']],
+            maxAttempts: 3,
+            idempotencyKey: $key,
+        ));
+
+        self::assertSame($before - 1, (int) ($stock->findStock((string) $order['product'])?->available ?? 0));
+
+        // Delivery 2: the same operation, a fresh worker (a different job id -
+        // the KEY is what stays the same). The guard reads the store the first
+        // worker wrote and skips before the loader is even asked.
+        $second = new JobExecutor(
+            ['host' => self::HOST, 'port' => self::DB_PORT, 'timeout' => 2.0],
+            ['host' => self::HOST, 'port' => self::CACHE_PORT, 'timeout' => 2.0],
+            $store,
+        );
+        $second($producer->dispatch(
+            OrderProcessJob::TYPE,
+            ['order_id' => $order['id']],
+            maxAttempts: 3,
+            idempotencyKey: $key,
+        ));
+
+        self::assertSame($before - 1, (int) ($stock->findStock((string) $order['product'])?->available ?? 0));
+        self::assertTrue(new IdempotencyGuard(new FileStorage($store))->isProcessed($key));
+
+        $rows = self::$database->read('SELECT status FROM orders WHERE id = ?', [$order['id']]);
+        self::assertSame('completed', $rows[0]['status']);
+    }
+
+    public function testTheQueuePathRedeliversTheSameOperationAndTheGuardKeepsTheSettleSingle(): void
+    {
+        $order = $this->postOrder('Idempotency End To End', 4);
+        $store = self::LOG_DIR . '/idem-e2e-' . uniqid('', true) . '.log';
+        $key = 'order.process:' . $order['id'];
+        $stock = new CatalogRepository(self::$database);
+        $before = (int) ($stock->findStock((string) $order['product'])?->available ?? 0);
+        $clock = new SystemClock();
+
+        // Delivery 1 through the real queue path: journal -> consumer -> pool
+        // workers, with the Step 20 store wired into the executor the forks
+        // run.
+        new Producer(
+            new InMemoryQueue($clock, new FileStorage(self::DATA_DIR . '/queue/queue.log')),
+            new JobFactory($clock, new MetricsCollector()),
+        )->dispatch(OrderProcessJob::TYPE, ['order_id' => $order['id']], maxAttempts: 3, idempotencyKey: $key);
+        $this->drainQueue($store);
+
+        self::assertSame($before - 1, (int) ($stock->findStock((string) $order['product'])?->available ?? 0));
+
+        // Delivery 2: the at-least-once redelivery - a brand new job, same
+        // operation key, drained by a fresh executor over the same store,
+        // exactly how a restarted worker would see it.
+        $redelivered = new Producer(
+            new InMemoryQueue($clock, new FileStorage(self::DATA_DIR . '/queue/queue.log')),
+            new JobFactory($clock, new MetricsCollector()),
+        )->dispatch(OrderProcessJob::TYPE, ['order_id' => $order['id']], maxAttempts: 3, idempotencyKey: $key);
+        $this->drainQueue($store);
+
+        self::assertSame($before - 1, (int) ($stock->findStock((string) $order['product'])?->available ?? 0));
+
+        // Skipped means completed, not failed: the handler returned cleanly on
+        // its one delivery rather than burning the attempts budget.
+        $rows = new QueueJournal(self::DATA_DIR . '/queue/queue.log')->rows();
+        self::assertSame('COMPLETED', $rows[(string) $redelivered->getId()]['state']);
+        self::assertSame(1, $rows[(string) $redelivered->getId()]['attempts']);
     }
 
     public function testAWorkerStuckPastItsExecutionTimeoutIsKilledAndReplaced(): void
@@ -1181,8 +1305,12 @@ final class ServeIntegrationTest extends TestCase
      * queue, fork a small WorkerPool whose handlers run platform jobs through
      * JobExecutor, and dispatch every ready job to completion. Returns when
      * no job is left that a worker can take.
+     *
+     * $idempotencyLogPath, when given, is handed to the JobExecutor - the
+     * PLAN Step 20 wiring (jobs.idempotency_store), exercised end to end
+     * instead of only through the direct-execution tests.
      */
-    private function drainQueue(): void
+    private function drainQueue(?string $idempotencyLogPath = null): void
     {
         $clock = new SystemClock();
         $logPath = self::DATA_DIR . '/queue/queue.log';
@@ -1193,6 +1321,7 @@ final class ServeIntegrationTest extends TestCase
         $executor = new JobExecutor(
             ['host' => self::HOST, 'port' => self::DB_PORT, 'timeout' => 2.0],
             ['host' => self::HOST, 'port' => self::CACHE_PORT, 'timeout' => 2.0],
+            $idempotencyLogPath,
         );
         $pool = new WorkerPool(
             size: 2,

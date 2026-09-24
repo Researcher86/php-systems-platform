@@ -57,7 +57,16 @@ final readonly class OrderService
             throw new \RuntimeException('Could not persist the order.');
         }
 
-        $this->producer?->dispatch(OrderCreatedJob::TYPE, ['order_id' => $order->id]);
+        // The background job is keyed by the OPERATION it represents, not by
+        // a delivery: `order.created:<order id>` means "this order was
+        // created", so whichever of this order's deliveries arrives, the
+        // queue-side IdempotencyGuard (PLAN Step 20) answers the same way -
+        // and a service without a producer never sees a key at all.
+        $this->producer?->dispatch(
+            OrderCreatedJob::TYPE,
+            ['order_id' => $order->id],
+            idempotencyKey: 'order.created:' . $order->id,
+        );
 
         return $order;
     }

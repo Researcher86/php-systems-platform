@@ -261,8 +261,11 @@ serve (HTTP) ──producer──► journal ◄──consumer──► WorkerPo
 - `serve` wires an `InMemoryQueue` over a `FileStorage` journal and a
   `Producer`, and hands the producer to `OrderService` as an optional seam.
   A POST runs **write database → enqueue `order.created` → respond**.
-- `queue:publish <type> [payload-json]` is the same producer in a CLI: it
-  appends one job to the same journal the consumer reads.
+- `queue:publish <type> [payload-json] [key]` is the same producer in a CLI:
+  it appends one job to the same journal the consumer reads; the optional
+  key (Step 20) travels with it, so a manually published `order.process`
+  deduplicates across redeliveries exactly like one published by the write
+  path.
 - `queue:consume` restores the journal (`InMemoryQueue::restoreFromStorage()`),
   then runs a `QueueConsumer` loop: the component's tick (dispatch pending →
   apply answers → requeue expired) plus a journal re-sync every 100ms, so a
@@ -301,7 +304,9 @@ phase does:
 - `Queue\Job` — the platform's interface; `execute(JobContext)` is what a
   job DOES.
 - `Queue\JobContext` — what a running job may reach: its own carrier plus
-  the `OrderService` and `CacheService`.
+  the `OrderService` and `CacheService` — and, Step 20, an optional
+  `IdempotencyGuard` and `InventoryRepository` write side, both null when
+  they are not wired so nothing that predates the step changes behavior.
 - `Queue\Jobs\OrderCreatedJob` — the first job, type `order.created` with
   payload `['order_id' => ...]`. It re-reads the authoritative row from the
   database and warms the derived cache entry (idempotent; heals the window
@@ -692,6 +697,50 @@ regardless of attempts remaining.
   straight off the same journal everything else in this platform already
   reads — no second file to join anymore.
 
+### Idempotency guard (Step 20, shipped)
+
+An at-least-once queue cannot tell "the worker died before the work" from
+"the work happened and the worker died before saying so" — a PROCESSING job
+returns to READY on restart, so a job whose side effect ran once runs it
+again. The platform's own non-idempotent side effect is Step 20's settle:
+`OrderProcessJob` takes one unit off the shelf. The piece that deduplicates
+redeliveries is the component's, reused as-is:
+
+- **`jobs.idempotency_store`** (`config/platform.php`) — the path of a
+  second append-only JSONL `FileStorage` journal, next to the queue
+  journal. Executors build one shared `IdempotencyGuard` over it (lazily,
+  per fork, exactly like the connections), so the set of "already done"
+  operations survives a restart by replay: a fresh worker reads the store
+  the dead one wrote.
+- **The key names the operation, not the delivery.** The write path
+  dispatches `order.created:<order id>`; the demo and the manual
+  `queue:publish ... [key]` path use `order.process:<order id>`. A job id
+  changes when the job is recreated; the operation key does not.
+- **Both platform jobs check-then-do-then-record, in that order.** A key
+  the guard already knows returns before any read or write (order snapshot
+  included); the record is written after every side effect, so the crash
+  window is the honest one the component's `IdempotencyGuard` docblock
+  describes — check, effect and record are three separate steps, and a
+  crash between effect and record still double-applies. This is
+  deduplication over at-least-once delivery, *not* exactly-once execution;
+  closing that last window needs the side effect and its record to commit
+  together, a property of the storage rather than the queue.
+- The settle itself is a new write side, `Storage\Repositories\
+  InventoryRepository::decrementAvailable()`, SQL-guarded (`available > 0`)
+  and run when `OrderProcessJob` completes with stock. Reads stay on
+  `CatalogRepository`. The seam is optional in the context: an executor
+  without an inventory write side settles nothing, so every pre-Step-20
+  test and command keeps its exact behavior.
+
+Exercised three ways: `tests\Unit\IdempotencyGuardTest` (the record
+survives a fresh guard over the same store; unrelated JSONL records are
+not read as operations); `ServeIntegrationTest` (the write path keys its
+`order.created` job; an unkeyed redelivery settles stock twice; a keyed
+one settles once across a fresh executor; and the real journal → consumer
+→ pool path, where the redelivered job completes on its one delivery);
+and `idempotency:demo`, which prints the same two-deliveries-twice story
+for a real order with and without a guard.
+
 ## Adapter mapping (used by later phases)
 
 | Platform class                 | Wraps                                  |
@@ -702,7 +751,7 @@ regardless of attempts remaining.
 | `Storage\Repositories\*`       | `Database` + `ResultSet`               |
 | `Cache\CacheService`           | `CacheClient`                          |
 | `Queue\Job`                    | platform interface; runs a `PhpJobQueue\Job\Job` via `JobContext` |
-| `Queue\JobContext`             | carrier + `OrderService` + `CacheService` for one execution |
+| `Queue\JobContext`             | carrier + `OrderService` + `CacheService` (+ optional idempotency guard / inventory write side) for one execution |
 | `Queue\Jobs\OrderCreatedJob`   | executes an `order.created` carrier     |
 | `Queue\Jobs\NoopJob`           | `bench.noop` — the benchmark's database-free job |
 | `Queue\JobRegistry`            | maps a carrier type to the platform `Job` that runs it |
@@ -719,6 +768,7 @@ regardless of attempts remaining.
 | `Workers\WorkerTasks`          | per-worker task handler (`ping`, `hash_chunk`) |
 | `Workers\CatalogTasks`         | per-worker reference reads (`catalog.customer/product/stock`) |
 | `Storage\Repositories\CatalogRepository` | `Database` → customers / products / inventory |
+| `Storage\Repositories\InventoryRepository` | `Database` → the settle write, `decrementAvailable` (Step 20) |
 | `Domain\OrderLoader`           | platform interface; one order snapshot, three execution models |
 | `Domain\SequentialOrderLoader` | the reads one after another, in this process |
 | `Workers\ForkedOrderLoader`    | `pcntl_fork` + `stream_socket_pair` + `pcntl_waitpid` (no component) |

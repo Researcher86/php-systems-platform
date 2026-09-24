@@ -29,7 +29,7 @@ final class WorkerJobs
 
     /**
      * @param array<string, mixed> $config the platform config, for the
-     *                                     database and cache blocks
+     *                                     database, cache and jobs blocks
      */
     public function __construct(
         private array $config,
@@ -66,6 +66,9 @@ final class WorkerJobs
         return $this->executor ??= new JobExecutor(
             (array) $this->config['database'],
             (array) $this->config['cache'],
+            isset($this->config['jobs']['idempotency_store'])
+                ? (string) $this->config['jobs']['idempotency_store']
+                : null,
         );
     }
 }

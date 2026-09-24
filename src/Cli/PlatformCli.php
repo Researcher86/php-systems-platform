@@ -40,7 +40,9 @@ use PhpSystemsPlatform\Http\Router;
 use PhpSystemsPlatform\Memory\ForkedMemoryDemo;
 use PhpSystemsPlatform\Memory\MemorySnapshot;
 use PhpSystemsPlatform\Queue\BackpressurePolicy;
+use PhpSystemsPlatform\Queue\JobExecutor;
 use PhpSystemsPlatform\Queue\JobRegistry;
+use PhpSystemsPlatform\Queue\Jobs\OrderProcessJob;
 use PhpSystemsPlatform\Queue\QueueConsumer;
 use PhpSystemsPlatform\Queue\QueueJournal;
 use PhpSystemsPlatform\Storage\Database;
@@ -77,7 +79,7 @@ final class PlatformCli
     private const COMMANDS = [
         'serve' => 'Start the HTTP server and application.',
         'worker' => 'Start the worker pool and queue consumer.',
-        'queue:publish' => 'Publish sample jobs into the queue.',
+        'queue:publish' => 'Publish sample jobs into the queue: queue:publish <type> [payload-json] [key].',
         'queue:consume' => 'Run the queue consumer (pairs with worker pool).',
         'queue:status' => 'Show queue depth and job counters.',
         'queue:job' => 'Show one job\'s full metadata and attempt history: queue:job <id>.',
@@ -88,6 +90,7 @@ final class PlatformCli
         'orders:compare' => 'Compare sequential and concurrent order loading: orders:compare <rounds> <delay-ms>.',
         'memory:demo' => 'Demonstrate fork() and copy-on-write memory behavior.',
         'workers:memory' => 'Measure worker process memory (1, 2, 4, 8 workers).',
+        'idempotency:demo' => 'Demonstrate at-least-once delivery and the idempotency guard.',
         'failure:demo' => 'Reproduce the failure scenarios end to end.',
     ];
 
@@ -159,6 +162,7 @@ final class PlatformCli
             'orders:compare' => $this->ordersCompare(array_slice($argv, 2)),
             'memory:demo' => $this->memoryDemo(),
             'workers:memory' => $this->workersMemory(array_slice($argv, 2)),
+            'idempotency:demo' => $this->idempotencyDemo(),
 
             // Real handlers land with their implementation phase.
             default => $this->notImplemented($command),
@@ -771,7 +775,9 @@ final class PlatformCli
      * here is the same wiring serve() uses: an InMemoryQueue that appends
      * every push to the queue's log, so a job published this way is consumed
      * by the very same queue:consume that would handle a job enqueued over
-     * HTTP.
+     * HTTP. The optional third argument is the idempotency key (PLAN Step 20)
+     * - hand `order.process <payload> order.process:<id>` and a redelivered
+     * copy is deduplicated by the guard instead of settling the order again.
      *
      * @param list<string> $args
      */
@@ -780,7 +786,7 @@ final class PlatformCli
         $type = $args[0] ?? null;
 
         if ($type === null) {
-            fwrite(STDERR, "Usage: php bin/platform.php queue:publish <type> [payload-json]\n");
+            fwrite(STDERR, "Usage: php bin/platform.php queue:publish <type> [payload-json] [key]\n");
 
             return 1;
         }
@@ -799,6 +805,8 @@ final class PlatformCli
             $payload = $decoded;
         }
 
+        $key = $args[2] ?? null;
+
         $config = $this->config();
 
         try {
@@ -809,13 +817,19 @@ final class PlatformCli
             return 1;
         }
 
-        $job = $producer->dispatch($type, $payload, maxAttempts: (int) $config['queue']['max_attempts']);
+        $job = $producer->dispatch(
+            $type,
+            $payload,
+            maxAttempts: (int) $config['queue']['max_attempts'],
+            idempotencyKey: $key,
+        );
 
         printf(
-            "Published job %s (type=%s, %d max attempts) to %s\n",
+            "Published job %s (type=%s, %d max attempts%s) to %s\n",
             $job->getId(),
             $type,
             $job->getMaxAttempts(),
+            $key !== null ? sprintf(', key=%s', $key) : '',
             $config['queue']['data_dir'] . '/queue.log',
         );
 
@@ -1424,6 +1438,134 @@ final class PlatformCli
         );
 
         return 0;
+    }
+
+    /**
+     * PLAN Step 20 end to end: two orders, delivered twice each. The first
+     * pair has neither a key nor a guard, so the second delivery settles the
+     * order again - one unit of stock gone per delivery, the double-apply any
+     * at-least-once queue leaves unguarded handlers open to. The second pair
+     * runs the same two deliveries under the idempotency guard: the first
+     * delivery records the key, the second (a fresh executor, the way a
+     * restarted worker sees the store) reads it back and skips.
+     *
+     * Needs the database server the way serve does - starts one and migrates
+     * it if none answers, and only tears down what this process itself
+     * started. The cache is optional: a dead one is counted as a bypass, the
+     * same tolerance the jobs themselves have.
+     */
+    private function idempotencyDemo(): int
+    {
+        printf("At-least-once vs exactly-once\n\n");
+
+        $config = $this->config();
+        $databaseConfig = $config['database'];
+
+        $ownsDatabaseServer = false;
+
+        try {
+            $ownsDatabaseServer = $this->ensureDatabaseServer($databaseConfig);
+
+            $database = Database::connect($databaseConfig);
+            Migrator::migrate($database);
+        } catch (RuntimeException $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+
+            return 1;
+        }
+
+        try {
+            $orders = new OrderService(new OrderRepository($database));
+            $catalog = new CatalogRepository($database);
+            $cacheConfig = $config['cache'];
+            $producer = new Producer(
+                new InMemoryQueue(new SystemClock()),
+                new JobFactory(new SystemClock(), new MetricsCollector()),
+            );
+
+            printf("Scenario: an order completes, and settling takes one unit of stock.\n");
+            printf("The settle must happen exactly once; a redelivery must not settle again.\n\n");
+
+            $first = $orders->createOrder('Idempotency Demo', 19.99);
+            $stockOf = static fn (string $sku): int => (int) ($catalog->findStock($sku)->available ?? 0);
+
+            printf("1. Without a guard (no key):\n");
+            printf("   order    %s\n", $first->id);
+            printf("   status   completed, one unit settled\n");
+            $before = $stockOf($first->product);
+
+            $unguarded = new JobExecutor($databaseConfig, $cacheConfig);
+            $unguarded($producer->dispatch(OrderProcessJob::TYPE, ['order_id' => $first->id], maxAttempts: 3));
+            $afterFirst = $stockOf($first->product);
+
+            // A redelivered copy of the same operation - the at-least-once
+            // promise kept, exactly as a restart would deliver it.
+            $unguarded($producer->dispatch(OrderProcessJob::TYPE, ['order_id' => $first->id], maxAttempts: 3));
+            $afterSecond = $stockOf($first->product);
+
+            printf("   stock    %d -> %d -> %d   (each delivery took a unit)\n", $before, $afterFirst, $afterSecond);
+            printf("   => a second delivery of the same operation changed the state again.\n\n");
+
+            $second = $orders->createOrder('Idempotency Demo', 19.99);
+            $key = sprintf('order.process:%s', $second->id);
+
+            printf("2. With an idempotency key and the guard:\n");
+            printf("   order    %s\n", $second->id);
+            printf("   key      %s\n", $key);
+
+            $store = sprintf(
+                '%s/php-systems-platform-idem-demo-%s.log',
+                sys_get_temp_dir(),
+                (string) uniqid('', true),
+            );
+            $before = $stockOf($second->product);
+
+            $firstWorker = new JobExecutor($databaseConfig, $cacheConfig, $store);
+            $firstWorker($producer->dispatch(
+                OrderProcessJob::TYPE,
+                ['order_id' => $second->id],
+                maxAttempts: 3,
+                idempotencyKey: $key,
+            ));
+            $afterFirst = $stockOf($second->product);
+
+            // A redelivery is served by a fresh worker; the guard reads the
+            // store the first worker wrote and remembers the operation.
+            $secondWorker = new JobExecutor($databaseConfig, $cacheConfig, $store);
+            $secondWorker($producer->dispatch(
+                OrderProcessJob::TYPE,
+                ['order_id' => $second->id],
+                maxAttempts: 3,
+                idempotencyKey: $key,
+            ));
+            $afterSecond = $stockOf($second->product);
+
+            printf("   stock    %d -> %d -> %d   (second delivery skipped)\n", $before, $afterFirst, $afterSecond);
+            printf("   store    %s\n", $store);
+            printf(
+                "   => with the guard the same two deliveries settle exactly once.\n\n",
+            );
+
+            printf(
+                "Why: the queue promises at-least-once, not exactly-once. A worker that\n"
+                . "settles an order and dies before its acknowledgement leaves the job\n"
+                . "PROCESSING; on restart it returns to READY and is delivered again. The\n"
+                . "guard deduplicates by the operation key, which is why the key names the\n"
+                . "operation - not the delivery. And it is still at-least-once: a crash\n"
+                . "between the settle and recording the key re-runs it, exactly as the\n"
+                . "unguarded pair above did. Closing that last window needs the side effect\n"
+                . "and the record to commit together - a property of the storage, not of\n"
+                . "the queue.\n",
+            );
+
+            return 0;
+        } finally {
+            $database->close();
+
+            if ($ownsDatabaseServer) {
+                $this->stopDatabaseServerIfOwned(true, $databaseConfig);
+            }
+        }
     }
 
     /**

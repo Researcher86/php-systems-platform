@@ -272,10 +272,13 @@ Start workers.
 
 ```bash
 php bin/platform.php queue:publish order.created '{"order_id":"<id>"}'
+php bin/platform.php queue:publish order.process '{"order_id":"<id>"}' "order.process:<id>"
 ```
 
 Publish one job into the journal-backed queue (also enqueued by every
-`POST /orders` while `serve` runs).
+`POST /orders` while `serve` runs). The optional third argument is the
+job's idempotency key (Step 20) — `order.process:<id>` deduplicates a
+redelivery like one published by the write path.
 
 ```bash
 php bin/platform.php queue:consume
@@ -358,6 +361,16 @@ php bin/platform.php workers:memory [elements]
 Run 1, 2, 4 and 8 workers - each its own freshly forked pool - have every
 worker hold an array of `elements` ints (default 1,000,000), and compare
 total memory before any of them wrote to it against after.
+
+```bash
+php bin/platform.php idempotency:demo
+```
+
+Show why an at-least-once queue needs an idempotency key: one order
+redelivered twice without a guard settles twice (two units of stock), the
+same two deliveries under a keyed guard settle once - see Idempotency
+below for what the numbers mean. Needs the database server the way
+`serve` does; starts one if none answers.
 
 ---
 
@@ -888,6 +901,24 @@ exactly-once execution
 ```
 
 This is an important property of real asynchronous systems.
+
+Concretely (Step 20): completing an order settles it — one unit of stock off
+the shelf — and that settle is the side effect a redelivery must not repeat.
+Every enqueued job carries an idempotency key that names the operation
+(`order.created:<order id>`, `order.process:<order id>`), checked against the
+`PhpJobQueue` IdempotencyGuard, whose append-only store
+(`jobs.idempotency_store`) survives a worker restart: a redelivery whose key
+the guard already recorded is skipped before any read or write. A crash
+between the settle and the record still double-applies, and saying so is the
+point — this is deduplication over at-least-once, not exactly-once.
+
+```bash
+php bin/platform.php idempotency:demo
+```
+
+runs two orders through the same two deliveries twice: once without a guard
+(both deliveries settle, stock drops by two) and once keyed (the second
+delivery is skipped, stock drops by one), printing the counts.
 
 ---
 

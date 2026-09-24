@@ -75,6 +75,12 @@ return [
         'socket' => '/tmp/php-worker-pool.sock',
     ],
     'jobs' => [
-        'idempotency_store' => sys_get_temp_dir() . '/php-systems-platform/idempotency.json',
+        // PLAN Step 20's idempotency store: the append-only JSONL journal the
+        // queue-side IdempotencyGuard (PhpJobQueue\Idempotency\IdempotencyGuard)
+        // keeps its recorded operations in, read by every worker that starts
+        // and appended by one that settles. The same FileStorage contract as
+        // the queue journal itself - hence .log: a line per record, not a
+        // JSON document.
+        'idempotency_store' => sys_get_temp_dir() . '/php-systems-platform/idempotency.log',
     ],
 ];

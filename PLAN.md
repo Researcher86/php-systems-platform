@@ -2356,7 +2356,7 @@ Phase 5 is complete when all of the following are true.
 * [x] Queue depth is observable.
 * [x] Failed jobs are handled.
 * [x] Retry policy works.
-* [ ] Idempotency is demonstrated.
+* [x] Idempotency is demonstrated.
 
 ## Worker pool
 

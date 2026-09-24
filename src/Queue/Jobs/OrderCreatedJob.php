@@ -34,6 +34,14 @@ use RuntimeException;
  * already has open - so it stays a thrown RuntimeException on the normal
  * retry path, the honest place for a condition that is unreachable in
  * practice rather than provably permanent.
+ *
+ * It also carries the platform's first idempotency key (PLAN Step 20): the
+ * write path dispatches it as `order.created:<order id>`, an operation key
+ * rather than a delivery key. Its work - warming a cache entry - is cheap to
+ * repeat, but a guard is still checked, both so the platform's every job
+ * exercises the same seam and so a redelivery spends no read at all: a key
+ * the context's IdempotencyGuard already knows skips straight out, before
+ * the database is touched.
  */
 final readonly class OrderCreatedJob implements Job, ValidatesPayload
 {
@@ -61,6 +69,15 @@ final readonly class OrderCreatedJob implements Job, ValidatesPayload
         }
 
         $orderId = (string) $payload['order_id'];
+
+        // Dedupe before work, exactly like order.process: a redelivery of an
+        // operation the guard has already recorded is already done.
+        $key = $context->job->getIdempotencyKey();
+
+        if ($key !== null && $context->idempotency !== null && $context->idempotency->isProcessed($key)) {
+            return;
+        }
+
         $order = $context->orders->getOrder($orderId);
 
         if ($order === null) {
@@ -71,6 +88,10 @@ final readonly class OrderCreatedJob implements Job, ValidatesPayload
             $context->cache->setOrder($order);
         } catch (CacheClientException) {
             $context->cache->counters()->bypasses++;
+        }
+
+        if ($key !== null && $context->idempotency !== null) {
+            $context->idempotency->markProcessed($key);
         }
     }
 }

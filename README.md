@@ -342,10 +342,12 @@ fork, right after it, and after it writes - copy-on-write, measured. Needs
 no platform infrastructure (no database, cache, queue or pool).
 
 ```bash
-php bin/platform.php workers:memory
+php bin/platform.php workers:memory [elements]
 ```
 
-Measure worker process memory.
+Run 1, 2, 4 and 8 workers - each its own freshly forked pool - have every
+worker hold an array of `elements` ints (default 1,000,000), and compare
+total memory before any of them wrote to it against after.
 
 ---
 
@@ -815,6 +817,47 @@ The mechanism is the same fork + `socketpair()` + `pcntl_waitpid()` idiom as
 Step 14's `Workers\ForkedOrderLoader` - `Memory\ForkedMemoryDemo` forks one
 child, has it report two snapshots of itself over the pipe, and the parent
 reaps it before printing the comparison.
+
+## Worker Memory
+
+`php bin/platform.php workers:memory` asks the same question of the platform's
+real worker pool: does copy-on-write still help once workers are long-lived
+processes doing independent work, not a single one-off child?
+
+php-worker-pool keeps its own worker telemetry internal to the Master, for its
+recycling policy, with no wire action that reads it back - so the platform
+added one task, `memory.hold` (`Workers\WorkerMemoryTasks`), that lets a
+worker measure and grow its own memory and report both, tagged with its own
+pid. For each of 1, 2, 4 and 8 workers - a fresh, isolated pool per count, the
+same `WORKER_POOL_MIN`/`WORKER_POOL_MAX` override the queue benchmark uses -
+every worker is asked to hold an array at the same time, and the platform
+sums what came back:
+
+```text
+Worker memory comparison: 8 workers, 100,000 elements held each
+
+  workers      parent  avg before   avg after  total before  total after
+        1       27.7M       16.8M       19.3M        44.5M        47.0M
+        2       27.7M       16.8M       19.3M        61.2M        66.3M
+        4       27.7M       16.8M       19.3M        94.9M       105.0M
+        8       27.7M       16.8M       19.3M       161.8M       182.0M
+
+Going from 1 to 8 workers grew total RSS by 117.3M before any of them wrote
+anything, and by 135.0M once each held its own copy of the same data - 17.7M more
+than adding workers alone accounts for. That gap is 7 private copies of
+one array a thread or coroutine pool would only ever have held once.
+```
+
+Two things worth noticing in that table. `avg before`/`avg after` barely move
+with worker count - one worker's own memory does not depend on how many
+siblings it has. What *does* scale with worker count is the total, and the
+17.7MB gap between how much it grew "before" and "after" is the real cost of
+process-based concurrency: seven workers, each privately holding its own copy
+of data a thread pool or a coroutine runtime would have kept in one shared
+heap. RSS summed across processes already double-counts pages every worker
+still shares with its parent (that is a known limit of RSS as a metric, not
+noise) - which is exactly why the *delta* between the two totals, not either
+one alone, is the number that isolates what writing actually cost.
 
 ---
 

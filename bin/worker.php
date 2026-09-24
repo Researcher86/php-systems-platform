@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use PhpSystemsPlatform\Workers\CatalogTasks;
 use PhpSystemsPlatform\Workers\WorkerJobs;
+use PhpSystemsPlatform\Workers\WorkerMemoryTasks;
 use PhpSystemsPlatform\Workers\WorkerTasks;
 use PhpWorkerPool\Master\Master;
 use PhpWorkerPool\Protocol\Request;
@@ -20,11 +21,13 @@ require __DIR__ . '/../vendor/autoload.php';
  * pool does is the component's - this file only decides which tasks its
  * workers run and with what sizing.
  *
- * Three task families live here: the hash tasks (ping/hash_chunk,
+ * Four task families live here: the hash tasks (ping/hash_chunk,
  * WorkerTasks) that back GET /parallel, job.execute (WorkerJobs) that runs
- * queue jobs on a worker process, and the catalog.* reads (CatalogTasks) the
- * concurrent order loader fans out. The pool itself never knows what a task
- * means - it only forks processes and moves Request/Response between them.
+ * queue jobs on a worker process, the catalog.* reads (CatalogTasks) the
+ * concurrent order loader fans out, and memory.hold (WorkerMemoryTasks,
+ * PLAN Step 16) that lets `workers:memory` measure and grow a worker's own
+ * memory. The pool itself never knows what a task means - it only forks
+ * processes and moves Request/Response between them.
  */
 
 $config = require __DIR__ . '/../config/platform.php';
@@ -41,14 +44,23 @@ $requestTimeout = (float) (getenv('WORKER_POOL_TIMEOUT') ?: $workers['task_timeo
 $workerTasks = WorkerTasks::handler();
 $workerJobs = new WorkerJobs($config)->handler();
 $catalogTasks = new CatalogTasks((array) $config['database'])->handler();
+// Built once, here, before Master::run() eagerly forks minWorkers workers:
+// fork() copies this object into every worker, so each starts with its own
+// independent (empty) $held - the same copy-on-write the object's own
+// docblock is about, just watched from the outside this time.
+$memoryTasks = new WorkerMemoryTasks()->handler();
 
-$handler = static function (Request $request) use ($catalogTasks, $workerJobs, $workerTasks): Response {
+$handler = static function (Request $request) use ($catalogTasks, $memoryTasks, $workerJobs, $workerTasks): Response {
     if ($request->action === 'job.execute') {
         return $workerJobs($request);
     }
 
-    return str_starts_with($request->action, 'catalog.')
-        ? $catalogTasks($request)
+    if (str_starts_with($request->action, 'catalog.')) {
+        return $catalogTasks($request);
+    }
+
+    return str_starts_with($request->action, 'memory.')
+        ? $memoryTasks($request)
         : $workerTasks($request);
 };
 

@@ -52,6 +52,7 @@ use PhpSystemsPlatform\Workers\ForkedOrderLoader;
 use PhpSystemsPlatform\Workers\OrderLoadBenchmark;
 use PhpSystemsPlatform\Workers\QueueBenchmark;
 use PhpSystemsPlatform\Workers\WorkerManager;
+use PhpSystemsPlatform\Workers\WorkerMemoryBenchmark;
 use PhpSystemsPlatform\Workers\WorkerRegistry;
 use PhpWorkerPool\IPC\ConnectionClosedException;
 use PhpWorkerPool\Protocol\Request as WorkerRequest;
@@ -154,6 +155,7 @@ final class PlatformCli
             'benchmark' => $this->queueBenchmark(array_slice($argv, 2)),
             'orders:compare' => $this->ordersCompare(array_slice($argv, 2)),
             'memory:demo' => $this->memoryDemo(),
+            'workers:memory' => $this->workersMemory(array_slice($argv, 2)),
 
             // Real handlers land with their implementation phase.
             default => $this->notImplemented($command),
@@ -1219,6 +1221,160 @@ final class PlatformCli
                 $index === 0 ? 'baseline' : sprintf('%.2fx', $result['speedup']),
             );
         }
+    }
+
+    /**
+     * PLAN Step 16: run 1, 2, 4 and 8 workers, each on its own isolated
+     * pool, and compare what they cost in memory before any of them writes
+     * anything against what they cost once every one of them does.
+     *
+     * Each count gets a fresh pool on its own socket (like `benchmark`'s
+     * isolated pool) rather than reusing one pool resized between rounds -
+     * so "8 workers" always means 8 processes that were freshly forked for
+     * this measurement, not 8 that inherited an hour of prior traffic.
+     *
+     * @param list<string> $args elements per worker to hold (default 1,000,000)
+     */
+    private function workersMemory(array $args): int
+    {
+        $elements = isset($args[0]) ? (int) $args[0] : 1_000_000;
+
+        if ($elements < 1 || $elements > 5_000_000) {
+            fwrite(STDERR, "elements must be between 1 and 5,000,000.\n");
+
+            return 1;
+        }
+
+        $benchmark = new WorkerMemoryBenchmark();
+        $reports = [];
+
+        foreach ([1, 2, 4, 8] as $workers) {
+            $report = $this->runWorkerMemoryRound($benchmark, $workers, $elements);
+
+            if ($report === null) {
+                return 1;
+            }
+
+            $reports[] = $report;
+        }
+
+        printf("Worker memory comparison: %d workers, %s elements held each\n\n", 8, number_format($elements));
+        printf(
+            "  %7s  %10s  %10s  %10s  %11s  %11s\n",
+            'workers',
+            'parent',
+            'avg before',
+            'avg after',
+            'total before',
+            'total after',
+        );
+
+        foreach ($reports as $report) {
+            printf(
+                "  %7d  %10s  %10s  %10s  %11s  %11s\n",
+                $report['workers'],
+                $this->formatMegabytes($report['parent_rss']),
+                $this->formatMegabytes($report['before_avg_rss']),
+                $this->formatMegabytes($report['after_avg_rss']),
+                $this->formatMegabytes($report['total_before_rss']),
+                $this->formatMegabytes($report['total_after_rss']),
+            );
+        }
+
+        $first = $reports[0];
+        $last = $reports[count($reports) - 1];
+
+        if ($first['total_before_rss'] !== null && $first['total_after_rss'] !== null
+            && $last['total_before_rss'] !== null && $last['total_after_rss'] !== null) {
+            $beforeGrowth = $last['total_before_rss'] - $first['total_before_rss'];
+            $afterGrowth = $last['total_after_rss'] - $first['total_after_rss'];
+
+            printf(
+                "\nGoing from 1 to 8 workers grew total RSS by %s before any of them wrote\n"
+                . "anything, and by %s once each held its own copy of the same data - %s more\n"
+                . "than adding workers alone accounts for. That gap is %d private copies of\n"
+                . "one array a thread or coroutine pool would only ever have held once.\n"
+                . "(RSS is summed per process here, so even the 'before' total already double-\n"
+                . "counts pages every worker still shares with its parent; it is the growth\n"
+                . "between the two totals that isolates what writing actually cost.)\n",
+                $this->formatMegabytes($beforeGrowth),
+                $this->formatMegabytes($afterGrowth),
+                $this->formatMegabytes($afterGrowth - $beforeGrowth),
+                $last['workers'] - $first['workers'],
+            );
+        }
+
+        return 0;
+    }
+
+    /**
+     * One isolated pool of $workers processes, measured and torn down
+     * before returning - or null (with the error already on STDERR) if any
+     * step of that failed.
+     *
+     * @return array{workers: int, workers_observed: int, parent_rss: ?int, before_avg_rss: ?int, before_min_rss: ?int, before_max_rss: ?int, after_avg_rss: ?int, after_min_rss: ?int, after_max_rss: ?int, total_before_rss: ?int, total_after_rss: ?int}|null
+     */
+    private function runWorkerMemoryRound(WorkerMemoryBenchmark $benchmark, int $workers, int $elements): ?array
+    {
+        $dir = sys_get_temp_dir() . '/php-systems-platform/memdemo-' . uniqid('', true);
+
+        if (!is_dir($dir) && !@mkdir($dir, 0o777, true) && !is_dir($dir)) {
+            fwrite(STDERR, sprintf('Could not create "%s".', $dir) . PHP_EOL);
+
+            return null;
+        }
+
+        $socketPath = '/tmp/php-memdemo-' . uniqid('', true) . '.sock';
+
+        $pool = proc_open(
+            [PHP_BINARY, dirname(__DIR__, 2) . '/bin/worker.php'],
+            [
+                1 => ['file', $dir . '/worker.out', 'a'],
+                2 => ['file', $dir . '/worker.err', 'a'],
+            ],
+            $pipes,
+            null,
+            [
+                'WORKER_POOL_SOCKET' => $socketPath,
+                'WORKER_POOL_MIN' => (string) $workers,
+                'WORKER_POOL_MAX' => (string) $workers,
+                'WORKER_POOL_TIMEOUT' => '30',
+            ],
+        );
+
+        if (!is_resource($pool)) {
+            fwrite(STDERR, sprintf('Could not start a %d-worker pool.', $workers) . PHP_EOL);
+
+            return null;
+        }
+
+        if (!$this->waitForSocket($socketPath)) {
+            proc_terminate($pool);
+            proc_close($pool);
+            fwrite(STDERR, sprintf('The %d-worker pool did not start listening in time.', $workers) . PHP_EOL);
+
+            return null;
+        }
+
+        $status = proc_get_status($pool);
+        $runner = new ConcurrentTaskRunner(new WorkerPoolClient($socketPath, 30.0));
+
+        try {
+            $report = $benchmark->run($runner, $workers, $elements, (int) $status['pid']);
+        } catch (RuntimeException $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            $report = null;
+        }
+
+        proc_terminate($pool);
+        proc_close($pool);
+
+        return $report;
+    }
+
+    private function formatMegabytes(?int $bytes): string
+    {
+        return $bytes === null ? 'n/a' : sprintf('%.1fM', $bytes / 1_048_576);
     }
 
     /**

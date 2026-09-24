@@ -506,6 +506,43 @@ all immediately after `fork()` — still the parent's pages, shared read-only �
 then grows by almost exactly the array's size once the child writes to it.
 That growth is copy-on-write, made visible instead of asserted.
 
+### Worker memory (Step 16, shipped)
+
+The same question, asked of a real pool instead of one throwaway child: does
+copy-on-write still pay off once workers are long-lived processes doing
+independent work? php-worker-pool's own worker telemetry
+(`Worker\Telemetry\SharedTelemetry`/`ShmWorkerMemory`) is internal to the
+Master — it feeds the recycling policy, with no wire action that reads a
+worker's memory back to a client — so the platform added one task instead of
+reaching into that internal state.
+
+- `Workers\WorkerMemoryTasks` — the pool-side task, `memory.hold`: a worker
+  snapshots itself, allocates and *retains* (`$held`, an instance property
+  that survives for the worker's whole life because the pool keeps this same
+  handler instance alive across every request it answers) an array of the
+  given size, snapshots again, and answers both plus its own pid — the only
+  way to tell one worker's numbers from another's, since the wire protocol
+  carries none. Routed in `bin/worker.php` by a `memory.` prefix, alongside
+  `catalog.` and `job.execute`.
+- `Workers\WorkerMemoryBenchmark` — split in two on purpose. `run()` fans
+  `$workers` `memory.hold` requests out over one `ConcurrentTaskRunner` (all
+  in flight before any is awaited, so N idle workers each pick up one) and
+  needs a real pool; `aggregate()` is the arithmetic alone, given the answers
+  as plain arrays, which `WorkerMemoryBenchmarkTest` pins down with fixed
+  numbers instead of a live process.
+- `workers:memory [elements]` — for each of 1, 2, 4, 8: a fresh isolated pool
+  (`WORKER_POOL_MIN`/`MAX` on its own socket, the same override the queue
+  benchmark uses), every worker holding `elements` ints at once, summed
+  against the Master's own RSS (`Memory\ProcStatusReader` again, this time
+  against the pool process's pid rather than the current one).
+
+Measured (container, 100,000 elements/worker): going from 1 to 8 workers grew
+total RSS by 117M before any worker wrote to its array and by 135M once each
+held its own copy — 18M more, matching 7 private copies of a ~2.5MB array.
+RSS summed across processes double-counts pages every worker still shares
+with its parent, which is why the *delta* between the two totals — not
+either alone — is the number that isolates what writing actually cost.
+
 ## Adapter mapping (used by later phases)
 
 | Platform class                 | Wraps                                  |
@@ -542,3 +579,5 @@ That growth is copy-on-write, made visible instead of asserted.
 | `Memory\ProcStatusReader`      | `/proc/<pid>/status` → bytes (no component) |
 | `Memory\MemoryReporter`        | PHP counters + `ProcStatusReader` → snapshot/diff |
 | `Memory\ForkedMemoryDemo`      | `pcntl_fork` + `stream_socket_pair` over a shared array (no component) |
+| `Workers\WorkerMemoryTasks`    | pool-side `memory.hold` — snapshot, retain, snapshot |
+| `Workers\WorkerMemoryBenchmark` | `ConcurrentTaskRunner` fan-out over `memory.hold` → aggregated report |

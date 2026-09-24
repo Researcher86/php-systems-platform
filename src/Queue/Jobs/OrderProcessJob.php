@@ -29,8 +29,10 @@ use RuntimeException;
  * anything else cancels it. Either way the cached copy is now stale and is
  * dropped, the same invalidate-on-write rule the HTTP update path follows.
  *
- * A missing order_id can never work (PLAN Step 19) - ValidatesPayload
- * rejects it before this job ever reaches a worker. "Order not found" is
+ * A missing order_id can never work (PLAN Step 19) - ValidatesPayload marks
+ * it ineligible for retry (JobRegistry::shouldRetry()), so the one delivery
+ * it takes to notice is spent, never the job's whole attempts budget.
+ * "Order not found" is
  * different: this job, unlike order.created, has no write that guarantees
  * the row exists first (it can be dispatched by hand, an operator's typo
  * and all), so it is a real, reachable failure mode - and answering it needs

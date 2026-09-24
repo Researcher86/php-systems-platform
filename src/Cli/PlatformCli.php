@@ -40,10 +40,9 @@ use PhpSystemsPlatform\Http\Router;
 use PhpSystemsPlatform\Memory\ForkedMemoryDemo;
 use PhpSystemsPlatform\Memory\MemorySnapshot;
 use PhpSystemsPlatform\Queue\BackpressurePolicy;
-use PhpSystemsPlatform\Queue\JobAttemptJournal;
+use PhpSystemsPlatform\Queue\JobRegistry;
 use PhpSystemsPlatform\Queue\QueueConsumer;
 use PhpSystemsPlatform\Queue\QueueJournal;
-use PhpSystemsPlatform\Queue\ValidatingQueue;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Migrator;
 use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
@@ -871,10 +870,7 @@ final class PlatformCli
             $knownIds[$id] = true;
         }
 
-        // PLAN Step 19: a job ValidatesPayload can already tell will never
-        // succeed is rejected here, before it is ever dispatched to a
-        // worker, instead of burning a full retry budget on it.
-        $queue = new ValidatingQueue(InMemoryQueue::restoreFromStorage($storage, $clock), $storage);
+        $queue = InMemoryQueue::restoreFromStorage($storage, $clock);
 
         $restored = new QueueJournal($logPath)->snapshot();
         printf("Consumer restoring queue from %s\n", $logPath);
@@ -933,6 +929,12 @@ final class PlatformCli
             visibilityTimeout: (int) $workersConfig['task_timeout'],
             storage: new FileStorage($logPath),
             metrics: $metrics,
+            // PLAN Step 19's "do not retry every possible error": a payload
+            // JobRegistry::validate() already knows can never succeed is
+            // never retried, no matter how many attempts remain - the same
+            // verdict a pre-dispatch check would reach, now made at the
+            // point the component itself exposes for it.
+            shouldRetry: JobRegistry::shouldRetry(),
         );
         $registry = $this->workerRegistry($pool, $logPath, $workersConfig);
         $consumer = new QueueConsumer(
@@ -1546,10 +1548,14 @@ final class PlatformCli
 
     /**
      * PLAN Step 19's job metadata (job_id, attempt, max_attempts,
-     * created_at, started_at, completed_at, last_error), joined from the
-     * two journals that between them carry all of it: QueueJournal has
-     * everything the component's own Job tracks, JobAttemptJournal has the
-     * three fields it does not (see that class for why).
+     * created_at, started_at, completed_at, last_error) - all of it straight
+     * off QueueJournal now: started_at/completed_at/last_error are the
+     * component's own Job fields (PhpJobQueue\Job\Job, stamped by
+     * JobDispatcher on every dispatch and outcome), persisted in the same
+     * durable record as everything else the journal already carried. They
+     * describe the MOST RECENT delivery only - the component tracks the
+     * latest attempt, not a history of every one - which is the one thing
+     * the platform's own now-removed per-attempt log used to add on top.
      *
      * @param list<string> $args the job id
      */
@@ -1580,26 +1586,19 @@ final class PlatformCli
         printf("  attempts      %d / %d\n", (int) $row['attempts'], (int) $row['maxAttempts']);
         printf("  created_at    %s\n", $this->formatTimestamp((float) $row['createdAt']));
 
-        $attemptsLogPath = $config['queue']['data_dir'] . '/queue.attempts.log';
-        $attempts = new JobAttemptJournal($attemptsLogPath)->forJob($id);
+        $startedAt = $row['startedAt'] ?? null;
+        $completedAt = $row['completedAt'] ?? null;
 
-        if ($attempts === []) {
-            printf("  no attempt history recorded yet\n");
+        if ($startedAt === null && $completedAt === null) {
+            printf("  not started yet\n");
 
             return 0;
         }
 
-        printf("\n  attempt history (%s)\n", $attemptsLogPath);
-
-        foreach ($attempts as $attempt) {
-            printf(
-                "    attempt %d   started %s   completed %s   error: %s\n",
-                $attempt['attempt'],
-                $this->formatTimestamp($attempt['started_at']),
-                $this->formatTimestamp($attempt['completed_at']),
-                $attempt['last_error'] ?? '-',
-            );
-        }
+        printf("\n  last attempt\n");
+        printf("    started   %s\n", $startedAt !== null ? $this->formatTimestamp((float) $startedAt) : '-');
+        printf("    completed %s\n", $completedAt !== null ? $this->formatTimestamp((float) $completedAt) : '-');
+        printf("    error     %s\n", $row['lastError'] ?? '-');
 
         return 0;
     }

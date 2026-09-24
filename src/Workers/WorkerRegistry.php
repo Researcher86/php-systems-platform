@@ -22,14 +22,15 @@ use RuntimeException;
  * STOPPING/DEAD), and a current job while busy - all read straight off the
  * Worker objects the consumer owns in-process.
  *
- * The two counters the component does not expose are attributed here from
- * the journal - the durable source of truth. The consumer's loop calls
- * capture() right after dispatching a batch and settle() after the answers
- * land. Between those two calls a worker is BUSY and its current job is
- * known (state in the parent only moves once collect() is called), so every
- * dispatched job is captured; settle() then reads that job's terminal state
- * from the journal and credits the worker that held it. A job that was
- * retried is credited to whichever worker delivered its final attempt.
+ * tasks_completed/tasks_failed are read straight off the component's own
+ * Worker::getTasksCompleted()/getTasksFailed() now - they used to be
+ * reconstructed here from the journal (capture() right after dispatching a
+ * batch, settle() after the answers land, crediting whichever worker held a
+ * job once the journal showed its terminal state), because the component
+ * did not expose them at all. The journal replay stays for what Worker's
+ * own counters cannot answer: resolvedAt()/resolvedCount() need to know
+ * WHICH job resolved and WHEN, not just how many a worker has finished, for
+ * per-job latency measurement (see QueueBenchmark).
  */
 final class WorkerRegistry
 {
@@ -43,13 +44,13 @@ final class WorkerRegistry
     private array $workers = [];
 
     /**
-     * job id => worker id carrying it, awaiting a terminal state. Keyed by
-     * the JOB, not the worker: a worker moves on to the next delivery while
-     * an earlier one waits for the journal to show its terminal state, and
-     * keying by worker would drop that earlier job (it would be overwritten
-     * by the next delivery).
+     * Job ids dispatched but not yet seen at a terminal state in the
+     * journal - a set, not keyed by worker: a worker moves on to the next
+     * delivery while an earlier one still awaits its terminal state, and
+     * keying by worker would drop that earlier job (overwritten by the
+     * next delivery).
      *
-     * @var array<string, int>
+     * @var array<string, true>
      */
     private array $inFlight = [];
 
@@ -106,7 +107,7 @@ final class WorkerRegistry
             $job = $worker->getCurrentJob();
 
             if ($job !== null) {
-                $this->inFlight[$job->getId()->toString()] = $worker->getId();
+                $this->inFlight[$job->getId()->toString()] = true;
             }
         }
     }
@@ -127,7 +128,7 @@ final class WorkerRegistry
         // decode the whole log on every fast pass.
         $rows = $this->rows();
 
-        foreach ($this->inFlight as $jobId => $workerId) {
+        foreach (array_keys($this->inFlight) as $jobId) {
             $row = $rows[$jobId] ?? null;
 
             if ($row === null) {
@@ -136,13 +137,11 @@ final class WorkerRegistry
 
             switch (JobState::fromName((string) $row['state'])) {
                 case JobState::COMPLETED:
-                    $this->workers[$workerId]['tasks_completed']++;
                     $this->resolvedAt[$jobId] = $this->clock->now();
                     $this->resolvedCount++;
                     unset($this->inFlight[$jobId]);
                     break;
                 case JobState::FAILED:
-                    $this->workers[$workerId]['tasks_failed']++;
                     $this->resolvedCount++;
                     unset($this->inFlight[$jobId]);
                     break;
@@ -270,9 +269,12 @@ final class WorkerRegistry
     }
 
     /**
-     * Keep one row per worker id current: pid, state and current job. A pid
-     * change means the worker process was replaced (php-job-queue reuses the
-     * id for a fresh worker), so the counter resets and the clock restarts.
+     * Keep one row per worker id current: pid, state, current job, and the
+     * component's own tasks_completed/tasks_failed counters. A pid change
+     * means the worker process was replaced (php-job-queue reuses the id
+     * for a fresh worker), so started_at restarts here - Worker's own
+     * counters already reset to 0 on replacement (a new Worker object), so
+     * nothing extra is needed to keep them in step with it.
      */
     private function observe(Worker $worker): void
     {
@@ -285,8 +287,8 @@ final class WorkerRegistry
                 'state' => $worker->getState()->name,
                 'current_job' => $this->currentJobId($worker),
                 'started_at' => $this->clock->now(),
-                'tasks_completed' => 0,
-                'tasks_failed' => 0,
+                'tasks_completed' => $worker->getTasksCompleted(),
+                'tasks_failed' => $worker->getTasksFailed(),
             ];
 
             return;
@@ -295,12 +297,12 @@ final class WorkerRegistry
         if ($pid !== $this->workers[$id]['pid']) {
             $this->workers[$id]['pid'] = $pid;
             $this->workers[$id]['started_at'] = $this->clock->now();
-            $this->workers[$id]['tasks_completed'] = 0;
-            $this->workers[$id]['tasks_failed'] = 0;
         }
 
         $this->workers[$id]['state'] = $worker->getState()->name;
         $this->workers[$id]['current_job'] = $this->currentJobId($worker);
+        $this->workers[$id]['tasks_completed'] = $worker->getTasksCompleted();
+        $this->workers[$id]['tasks_failed'] = $worker->getTasksFailed();
     }
 
     private function currentJobId(Worker $worker): ?string

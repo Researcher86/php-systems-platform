@@ -24,8 +24,10 @@ use RuntimeException;
  *
  * Two ways to fail, two different futures (PLAN Step 19). A payload without
  * an order_id can never work - retrying it asks the same unanswerable
- * question again - so ValidatesPayload rejects it before this job is ever
- * dispatched. An order_id the database does not know is different: in this
+ * question again - so ValidatesPayload marks it ineligible for retry
+ * (JobRegistry::shouldRetry()): the one delivery it takes to notice is
+ * spent, never the job's whole attempts budget. An order_id the database
+ * does not know is different: in this
  * platform's write-before-publish design that should never actually happen
  * (the row exists before the job is even created), but it is not something
  * a payload check can rule out - answering it needs the database this job
@@ -46,10 +48,11 @@ final readonly class OrderCreatedJob implements Job, ValidatesPayload
 
     public function execute(JobContext $context): void
     {
-        // validate() already ruled this out for anything dispatched through
-        // ValidatingQueue; called again here so a job executed directly (a
-        // test, or any future path that bypasses the queue) gets the same
-        // answer instead of a silently different one.
+        // validate() already ruled this out for anything the dispatcher
+        // would ever retry (JobRegistry::shouldRetry()); called again here
+        // so a job executed directly (a test, or any future path that
+        // bypasses the queue) gets the same answer instead of a silently
+        // different one.
         $payload = $context->job->getPayload();
         $reason = self::validate($payload);
 

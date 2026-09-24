@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Queue;
 
+use Closure;
 use PhpJobQueue\Job\Job as QueueJob;
 use PhpSystemsPlatform\Queue\Jobs\NoopJob;
 use PhpSystemsPlatform\Queue\Jobs\OrderCreatedJob;
 use PhpSystemsPlatform\Queue\Jobs\OrderProcessJob;
 use RuntimeException;
+use Throwable;
 
 /**
  * The type → handler map of every platform background job.
@@ -44,11 +46,10 @@ final class JobRegistry
     }
 
     /**
-     * PLAN Step 19's pre-flight check (see ValidatesPayload and
-     * ValidatingQueue): a reason this payload can never succeed, or null if
-     * either the type opted out of a check or the payload passed it. An
-     * unregistered type has no opinion here - execute() is where that
-     * becomes the failure it is.
+     * PLAN Step 19's pre-flight check (see ValidatesPayload): a reason this
+     * payload can never succeed, or null if either the type opted out of a
+     * check or the payload passed it. An unregistered type has no opinion
+     * here - execute() is where that becomes the failure it is.
      *
      * @param array<string, mixed> $payload
      *
@@ -63,5 +64,22 @@ final class JobRegistry
         }
 
         return $class::validate($payload);
+    }
+
+    /**
+     * The retry-eligibility hook JobDispatcher::handleFailure() consults
+     * before its own attempts-remaining check (PLAN Step 19, "do not retry
+     * every possible error"): a payload validate() has already ruled out
+     * can never succeed regardless of how many attempts are left, so this
+     * refuses eligibility for exactly the reason a pre-dispatch check would -
+     * just answered at the point the component now offers for it, after a
+     * real execution has actually failed, instead of guessed at pop() time
+     * against a queue decorator built solely to ask the question early.
+     *
+     * @return Closure(QueueJob, Throwable): bool
+     */
+    public static function shouldRetry(): Closure
+    {
+        return static fn (QueueJob $job, Throwable $exception): bool => self::validate($job->getType(), $job->getPayload()) === null;
     }
 }

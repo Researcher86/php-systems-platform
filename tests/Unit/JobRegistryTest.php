@@ -15,6 +15,7 @@ use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Queue\JobContext;
 use PhpSystemsPlatform\Queue\JobRegistry;
+use PhpSystemsPlatform\Queue\Jobs\OrderCreatedJob;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
 use PHPUnit\Framework\TestCase;
@@ -25,7 +26,9 @@ use RuntimeException;
  * platform behavior. The registered-type execution path is exercised end to
  * end in ServeIntegrationTest; here the failure half - an unregistered type
  * must surface as a failed attempt, never a silent skip - is the contract
- * under test.
+ * under test, alongside validate()/shouldRetry() (PLAN Step 19's "do not
+ * retry every possible error" - moved here from the now-removed
+ * ValidatingQueue once JobDispatcher grew its own shouldRetry hook).
  */
 final class JobRegistryTest extends TestCase
 {
@@ -40,6 +43,50 @@ final class JobRegistryTest extends TestCase
         $this->expectExceptionMessage('No platform job is registered for type "unknown.type".');
 
         new JobRegistry()->execute($carrier, $this->context());
+    }
+
+    public function testValidateHasNoOpinionOnAnUnregisteredType(): void
+    {
+        self::assertNull(JobRegistry::validate('unknown.type', []));
+    }
+
+    public function testValidateHasNoOpinionOnATypeThatDoesNotOptIn(): void
+    {
+        self::assertNull(JobRegistry::validate('bench.noop', ['anything' => 'goes']));
+    }
+
+    public function testValidateRejectsAPayloadItsTypeRejects(): void
+    {
+        self::assertNotNull(JobRegistry::validate(OrderCreatedJob::TYPE, []));
+    }
+
+    public function testValidatePassesAPayloadItsTypeAccepts(): void
+    {
+        self::assertNull(JobRegistry::validate(OrderCreatedJob::TYPE, ['order_id' => 'abc']));
+    }
+
+    public function testShouldRetryRefusesAJobWithAnInvalidPayload(): void
+    {
+        $job = new Producer(
+            new InMemoryQueue(new SystemClock()),
+            new JobFactory(new SystemClock()),
+        )->dispatch(OrderCreatedJob::TYPE, []);
+
+        $eligible = (JobRegistry::shouldRetry())($job, new RuntimeException('order.created payload is missing order_id.'));
+
+        self::assertFalse($eligible);
+    }
+
+    public function testShouldRetryAllowsAJobWithAValidPayload(): void
+    {
+        $job = new Producer(
+            new InMemoryQueue(new SystemClock()),
+            new JobFactory(new SystemClock()),
+        )->dispatch(OrderCreatedJob::TYPE, ['order_id' => 'abc']);
+
+        $eligible = (JobRegistry::shouldRetry())($job, new RuntimeException('order not found'));
+
+        self::assertTrue($eligible);
     }
 
     /**

@@ -21,13 +21,12 @@ use PhpSystemsPlatform\Domain\SequentialOrderLoader;
 use PhpSystemsPlatform\Http\Request;
 use PhpSystemsPlatform\Http\RequestMethod;
 use PhpSystemsPlatform\Queue\BackpressurePolicy;
-use PhpSystemsPlatform\Queue\JobAttemptJournal;
 use PhpSystemsPlatform\Queue\JobContext;
 use PhpSystemsPlatform\Queue\JobExecutor;
+use PhpSystemsPlatform\Queue\JobRegistry;
 use PhpSystemsPlatform\Queue\Jobs\OrderCreatedJob;
 use PhpSystemsPlatform\Queue\Jobs\OrderProcessJob;
 use PhpSystemsPlatform\Queue\QueueJournal;
-use PhpSystemsPlatform\Queue\ValidatingQueue;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
@@ -752,24 +751,21 @@ final class ServeIntegrationTest extends TestCase
         self::assertSame($before['failed'] + 1, $snapshot['failed']);
         self::assertSame($before['retried'] + 1, $snapshot['retried']);
 
-        // The job metadata the queue component itself does not keep (PLAN
-        // Step 19): one attempt-journal row per delivery, each carrying its
-        // own timing and the error that specific attempt hit.
-        $attempts = new JobAttemptJournal(self::DATA_DIR . '/queue/queue.attempts.log')
-            ->forJob((string) $job->getId());
+        // The job metadata the queue component itself keeps directly now
+        // (PLAN Step 19): PhpJobQueue\Job\Job's own started_at/completed_at/
+        // last_error, stamped by JobDispatcher around each delivery -
+        // describing the LAST attempt only, the one the component tracks.
+        $row = $rows[(string) $job->getId()];
 
-        self::assertCount(3, $attempts);
-
-        foreach ($attempts as $index => $attempt) {
-            self::assertSame($index + 1, $attempt['attempt']);
-            self::assertGreaterThanOrEqual($attempt['started_at'], $attempt['completed_at']);
-            self::assertStringContainsString('not found', (string) $attempt['last_error']);
-        }
+        self::assertNotNull($row['startedAt']);
+        self::assertNotNull($row['completedAt']);
+        self::assertGreaterThanOrEqual($row['startedAt'], $row['completedAt']);
+        self::assertStringContainsString('not found', (string) $row['lastError']);
     }
 
-    public function testTheAttemptJournalRecordsACleanRunWithNoError(): void
+    public function testJobMetadataRecordsACleanRunWithNoError(): void
     {
-        $order = $this->postOrder('Attempt Journal', 5);
+        $order = $this->postOrder('Job Metadata', 5);
         $clock = new SystemClock();
         $logPath = self::DATA_DIR . '/queue/queue.log';
 
@@ -780,11 +776,13 @@ final class ServeIntegrationTest extends TestCase
 
         $this->drainQueue();
 
-        $attempts = new JobAttemptJournal(self::DATA_DIR . '/queue/queue.attempts.log')
-            ->forJob((string) $job->getId());
+        $rows = new QueueJournal($logPath)->rows();
+        $row = $rows[(string) $job->getId()];
 
-        self::assertNotEmpty($attempts);
-        self::assertNull($attempts[0]['last_error']);
+        self::assertSame('COMPLETED', $row['state']);
+        self::assertNotNull($row['startedAt']);
+        self::assertNotNull($row['completedAt']);
+        self::assertNull($row['lastError']);
     }
 
     public function testLiveConsumerPicksUpJobsPublishedWhileItRuns(): void
@@ -1021,7 +1019,7 @@ final class ServeIntegrationTest extends TestCase
         self::assertGreaterThan(1.0, (float) $speedups[1][3]);
     }
 
-    public function testQueueJobCommandShowsMetadataAndAttemptHistory(): void
+    public function testQueueJobCommandShowsMetadataAndLastAttempt(): void
     {
         $order = $this->postOrder('Queue Job Command', 3);
         $clock = new SystemClock();
@@ -1052,8 +1050,8 @@ final class ServeIntegrationTest extends TestCase
         self::assertStringContainsString((string) $job->getId(), $output);
         self::assertStringContainsString('order.created', $output);
         self::assertStringContainsString('COMPLETED', $output);
-        self::assertStringContainsString('attempt 1', $output);
-        self::assertStringContainsString('error: -', $output);
+        self::assertStringContainsString('last attempt', $output);
+        self::assertStringContainsString('error     -', $output);
     }
 
     public function testQueueJobCommandReportsAnUnknownId(): void
@@ -1190,12 +1188,11 @@ final class ServeIntegrationTest extends TestCase
         $logPath = self::DATA_DIR . '/queue/queue.log';
         $storage = new FileStorage($logPath);
 
-        $queue = new ValidatingQueue(InMemoryQueue::restoreFromStorage($storage, $clock), $storage);
+        $queue = InMemoryQueue::restoreFromStorage($storage, $clock);
 
         $executor = new JobExecutor(
             ['host' => self::HOST, 'port' => self::DB_PORT, 'timeout' => 2.0],
             ['host' => self::HOST, 'port' => self::CACHE_PORT, 'timeout' => 2.0],
-            self::DATA_DIR . '/queue/queue.attempts.log',
         );
         $pool = new WorkerPool(
             size: 2,
@@ -1208,6 +1205,7 @@ final class ServeIntegrationTest extends TestCase
             clock: $clock,
             visibilityTimeout: 2,
             storage: new FileStorage($logPath),
+            shouldRetry: JobRegistry::shouldRetry(),
         );
 
         $dispatcher->start();

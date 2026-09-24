@@ -764,29 +764,35 @@ of the component's retry logic. So **not every error gets to spend that
 budget**: some are rejected before a worker ever sees them.
 
 ```text
-Queue::pop()
+dispatch → worker executes → throws
      │
      ▼
-ValidatesPayload::validate(payload)
+JobRegistry::shouldRetry(job, exception)
      │
-     ├── invalid ──► markFailed(), 1 attempt spent, never dispatched
+     ├── invalid payload ──► markFailed(), 1 attempt spent, never retried
      │
-     └── valid ────► handed to a worker, normal retry-then-fail applies
+     └── otherwise ────────► normal attempts < maxAttempts retry-then-fail
 ```
 
-`Queue\ValidatingQueue` wraps the queue the consumer pops from. A job whose
-type implements `ValidatesPayload` (`order.created`, `order.process` - both
-reject a payload missing `order_id`) is checked there, cheaply, from the
-payload alone, no database involved. Reject it and the job is FAILED with
-exactly one attempt consumed - the honest cost of the delivery it took to
-notice - not the three it would otherwise have wasted:
+`php-job-queue`'s `JobDispatcher` takes an optional `shouldRetry` hook,
+consulted on every failure before its own `attempts < maxAttempts` check:
+`JobRegistry::shouldRetry()` refuses eligibility whenever the job's own
+`ValidatesPayload::validate()` (`order.created`, `order.process` - both
+reject a payload missing `order_id`) already knows the payload can never
+work, cheaply, from the payload alone, no database involved. The job still
+runs once - `execute()` validates again and throws - and that one delivery
+is the only attempt spent, not the three it would otherwise have wasted:
 
 ```text
 $ php bin/platform.php queue:job <id>
   type          order.created
   state         FAILED
   attempts      1 / 3
-  no attempt history recorded yet
+
+  last attempt
+    started   ...
+    completed ...
+    error     order.created payload is missing order_id.
 ```
 
 **Retryable which failures, though?** A payload missing `order_id` never
@@ -794,8 +800,8 @@ succeeds no matter how many times it runs - permanent. An `order_id`
 pointing at a row that does not exist is different: this platform writes the
 order before publishing the job, so in normal operation that should never
 actually happen, but *proving* it needs a database read a payload check
-cannot do - so it is left on the normal path, retried three times, then
-failed:
+cannot do - so `shouldRetry()` has no opinion on it, and it is left on the
+normal path, retried three times, then failed:
 
 ```text
 $ php bin/platform.php queue:job <id>
@@ -803,22 +809,22 @@ $ php bin/platform.php queue:job <id>
   state         FAILED
   attempts      3 / 3
 
-  attempt history (.../queue.attempts.log)
-    attempt 1   started ...   completed ...   error: Order "..." not found for order.created.
-    attempt 2   started ...   completed ...   error: Order "..." not found for order.created.
-    attempt 3   started ...   completed ...   error: Order "..." not found for order.created.
+  last attempt
+    started   ...
+    completed ...
+    error     Order "..." not found for order.created.
 ```
 
-That attempt history is job metadata `php-job-queue` does not keep at all -
-`Job::toArray()` has `attempts` and `maxAttempts` but no `started_at`,
-`completed_at` or `last_error`, verified by reading the class rather than
-assumed. `Queue\JobAttemptJournal` is the platform's own append-only record
-of it, one row per execution, written by `JobExecutor` (the one place every
-attempt - the real consumer and the benchmark alike - actually runs). A
-rejected job has none: it never reached a worker to have an attempt at all.
-`php bin/platform.php queue:job <id>` joins both journals into the full
-picture the plan asks for: `job_id`, `attempt`, `max_attempts`, `created_at`,
-`started_at`, `completed_at`, `last_error`.
+`started_at`/`completed_at`/`last_error` are `php-job-queue`'s own
+`Job` fields now - not a gap the platform fills anymore. Read directly (not
+assumed) before this landed: `Job::toArray()` had `attempts` and
+`maxAttempts` but nothing for timing or the last error; `JobDispatcher` now
+stamps all three itself around every dispatch and outcome, and the platform
+persists them the same way it always persisted everything else about a job.
+The one thing that goes with removing the platform's own attempt-journal
+duplicate of this: the component tracks the LATEST attempt only, not a
+history of every one, so `queue:job` shows the last attempt's timing and
+error rather than a full per-retry table.
 
 ---
 

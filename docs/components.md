@@ -401,12 +401,16 @@ The wiring, platform-side:
   observable (PLAN Step 11). php-worker-pool keeps its workers' states
   private inside the Master with no client channel, so the lifecycle the
   platform can truthfully read is its own: each forwarder's `id`, `pid`,
-  `state` (STARTING/IDLE/BUSY/DRAINING/STOPPING/DEAD), current job and
-  `started_at` come straight off the php-job-queue Worker objects the
-  consumer owns. `tasks_completed`/`tasks_failed` are attributed from the
-  journal: `capture()` runs between dispatch and collect (the only instant a
-  worker is BUSY with a known job), `settle()` credits the terminal state
-  afterwards. The consumer writes a `workers.status.json` snapshot on a
+  `state` (STARTING/IDLE/BUSY/DRAINING/STOPPING/DEAD), current job,
+  `started_at`, and — once php-job-queue's own `Worker` grew the getters —
+  `tasks_completed`/`tasks_failed` too, all read straight off the
+  php-job-queue Worker objects the consumer owns. The journal is still
+  replayed for what those counters can't answer: `capture()` runs between
+  dispatch and collect (the only instant a worker is BUSY with a known
+  job) and `settle()` reads each in-flight job's terminal state back out
+  of the journal, for `resolvedAt()`/`resolvedCount()` — per-job
+  completion timing `QueueBenchmark` needs, which an aggregate counter
+  can't provide. The consumer writes a `workers.status.json` snapshot on a
   schedule, read by `workers:status` and `GET /workers`.
 - `Workers\ConcurrentTaskRunner` — the fan-out over one `WorkerPoolClient`
   connection: `run()` is all-or-fail (`all`), `runWithin($seconds, ...)`
@@ -629,47 +633,51 @@ Queue section above) — a job may legitimately sit in a worker's hands for up
 to one full round trip, and visibility has to span that or the queue would
 reclaim jobs that are still being worked on.
 
-### Retry policy (Step 19, shipped)
+### Retry policy (Step 19, shipped; revised once the component grew a hook)
 
 `JobDispatcher::handleFailure()` — read from the component's own source, not
-guessed — decides retry-or-fail with exactly one condition,
-`attempts < maxAttempts`, fixed once at publish time. No per-error hook
-exists: a thrown exception's class does not even survive the trip back
-faithfully in this platform's own wiring (`WorkerManager::execute()` wraps
-every pool rejection in a plain `RuntimeException`), and `handleFailure()`
-would ignore it if it did. The only lever the platform actually has is
-choosing not to dispatch a job at all.
+guessed — decides retry-or-fail with `attempts < maxAttempts` AND (once
+this landed upstream) an optional `?Closure(Job, Throwable): bool
+$shouldRetry` hook, consulted first: a `false` from it means never retry,
+regardless of attempts remaining.
 
 - `Queue\ValidatesPayload` — a job type opts in with a static
   `validate(array $payload): ?string`, checked from the payload alone, no
   I/O. `OrderCreatedJob`/`OrderProcessJob` both implement it (missing
   `order_id` → rejected); `NoopJob` does not (nothing to validate).
-- `Queue\ValidatingQueue implements PhpJobQueue\Queue\Queue` — decorates the
-  consumer's queue. `pop()` checks each job against
-  `JobRegistry::validate()`; a failing one is `markProcessing()` +
-  `markFailed()` (the same two transitions a real dispatch-then-exhausted-
-  retry would produce) + persisted, then skipped — the caller sees the next
-  job instead. One attempt consumed, never a worker occupied.
-  `QueueConsumer`'s own `$queue` property is typed to the component's
-  `Queue` interface (was `InMemoryQueue`) so it can hold the decorator.
-  Wired into `queue:consume`; the benchmark's own consumer is left
-  unwrapped — it only ever publishes `NoopJob`, which has nothing to
-  validate.
+- `JobRegistry::shouldRetry(): Closure` — the hook itself: refuses
+  eligibility whenever `JobRegistry::validate()` already knows the
+  payload can never work. Passed to every `JobDispatcher` construction
+  (`queue:consume`, the benchmark's own consumer, `ServeIntegrationTest`'s
+  `drainQueue()`). The job still gets ONE real dispatch — `execute()`
+  validates again and throws — so the rejection happens at the natural
+  point (after a real failure) rather than pre-flight from a payload
+  guess, but the *cost* is unchanged: one attempt consumed, never three.
+  **Superseded by this: `Queue\ValidatingQueue`**, a `Queue` decorator
+  that used to intercept `pop()` and reject a job before it was ever
+  dispatched, built solely because the component had no per-error retry
+  hook at all. Removed once one existed upstream.
 - **What stays on the normal retry path, deliberately**: "order not found"
   for either job. Answering it needs a database read a payload check
   cannot do, and in this platform's write-before-publish design it is
   already unreachable in normal operation — a real, if rare, condition
   rather than a provably permanent one, which is exactly the distinction
   `ValidatesPayload` is *for* drawing.
-- `Queue\JobAttemptJournal` — the job metadata the component does not keep
-  at all (`Job::toArray()` has no `started_at`/`completed_at`/`last_error` —
-  checked, not assumed). One append-only row per execution, written by
-  `JobExecutor` (the chokepoint every attempt funnels through, real consumer
-  and benchmark alike) around a try/finally so a thrown exception's message
-  is recorded before it propagates.
-- `queue:job <id>` CLI — joins `QueueJournal`'s row (id/type/state/
-  attempts/maxAttempts/createdAt) with `JobAttemptJournal::forJob()`'s
-  history into the full picture the plan's job-metadata list asks for.
+- **Job metadata (`started_at`/`completed_at`/`last_error`) — now the
+  component's own.** `PhpJobQueue\Job\Job` carries all three directly,
+  stamped by `JobDispatcher` around every dispatch and outcome; persisted
+  the same way the rest of a job's state already was, through the same
+  `JobStorage`. **Superseded by this: `Queue\JobAttemptJournal`**, the
+  platform's own append-only per-attempt log, written by `JobExecutor`
+  around a try/finally — built because `Job::toArray()` used to have
+  none of these three fields. Removed once the component tracked them
+  itself. The one thing lost along with it: the component tracks the
+  LATEST attempt only, not a full history of every one, so `queue:job`
+  now shows one attempt's timing and error, not a per-retry table.
+- `queue:job <id>` CLI — reads `QueueJournal`'s row (id/type/state/
+  attempts/maxAttempts/createdAt/startedAt/completedAt/lastError)
+  straight off the same journal everything else in this platform already
+  reads — no second file to join anymore.
 
 ## Adapter mapping (used by later phases)
 
@@ -691,7 +699,7 @@ choosing not to dispatch a job at all.
 | `Application\Handlers\QueueStatusHandler` | `QueueJournal` over HTTP (`GET /queue/status`) |
 | `Workers\WorkerManager`        | `WorkerPoolClient` job execution (`job.execute`) |
 | `Workers\WorkerJobs`           | pool-side `job.execute` handler → `Queue\JobExecutor` |
-| `Workers\WorkerRegistry`       | forwarder lifecycle (pid/state/counters) from php-job-queue `Worker` + journal |
+| `Workers\WorkerRegistry`       | forwarder lifecycle (pid/state, from php-job-queue `Worker` directly; per-job resolution from the journal) |
 | `Workers\QueueBenchmark`       | measured queue → pool runs: publish, drive consumer, report metrics |
 | `Application\Handlers\WorkersStatusHandler` | `WorkerRegistry` snapshot over HTTP (`GET /workers`) |
 | `Workers\ConcurrentTaskRunner` | `WorkerPoolClient` fan-out (`send`/`allWithin`) |
@@ -713,5 +721,4 @@ choosing not to dispatch a job at all.
 | `Storage\Database::connect/configFrom` | array config → component `ClientConfig`, one place instead of seven |
 | `Workers\WorkerTasks::sleep`   | holds a worker busy for `ms` - the execution-timeout demo's task |
 | `Queue\ValidatesPayload`       | job-type opt-in pre-flight check (no component) |
-| `Queue\ValidatingQueue`        | `PhpJobQueue\Queue\Queue` decorator - rejects before dispatch |
-| `Queue\JobAttemptJournal`      | per-attempt started_at/completed_at/last_error (no component) |
+| `Queue\JobRegistry::shouldRetry()` | `JobDispatcher`'s `$shouldRetry` hook - refuses eligibility for a payload `validate()` already rejects |

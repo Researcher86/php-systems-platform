@@ -547,6 +547,19 @@ RSS summed across processes double-counts pages every worker still shares
 with its parent, which is why the *delta* between the two totals — not
 either alone — is the number that isolates what writing actually cost.
 
+**Not superseded by php-worker-pool's own `_stats` admin action, once that
+landed upstream.** `_stats` answers `memoryBytes` per worker from the
+Master's `ShmWorkerMemory` telemetry — but only when `maxMemoryBytes` is
+configured, which `bin/worker.php` never does, so it would read `null` for
+every worker in this platform's own deployment. Even configured, it is a
+passive read of whatever the pool already tracked, not a way to make a
+worker *do* anything — `workers:memory` needs the before/after readings
+around a real allocation `memory.hold` triggers, which nothing about
+`_stats` can substitute for. `Workers\WorkerRegistry` is not a candidate
+for it either: `_stats` describes php-worker-pool's own Master pool, and
+`WorkerRegistry` observes a different one entirely - `queue:consume`'s
+php-job-queue forwarders (see Step 11 above).
+
 ### Backpressure (Step 17, shipped)
 
 Neither `Queue`'s `InMemoryQueue::push()` nor `Producer::dispatch()` enforces

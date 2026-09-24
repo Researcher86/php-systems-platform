@@ -35,6 +35,7 @@ use PhpSystemsPlatform\Workers\ForkedOrderLoader;
 use PhpSystemsPlatform\Workers\WorkerManager;
 use PhpSystemsPlatform\Workers\WorkerRegistry;
 use PHPUnit\Framework\TestCase;
+use PhpWorkerPool\Protocol\Request as WorkerRequest;
 use PhpWorkerPool\Sdk\WorkerPoolClient;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
@@ -100,6 +101,26 @@ final class ServeIntegrationTest extends TestCase
         if (self::$ownsServe) {
             self::stopServe();
         }
+    }
+
+    public function testAConnectionThatSendsNothingIsClosedAfterTheRequestTimeout(): void
+    {
+        $socket = stream_socket_client(sprintf('tcp://%s:%d', self::HOST, self::HTTP_PORT), $code, $message, 5.0);
+        self::assertIsResource($socket);
+
+        // The configured request_timeout (5s) plus the Master-style periodic
+        // sweep's own interval (~1s) plus margin: long enough that, if the
+        // idle sweep is actually running, the server has closed this
+        // connection by now.
+        stream_set_blocking($socket, true);
+        stream_set_timeout($socket, 8);
+
+        $data = fread($socket, 1);
+        $meta = stream_get_meta_data($socket);
+        fclose($socket);
+
+        self::assertSame('', $data);
+        self::assertTrue($meta['eof']);
     }
 
     public function testHealthEndpointAnswers(): void
@@ -403,6 +424,73 @@ final class ServeIntegrationTest extends TestCase
 
         $rows = self::$database->read('SELECT status FROM orders WHERE id = ?', [$order['id']]);
         self::assertSame('completed', $rows[0]['status']);
+    }
+
+    public function testAWorkerStuckPastItsExecutionTimeoutIsKilledAndReplaced(): void
+    {
+        $socketPath = '/tmp/php-exectimeout-' . uniqid('', true) . '.sock';
+        $dir = self::LOG_DIR . '/exectimeout-' . uniqid('', true);
+        mkdir($dir, 0o777, true);
+
+        $pool = proc_open(
+            [PHP_BINARY, dirname(__DIR__, 2) . '/bin/worker.php'],
+            [
+                1 => ['file', $dir . '/worker.out', 'a'],
+                2 => ['file', $dir . '/worker.err', 'a'],
+            ],
+            $pipes,
+            null,
+            [
+                'WORKER_POOL_SOCKET' => $socketPath,
+                'WORKER_POOL_MIN' => '1',
+                'WORKER_POOL_MAX' => '1',
+                'WORKER_POOL_TIMEOUT' => '3',
+                'WORKER_POOL_EXECUTION_TIMEOUT' => '1',
+            ],
+        );
+
+        self::assertIsResource($pool);
+
+        try {
+            $deadline = microtime(true) + 10.0;
+
+            while (microtime(true) < $deadline) {
+                $socket = @stream_socket_client(sprintf('unix://%s', $socketPath), $code, $message, 0.2);
+
+                if ($socket !== false) {
+                    fclose($socket);
+                    break;
+                }
+
+                usleep(100_000);
+            }
+
+            $client = new WorkerPoolClient($socketPath, 3.0);
+
+            // The pool's only worker, held on a task far longer than
+            // anything else in this test waits for - if the pool ever falls
+            // back to just waiting the original worker out, this is long
+            // enough that it cannot. Fired and never awaited: by the time it
+            // would answer, the worker holding it is gone.
+            $client->send(new WorkerRequest('sleep', ['ms' => 30_000]));
+
+            // Past the execution timeout, plus the Master's own ~1s sweep
+            // interval: enough for terminateStuckWorkers() to have noticed,
+            // killed the worker, and forked its replacement.
+            usleep(2_500_000);
+
+            // A fresh request, with the same short client timeout as the
+            // pool's own worker-operation timeout. It can only succeed this
+            // fast if a NEW worker answered - the original is still 27+
+            // seconds from finishing its sleep, so a pool that only ever
+            // waits workers out would make this request_timeout instead.
+            $answer = $client->call(new WorkerRequest('ping', []));
+
+            self::assertTrue($answer['pong']);
+        } finally {
+            proc_terminate($pool);
+            proc_close($pool);
+        }
     }
 
     public function testForkedLoaderAnswersExactlyWhatTheSequentialOneDoes(): void

@@ -664,6 +664,76 @@ and observe their relationship.
 
 ---
 
+# Timeouts
+
+Every important boundary has an explicit, configured timeout - none of them
+silently inherited from a component default. The plan asks for five, and
+they turn out to fall into three genuinely different kinds:
+
+```text
+request timeout        how long a CALLER waits for an answer
+execution timeout       how long a HANDLER may hold work before it is
+                        assumed to be never finishing
+lifecycle timeout       how long a WORKER may take to start or to leave
+```
+
+| boundary | config key | kind | default |
+| --- | --- | --- | --- |
+| HTTP connection | `http.request_timeout` | request | 5s |
+| HTTP header block (Slowloris) | `http.header_timeout` | request | 5s |
+| database query | `database.read_timeout` / `write_timeout` | request | 30s |
+| worker round trip | `workers.task_timeout` | request | 5s |
+| job execution | `workers.execution_timeout` | execution | 30s |
+| worker startup | `workers.bootstrap_timeout` | lifecycle | 10s |
+| worker shutdown | `workers.departure_timeout` | lifecycle | 10s |
+| job visibility | derived from `workers.task_timeout` | queue | - |
+
+Two of these were bugs, found while wiring the rest explicitly and fixed as
+part of this phase:
+
+* `serve` built its `ServerConfig` with a `connectionTimeout` and a
+  `headerTimeout`, but never called the component's own
+  `Server::closeIdleConnections()` / `closeSlowHeaderReads()` - the sweep
+  that actually acts on those numbers. A connection that sent nothing at all
+  stayed open forever. It is now swept once a second.
+* `bin/worker.php` never set `Master`'s `workerExecutionTimeoutSeconds`,
+  `workerBootstrapTimeoutSeconds` or `workerDepartureTimeoutSeconds` -
+  php-worker-pool's own model for exactly this distinction (see
+  `WorkerPool::terminateStuckWorkers()`). All three ran on the component's
+  defaults, unconfigured and invisible. All three are named in
+  `config/platform.php` now.
+
+**Request timeout** is about the *caller* giving up - the queue, the HTTP
+client, `WorkerPoolClient`, all still waiting for an answer that has not come
+back. **Execution timeout** is about the *system* giving up on a handler that
+will never return - php-worker-pool's `terminateStuckWorkers()` kills and
+replaces a worker that has held one task past `execution_timeout`, verified
+here: a worker stuck for 30s under a 1s execution timeout is dead and
+replaced well before it, so a fresh request the pool would otherwise have
+queued behind it answers immediately. That distinction matters because the
+two limits sit on opposite sides of the same wait: `execution_timeout` is
+set comfortably above `task_timeout`, so by the time a worker is actually
+killed, whoever was waiting on it has already been told `request_timeout` -
+the request is not late, it is never finishing.
+
+**Worker lifecycle timeout** is neither: a worker can fail to start, or fail
+to leave once told to, with no task in sight - `bootstrap_timeout` and
+`departure_timeout` bound those two independently of any request.
+
+**Queue operation timeout** is the job queue's own concept, visibility, and
+it is deliberately *derived* rather than independently configured:
+`queue:consume` sets it to `workers.task_timeout`, because a job can
+legitimately sit in a worker's hands for up to one full round trip - any
+shorter and the queue would reclaim a job that is still being (successfully)
+worked on, and hand it to someone else too.
+
+The database's own operation timeout (`read_timeout`/`write_timeout`) matches
+the component's own defaults exactly - naming them in config changes nothing
+about what already ran, it only makes the number a config reader can find
+instead of one buried in `php-mini-database`'s own source.
+
+---
+
 # Failures
 
 Failures are part of the platform rather than exceptional cases hidden from the user.

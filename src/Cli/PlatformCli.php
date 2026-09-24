@@ -16,7 +16,6 @@ use PhpJobQueue\Support\SystemClock;
 use PhpJobQueue\Worker\WorkerPool;
 use PhpMiniCache\Sdk\CacheClient;
 use PhpMiniCache\Sdk\CacheClientException;
-use PhpMiniDatabase\Client\ClientConfig;
 use PhpMiniHttpServer\EventLoop\SelectLoop;
 use PhpMiniHttpServer\Http\Protocol\HttpParser;
 use PhpMiniHttpServer\Http\Protocol\ResponseEncoder;
@@ -174,11 +173,7 @@ final class PlatformCli
         $config = $this->config();
         $databaseConfig = $config['database'];
 
-        $database = Database::fromConfig(new ClientConfig(
-            host: $databaseConfig['host'],
-            port: $databaseConfig['port'],
-            connectTimeoutSeconds: $databaseConfig['timeout'],
-        ));
+        $database = Database::connect($databaseConfig);
 
         $ownsDatabaseServer = false;
 
@@ -249,11 +244,14 @@ final class PlatformCli
         $serverConfig = new ServerConfig(
             host: $http['host'],
             port: $http['port'],
-            // Short idle and header timeouts for a dev server: a connection
-            // that goes quiet is reclaimed by the periodic sweep instead of
-            // holding a socket forever.
-            connectionTimeout: 5.0,
-            headerTimeout: 5.0,
+            // PLAN Step 18's HTTP request timeout, in the config's own two
+            // parts - a connection idle this long is reclaimed, one stuck
+            // mid-header-block is reclaimed sooner (the Slowloris guard).
+            // Both are only names for the component's own numbers until the
+            // periodic sweep below actually calls the methods that enforce
+            // them.
+            connectionTimeout: (float) $http['request_timeout'],
+            headerTimeout: (float) $http['header_timeout'],
         );
         $server = new Server($serverConfig);
 
@@ -296,6 +294,21 @@ final class PlatformCli
                 metrics: $metrics,
                 logger: $logger,
             )->start();
+        });
+
+        // The HTTP request timeout, enforced: every second, close whatever
+        // has gone idle past connectionTimeout or spent too long mid-header
+        // past headerTimeout. Without this sweep the two numbers above are
+        // just config - Server measures both but nothing ever asks it to
+        // act on them.
+        $loop->every(1.0, static function () use ($server, $serverConfig, $logger): void {
+            foreach ($server->closeIdleConnections($serverConfig->connectionTimeout) as $connection) {
+                $logger->log(sprintf('#%d closed: idle past %.1fs', $connection->id, $serverConfig->connectionTimeout));
+            }
+
+            foreach ($server->closeSlowHeaderReads($serverConfig->headerTimeout) as $connection) {
+                $logger->log(sprintf('#%d closed: header past %.1fs', $connection->id, $serverConfig->headerTimeout));
+            }
         });
 
         pcntl_async_signals(true);
@@ -860,11 +873,7 @@ final class PlatformCli
         printf("Consumer restoring queue from %s\n", $logPath);
         printf("  %d published, %d ready/delayed/processing\n", $restored['published'], $restored['depth']);
 
-        $database = Database::fromConfig(new ClientConfig(
-            host: $databaseConfig['host'],
-            port: $databaseConfig['port'],
-            connectTimeoutSeconds: $databaseConfig['timeout'],
-        ));
+        $database = Database::connect($databaseConfig);
 
         $ownsDatabaseServer = false;
         $ownsCacheServer = false;
@@ -991,11 +1000,7 @@ final class PlatformCli
         $databaseConfig = $config['database'];
         $cacheConfig = $config['cache'];
 
-        $database = Database::fromConfig(new ClientConfig(
-            host: $databaseConfig['host'],
-            port: $databaseConfig['port'],
-            connectTimeoutSeconds: $databaseConfig['timeout'],
-        ));
+        $database = Database::connect($databaseConfig);
 
         $ownsDatabaseServer = false;
         $ownsCacheServer = false;
@@ -1143,11 +1148,7 @@ final class PlatformCli
         $databaseConfig = $config['database'];
         $workersConfig = $config['workers'];
 
-        $database = Database::fromConfig(new ClientConfig(
-            host: $databaseConfig['host'],
-            port: $databaseConfig['port'],
-            connectTimeoutSeconds: $databaseConfig['timeout'],
-        ));
+        $database = Database::connect($databaseConfig);
 
         $ownsDatabaseServer = false;
         $ownsWorkerPool = false;

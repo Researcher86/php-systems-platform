@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Queue;
 
 use PhpJobQueue\Job\Job as QueueJob;
-use PhpMiniDatabase\Client\ClientConfig;
 use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Domain\SequentialOrderLoader;
@@ -76,11 +75,7 @@ final class JobExecutor
 
     private function database(): Database
     {
-        return $this->database ??= Database::fromConfig(new ClientConfig(
-            host: (string) $this->databaseConfig['host'],
-            port: (int) $this->databaseConfig['port'],
-            connectTimeoutSeconds: (float) $this->databaseConfig['timeout'],
-        ));
+        return $this->database ??= Database::connect($this->databaseConfig);
     }
 
     private function cache(): CacheService

@@ -41,6 +41,19 @@ $minWorkers = (int) (getenv('WORKER_POOL_MIN') ?: 2);
 $maxWorkers = (int) (getenv('WORKER_POOL_MAX') ?: 16);
 $requestTimeout = (float) (getenv('WORKER_POOL_TIMEOUT') ?: $workers['task_timeout']);
 
+// PLAN Step 18's remaining two timeout categories, both the Master's own
+// (php-worker-pool's terminateStuckWorkers() - see its docblock for exactly
+// what each one bounds): the job execution timeout - a worker held on ONE
+// task past this is killed and replaced, the answer to a handler that never
+// returns - and the worker lifecycle timeouts - how long a worker may sit
+// STARTING without reporting ready, or STOPPING without actually exiting.
+// Every one of the three was previously left at the component's own
+// default, silently; an isolated test pool overrides the execution one to
+// demonstrate the mechanism on a short deadline instead of a 60s wait.
+$executionTimeout = (float) (getenv('WORKER_POOL_EXECUTION_TIMEOUT') ?: $workers['execution_timeout']);
+$bootstrapTimeout = (float) $workers['bootstrap_timeout'];
+$departureTimeout = (float) $workers['departure_timeout'];
+
 $workerTasks = WorkerTasks::handler();
 $workerJobs = new WorkerJobs($config)->handler();
 $catalogTasks = new CatalogTasks((array) $config['database'])->handler();
@@ -70,6 +83,9 @@ $master = new Master(
     maxWorkers: $maxWorkers,
     maxQueueSize: 10_000,
     requestTimeoutSeconds: $requestTimeout,
+    workerExecutionTimeoutSeconds: $executionTimeout,
+    workerBootstrapTimeoutSeconds: $bootstrapTimeout,
+    workerDepartureTimeoutSeconds: $departureTimeout,
     handler: $handler,
 );
 

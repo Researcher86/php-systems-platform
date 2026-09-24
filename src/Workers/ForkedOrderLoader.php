@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Workers;
 
-use PhpMiniDatabase\Client\ClientConfig;
 use PhpSystemsPlatform\Domain\Customer;
 use PhpSystemsPlatform\Domain\OrderLoader;
 use PhpSystemsPlatform\Domain\OrderService;
@@ -166,11 +165,7 @@ final readonly class ForkedOrderLoader implements OrderLoader
         $database = null;
 
         try {
-            $database = Database::fromConfig(new ClientConfig(
-                host: (string) $this->databaseConfig['host'],
-                port: (int) $this->databaseConfig['port'],
-                connectTimeoutSeconds: (float) $this->databaseConfig['timeout'],
-            ));
+            $database = Database::connect($this->databaseConfig);
 
             $found = $reader(new CatalogRepository($database));
 

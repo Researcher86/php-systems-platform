@@ -17,9 +17,16 @@ use PhpWorkerPool\Protocol\Response;
  * a chain of sha256 hashes. Each worker folds its own chain and reports how
  * many iterations it ran and how long it took, so the controller can show
  * that N chunks actually ran on N workers side by side rather than serially.
+ *
+ * sleep is PLAN Step 18's own task: a handler that holds its worker busy for
+ * a controlled duration and nothing else, so an execution timeout can be
+ * demonstrated against a worker that is genuinely still working, not one
+ * that crashed or looped.
  */
 final class WorkerTasks
 {
+    private const int MAX_SLEEP_MS = 60_000;
+
     /**
      * @return \Closure(Request): Response
      */
@@ -28,8 +35,25 @@ final class WorkerTasks
         return static fn (Request $request): Response => match ($request->action) {
             'ping' => Response::of(['pong' => true]),
             'hash_chunk' => self::hashChunk($request->params),
+            'sleep' => self::sleep($request->params),
             default => Response::error('unknown_action'),
         };
+    }
+
+    /**
+     * @param array<string, mixed> $params
+     */
+    public static function sleep(array $params): Response
+    {
+        $ms = $params['ms'] ?? 0;
+
+        if (!is_int($ms) || $ms < 0 || $ms > self::MAX_SLEEP_MS) {
+            return Response::error('bad_params', ['reason' => sprintf('ms must be an int between 0 and %d.', self::MAX_SLEEP_MS)]);
+        }
+
+        usleep($ms * 1000);
+
+        return Response::of(['ms' => $ms, 'pid' => getmypid()]);
     }
 
     /**

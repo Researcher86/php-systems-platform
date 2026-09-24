@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Workers;
 
-use PhpMiniDatabase\Client\ClientConfig;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
 use PhpWorkerPool\Protocol\Request;
@@ -105,10 +104,6 @@ final class CatalogTasks
 
     private function database(): Database
     {
-        return $this->database ??= Database::fromConfig(new ClientConfig(
-            host: (string) $this->databaseConfig['host'],
-            port: (int) $this->databaseConfig['port'],
-            connectTimeoutSeconds: (float) $this->databaseConfig['timeout'],
-        ));
+        return $this->database ??= Database::connect($this->databaseConfig);
     }
 }

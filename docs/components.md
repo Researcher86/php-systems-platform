@@ -566,6 +566,69 @@ and what happens at it are entirely the platform's to decide.
 - `config/platform.php`'s `queue.max_size` (default 500) is the limit;
   nothing else in the platform reads or writes it.
 
+### Timeouts (Step 18, shipped)
+
+Every important boundary got an explicit, config-named timeout in this
+phase — two of them were previously silent bugs, found while auditing the
+rest and fixed here rather than deferred.
+
+**HTTP request timeout — a real fix.** `ServerConfig`'s `connectionTimeout`/
+`headerTimeout` were always built from config, but nothing ever called the
+component's own `Server::closeIdleConnections()` /
+`closeSlowHeaderReads()` — the sweep that acts on those numbers. A
+connection that sent nothing at all stayed open indefinitely.
+`PlatformCli::serve()` now registers `$loop->every(1.0, ...)` calling both,
+sourced from `http.request_timeout` (idle) and the new `http.header_timeout`
+(Slowloris — a trickling client stays alive under the idle check because it
+IS sending bytes, just never enough to finish a header block).
+`ServeIntegrationTest::testAConnectionThatSendsNothingIsClosedAfterTheRequestTimeout`
+opens a raw socket, sends nothing, and asserts the server closes it — this
+would time out (not EOF) against the pre-fix code.
+
+**Worker timeouts — also a real fix.** `bin/worker.php`'s `Master` never set
+`workerExecutionTimeoutSeconds`, `workerBootstrapTimeoutSeconds` or
+`workerDepartureTimeoutSeconds` — all three ran on the component's own
+defaults (60s / 30s / 10s), unconfigured and invisible. All three are named
+in `config/platform.php`'s `workers` block now (`execution_timeout` /
+`bootstrap_timeout` / `departure_timeout`), and `execution_timeout` takes an
+env override (`WORKER_POOL_EXECUTION_TIMEOUT`, alongside the existing
+`WORKER_POOL_MIN`/`MAX`/`TIMEOUT`) so a test can demonstrate it on a short
+deadline. This is `php-worker-pool`'s own timeout model
+(`WorkerPool::terminateStuckWorkers()`'s docblock spells out the same
+three-way split PLAN Step 18 asks for): **execution timeout** kills and
+replaces a worker holding one task too long (a handler that will never
+return), **lifecycle timeout** (bootstrap/departure) bounds a worker that
+fails to start or fails to leave, with no task in sight either way. Neither
+is the **request timeout** (`workers.task_timeout`, the existing
+`WorkerPoolClient`/`Master` round-trip wait) — that one is the *caller*
+giving up; execution timeout is the *pool* taking its slot back, and is set
+comfortably above the request timeout so that by the time it fires, whoever
+was waiting has already been answered.
+`ServeIntegrationTest::testAWorkerStuckPastItsExecutionTimeoutIsKilledAndReplaced`
+spins up a 1-worker pool with a 1s execution timeout, sends a request that
+sleeps 30s and never awaits it, then proves a *second* request still answers
+promptly — only possible if the stuck worker was actually replaced, not
+merely waited out. `Workers\WorkerTasks::sleep` (`sleep` action, `ms` param)
+is the task that made this demonstrable: it holds a worker busy for exactly
+as long as asked and nothing else.
+
+**Database operation timeout.** `read_timeout`/`write_timeout` join the
+existing `database.timeout` (connect) in config, matching the component's own
+`ClientConfig` defaults exactly (30s each) — naming them changes no runtime
+behavior, it only makes the number visible. `Storage\Database::connect(array
+$config)` / `Database::configFrom(array $config): ClientConfig` centralize
+the mapping that seven call sites used to repeat by hand
+(`PlatformCli` ×4, `JobExecutor`, `ForkedOrderLoader`, `CatalogTasks`) — a
+consolidation this phase's config additions made worth doing, tested directly
+(`DatabaseConfigTest`) without a database connection.
+
+**Queue operation timeout** is visibility, and needed no new code: it is
+*already* explicit, and deliberately *derived* from `workers.task_timeout`
+rather than independently configured (`QueueConsumer`'s wiring — see the
+Queue section above) — a job may legitimately sit in a worker's hands for up
+to one full round trip, and visibility has to span that or the queue would
+reclaim jobs that are still being worked on.
+
 ## Adapter mapping (used by later phases)
 
 | Platform class                 | Wraps                                  |
@@ -605,3 +668,5 @@ and what happens at it are entirely the platform's to decide.
 | `Workers\WorkerMemoryTasks`    | pool-side `memory.hold` — snapshot, retain, snapshot |
 | `Workers\WorkerMemoryBenchmark` | `ConcurrentTaskRunner` fan-out over `memory.hold` → aggregated report |
 | `Queue\BackpressurePolicy`     | `QueueJournal` depth vs `max_size` → reject decision (no component) |
+| `Storage\Database::connect/configFrom` | array config → component `ClientConfig`, one place instead of seven |
+| `Workers\WorkerTasks::sleep`   | holds a worker busy for `ms` - the execution-timeout demo's task |

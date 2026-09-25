@@ -2415,14 +2415,14 @@ Phase 5 is complete when all of the following are true.
 * [ ] Process model is documented.
 * [ ] Failure behavior is documented.
 * [ ] Benchmarks are documented.
-* [ ] Final demo is documented.
+* [x] Final demo is documented.
 
 ## Reproducibility
 
 * [ ] Clean checkout works.
 * [ ] Clean Composer installation works.
 * [ ] Docker environment works.
-* [ ] Demo works from a clean environment.
+* [x] Demo works from a clean environment.
 
 ---
 

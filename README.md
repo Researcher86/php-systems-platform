@@ -220,13 +220,12 @@ Graceful shutdown
 Example output:
 
 ```text
-PHP Systems Platform
-
-HTTP Server ........ OK
-Database ........... OK
-Cache .............. OK
-Queue .............. OK
-Workers ............ 4
+Starting platform...
+  HTTP server............ OK
+  Database............... OK
+  Cache.................. OK
+  Queue.................. OK
+  Workers................ 4
 
 Creating orders...
 Created 100 orders
@@ -235,22 +234,45 @@ Publishing jobs...
 Published 100 jobs
 
 Processing...
-Worker #1 processed 28 jobs
-Worker #2 processed 25 jobs
-Worker #3 processed 24 jobs
-Worker #4 processed 23 jobs
+Worker #1 processed 23 jobs
+Worker #2 processed 28 jobs
+Worker #3 processed 23 jobs
+Worker #4 processed 26 jobs
 
 Injecting failure...
-Worker #2 exited unexpectedly
+Worker #1 (pid 4400) exited unexpectedly
+  detected 1.9 ms after the crash, replacement within 2.5 ms
 
 Recovering...
-Worker #2 restarted
+Worker #1 (pid 4410) restarted
+  pool back at 4/4 workers
 
 Retrying failed jobs...
-Completed
+  published demo.failing (33b4531b-5f46-498b-b80a-c73bd3ccd84a, max 3 attempts)
+  attempt 3 -> failed
+  => after 3 attempts the job was retired into FAILED (retried=1)
 
 Final statistics...
+  HTTP      103 requests, 0 errors
+  Cache     100 operations (0 hits, 0 misses)
+  Database  123 operations
+  Queue     101 published, 100 completed, 1 failed, 1 retried
+  Workers   4 active, 0 busy, 4 idle
+  Memory    master 30.2M, workers 4.0M each
+
+Graceful shutdown...
+  queue consumer......... stopped gracefully
+  platform serve......... stopped gracefully
+All services stopped.
 ```
+
+Every line is backed by a live fact, not a canned script: a real `serve`
+and `queue:consume` run as the demo's children on the real ports, the 100
+orders are real `POST /orders` calls, the per-worker split comes from the
+consumer's own `workers.status.json`, the crash is a real
+`POST /debug/fail-worker`, the retried job is a real `demo.failing` run to
+the end of its attempts budget, and the statistics are a live
+`GET /metrics` snapshot (Step 26).
 
 ---
 
@@ -389,7 +411,12 @@ exactly what the command reports — none of the probes failing is an error.
 php bin/platform.php demo
 ```
 
-Run the complete integration demo.
+Run the complete integration demo: the whole platform told as one story
+(Step 26) — start serve and a queue consumer on the real ports, create 100
+orders over HTTP, process their background jobs across the worker pool,
+crash one worker and watch the pool replace it, retry a failing job to the
+end of its attempts budget, print a live /metrics snapshot, and shut
+everything down gracefully. See *Run the Demo* above for the full output.
 
 ```bash
 php bin/platform.php benchmark

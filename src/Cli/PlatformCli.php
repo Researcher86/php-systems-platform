@@ -36,6 +36,7 @@ use PhpSystemsPlatform\Application\Handlers\ParallelHandler;
 use PhpSystemsPlatform\Application\Handlers\QueueStatusHandler;
 use PhpSystemsPlatform\Application\Handlers\WorkersStatusHandler;
 use PhpSystemsPlatform\Cache\CacheService;
+use PhpSystemsPlatform\Demo\PlatformDemo;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Domain\SequentialOrderLoader;
 use PhpSystemsPlatform\Http\Router;
@@ -178,10 +179,24 @@ final class PlatformCli
             'metrics' => $this->metricsCommand(),
             'trace' => $this->traceCommand(array_slice($argv, 2)),
             'status' => $this->statusCommand(),
+            'demo' => $this->demo(),
 
             // Real handlers land with their implementation phase.
             default => $this->notImplemented($command),
         };
+    }
+
+    /**
+     * PLAN Step 26's main showcase: the whole platform told as one story.
+     * The demo runs the real binaries (serve, queue:consume) with the real
+     * ports and data directories, creates orders over real HTTP, processes
+     * them through the real queue and pool, crashes a worker and watches the
+     * pool replace it, retries a failing job to the end of its budget, reads
+     * the live /metrics, and shuts everything down gracefully.
+     */
+    private function demo(): int
+    {
+        return new PlatformDemo()->run();
     }
 
     /**

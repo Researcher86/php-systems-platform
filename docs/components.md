@@ -939,6 +939,47 @@ StatusCommandTest` (every section printed, the journal-backed Queue
 counters) and one `ServeIntegrationTest` method that asserts all four
 components answer *running* when the real stack is up.
 
+### Integrated demo (Step 26, shipped)
+
+`platform.php demo` is the whole platform told as one story (PLAN.md §31).
+It drives the real binaries and the real ports the way an operator would:
+`Demo\PlatformDemo` is the orchestrator, and every line it prints is backed
+by a live fact rather than a canned script:
+
+- **Startup** — it refuses to run against an already-answering platform,
+  stops a stale daemonized database server by its pid file, wipes the data
+  directory for a fresh journal, then spawns the real `serve` as a child
+  and probes each component the way `status` does: `GET /health`, the
+  database/cache TCP ports, `GET /queue/status`, and the pool's `stats()`.
+  One env override is set before the serve child starts —
+  `WORKER_POOL_MIN` to the platform's declared `workers.count` — because the
+  pool Master autoscales from its own floor of two otherwise, and the story
+  wants a real pool of the exact size config declares. (The pool's floor
+  and ceiling were already the Master's own env knobs, `bin/worker.php`.)
+- **Orders** — 100 real `POST /orders` over HTTP, each one the platform's
+  full write path: database insert plus an `order.created` job appended to
+  the durable journal. `Published 100 jobs` is read back from the journal.
+- **Processing** — a second child runs the real `queue:consume`; when the
+  journal shows the whole batch resolved, `workers.status.json` — written
+  by the consumer's own `WorkerRegistry` — is the truth about which forwarder
+  did how much, printed per worker and summing to 100.
+- **Failure + recovery** — one `POST /debug/fail-worker` crashes a real pool
+  worker; the answer's own evidence (crash detected, replacement started,
+  timings) becomes the story, and the pool is polled back to its full size.
+- **Retry** — the demo publishes one `demo.failing` job in-process into the
+  same journal the running consumer is reading; the consumer's resync
+  interval picks it up mid-run and retries it to the end of its attempts
+  budget, `retried=1` in the journal.
+- **Final statistics** — a live `GET /metrics` snapshot.
+- **Graceful shutdown** — SIGTERM to the consumer, then to serve; the exit
+  code 0 and each child's own "stopped" line are the proof. The demo's
+  scratch log directory is removed on success.
+
+Exercised by `tests/Integration/DemoCommandTest`, which runs the whole
+`demo` as a subprocess, asserts the full story (4 worker lines summing to
+100, one failed/retried job) and exit 0 — and skips rather than fight for
+the ports when another serve already owns them.
+
 ## Adapter mapping (used by later phases)
 
 | Platform class                 | Wraps                                  |
@@ -983,3 +1024,4 @@ components answer *running* when the real stack is up.
 | `Workers\WorkerTasks::sleep`   | holds a worker busy for `ms` - the execution-timeout demo's task |
 | `Queue\ValidatesPayload`       | job-type opt-in pre-flight check (no component) |
 | `Queue\JobRegistry::shouldRetry()` | `JobDispatcher`'s `$shouldRetry` hook - refuses eligibility for a payload `validate()` already rejects |
+| `Demo\PlatformDemo`      | orchestrates the real binaries (`serve`, `queue:consume`) for the `demo` story (Step 26) |

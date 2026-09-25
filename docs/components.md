@@ -871,6 +871,46 @@ create+read+404 round trip through HTTP, cache and database) and
 `tests/Integration/MetricsCommandTest` (the CLI printing the journal-based
 snapshot as a subprocess).
 
+### Tracing (Step 24, shipped)
+
+Step 24's tracing is `Observability\Trace`, deliberately a small
+educational system (explicitly not an OpenTelemetry clone). One Trace is
+two things: a *context* — which request is active right now — and a
+*span journal*. Spans carry `request_id`, `started_at`, `duration`, and
+for a job execution their own `job_id`, `worker_pid` and `attempt`; a
+retried job is the same `job_id` across several `job.execute` spans,
+which is what answers "which request created it, which worker ran it, how
+long it took, did it retry?".
+
+The request id is resolved at the HTTP boundary (`Application::handle`):
+a well-formed inbound `X-Request-ID` is kept, otherwise a `req-…` is
+generated, the header is echoed on the answer, and one `http.request`
+span is recorded per response. The id stays active for the whole answer,
+so `Database` (with the same opt-in Trace) records `db.read`/`db.write`
+spans under it. The write route (`OrderCreateHandler`) passes the active
+id to `OrderService::createOrder`, which copies it into the job payload —
+the queue carries it across the process boundary. On the worker side,
+`JobExecutor` re-opens the scope from the payload before executing, so
+its `job.execute` span (and its own database calls) stay correlated back
+to the original HTTP request. Every seam is a nullable constructor
+argument, exactly like the metrics: a process without a tracer behaves
+bit-for-bit as before.
+
+Spans are kept in memory and appended to an append-only JSONL journal
+(`jobs.trace_store`, the same contract as the queue journal), so a
+worker's spans outlive the worker. The read side is `platform.php trace
+<request_id>`, which walks the one file both sides write into and prints
+the whole chain for a request.
+
+Exercised by `tests/Unit/Observability/TraceTest` (id resolution,
+active-request scoping, memory and journal behavior), `tests/Unit/
+ApplicationTest` (the id echoed and recorded, a fresh scope per request),
+`tests/Integration/ServeIntegrationTest` (one traced POST end to end: the
+header echoed, the `request_id` inside the published job's payload, and
+the worker's `job.execute` span alongside the serve's `http.request` in
+the same journal) and `tests/Integration/TraceCommandTest` (the CLI
+printing the chain as a subprocess).
+
 ## Adapter mapping (used by later phases)
 
 | Platform class                 | Wraps                                  |

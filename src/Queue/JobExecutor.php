@@ -10,6 +10,7 @@ use PhpJobQueue\Persistence\FileStorage;
 use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Domain\SequentialOrderLoader;
+use PhpSystemsPlatform\Observability\Trace;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
 use PhpSystemsPlatform\Storage\Repositories\InventoryRepository;
@@ -58,11 +59,13 @@ final class JobExecutor
      * @param array<string, mixed> $databaseConfig       the `database` config block
      * @param array<string, mixed> $cacheConfig          the `cache` config block
      * @param string|null          $idempotencyLogPath   the `jobs.idempotency_store` journal path, or null for no guard
+     * @param Trace|null           $trace                PLAN Step 24's tracer, or null for none
      */
     public function __construct(
         private array $databaseConfig,
         private array $cacheConfig,
         private ?string $idempotencyLogPath = null,
+        private readonly ?Trace $trace = null,
     ) {
     }
 
@@ -77,10 +80,61 @@ final class JobExecutor
             $this->inventory(),
         );
 
-        $this->registry ??= new JobRegistry();
-        $this->registry->execute($job, $context);
+        // PLAN Step 24: a job whose payload names the request that published
+        // it re-opens that request's trace scope on this worker before a
+        // single read - so the database calls it makes AND the job.execute
+        // span itself are all correlated back to the original HTTP request.
+        // A hand-published job without a request_id runs exactly as it
+        // always did; nothing is recorded for it.
+        $requestId = $this->requestId($job->getPayload());
+
+        if ($requestId !== null) {
+            $this->trace?->beginRequest($requestId);
+        }
+
+        $startedAt = microtime(true);
+
+        try {
+            $this->registry ??= new JobRegistry();
+            $this->registry->execute($job, $context);
+        } catch (\Throwable $e) {
+            $this->recordJobSpan($job, $startedAt, 'failed', $e->getMessage());
+            throw $e;
+        }
+
+        $this->recordJobSpan($job, $startedAt);
 
         return null;
+    }
+
+    /**
+     * The job execution span - one per attempt, so a retried job is the
+     * same job_id on N consecutive spans under the same request_id. Who
+     * ran it, how long it took and what happened come from the span's own
+     * fields; the trace only records when an active scope exists.
+     */
+    private function recordJobSpan(QueueJob $job, float $startedAt, string $outcome = 'completed', ?string $error = null): void
+    {
+        $this->trace?->record('job.execute', microtime(true) - $startedAt, [
+            'job_id' => (string) $job->getId(),
+            'worker_pid' => getmypid(),
+            'attempt' => $job->getAttempts(),
+            'meta' => array_filter(
+                ['outcome' => $outcome, 'error' => $error],
+                static fn (mixed $value): bool => $value !== null,
+            ),
+        ]);
+        $this->trace?->finishRequest();
+    }
+
+    /**
+     * @param array<string, mixed> $payload
+     */
+    private function requestId(array $payload): ?string
+    {
+        $requestId = $payload['request_id'] ?? null;
+
+        return is_string($requestId) && $requestId !== '' ? $requestId : null;
     }
 
     /**
@@ -106,7 +160,7 @@ final class JobExecutor
 
     private function database(): Database
     {
-        return $this->database ??= Database::connect($this->databaseConfig);
+        return $this->database ??= Database::connect($this->databaseConfig, 10, null, $this->trace);
     }
 
     private function cache(): CacheService

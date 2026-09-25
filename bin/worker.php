@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use PhpSystemsPlatform\Observability\Trace;
 use PhpSystemsPlatform\Workers\CatalogTasks;
 use PhpSystemsPlatform\Workers\WorkerFailureTasks;
 use PhpSystemsPlatform\Workers\WorkerJobs;
@@ -58,7 +59,14 @@ $bootstrapTimeout = (float) $workers['bootstrap_timeout'];
 $departureTimeout = (float) $workers['departure_timeout'];
 
 $workerTasks = WorkerTasks::handler();
-$workerJobs = new WorkerJobs($config)->handler();
+// PLAN Step 24: the one tracer every worker shares. Forked workers inherit
+// the object (its span list starts empty, the journal path is what matters),
+// so each job.execute span is written back to the same JSONL journal and the
+// serve side can read a whole request's chain - its own spans and every
+// worker's - from one place. A missing trace_store leaves tracing off without
+// changing the pool's behavior one bit.
+$trace = new Trace(isset($config['jobs']['trace_store']) ? (string) $config['jobs']['trace_store'] : null);
+$workerJobs = new WorkerJobs($config, $trace)->handler();
 $catalogTasks = new CatalogTasks((array) $config['database'])->handler();
 // Built once, here, before Master::run() eagerly forks minWorkers workers:
 // fork() copies this object into every worker, so each starts with its own

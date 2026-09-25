@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Workers;
 
 use PhpJobQueue\Job\Job;
+use PhpSystemsPlatform\Observability\Trace;
 use PhpSystemsPlatform\Queue\JobExecutor;
 use PhpWorkerPool\Protocol\Request;
 use PhpWorkerPool\Protocol\Response;
@@ -30,9 +31,15 @@ final class WorkerJobs
     /**
      * @param array<string, mixed> $config the platform config, for the
      *                                     database, cache and jobs blocks
+     * @param Trace|null           $trace  PLAN Step 24's tracer shared by all
+     *                                     workers, or null for none; workers
+     *                                     record their job.execute spans into
+     *                                     it (and into the journal it was
+     *                                     built with)
      */
     public function __construct(
         private array $config,
+        private readonly ?Trace $trace = null,
     ) {
     }
 
@@ -69,6 +76,7 @@ final class WorkerJobs
             isset($this->config['jobs']['idempotency_store'])
                 ? (string) $this->config['jobs']['idempotency_store']
                 : null,
+            $this->trace,
         );
     }
 }

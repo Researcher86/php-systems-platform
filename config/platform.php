@@ -82,6 +82,12 @@ return [
         // the queue journal itself - hence .log: a line per record, not a
         // JSON document.
         'idempotency_store' => sys_get_temp_dir() . '/php-systems-platform/idempotency.log',
+        // PLAN Step 24's trace journal: the append-only JSONL file every
+        // process (serve and each pool worker) appends its request/job spans
+        // to, read back by `php bin/platform.php trace <request_id>`. The
+        // same FileStorage contract as the queue journal - a line per span,
+        // not a JSON document.
+        'trace_store' => sys_get_temp_dir() . '/php-systems-platform/trace.log',
     ],
     // PLAN Step 22's failure injection, and the notion of an environment it
     // is gated on: the `worker.crash` pool task, POST /debug/fail-worker,

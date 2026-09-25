@@ -401,6 +401,15 @@ Print the platform's standard metric snapshot as plain text, one
 always readable; the live worker pool contributes its `workers.*` lines
 only when one is answering.
 
+```bash
+php bin/platform.php trace <request_id>
+```
+
+Print the whole trace chain for one request — the serve's `http.request`
+and `db.*` spans plus every worker's `job.execute` span for that
+`request_id`, all read back from the shared JSONL trace journal
+(`jobs.trace_store`). This is the read side of `#Request and Job Tracing`.
+
 ---
 
 # Example API
@@ -1054,9 +1063,13 @@ worker.rss
 
 # Request and Job Tracing
 
-Each request receives a request ID.
+Every HTTP request receives a request ID (`X-Request-ID` on the way in,
+echoed on every response; anything well-formed is kept, otherwise a fresh
+`req-…` is generated). The id stays alive inside the request — records
+database operation spans — and leaks into the queue: the job a write path
+publishes carries the producing request's id in its payload.
 
-Background jobs additionally receive a job ID.
+Background jobs additionally receive a job ID (the queue's own).
 
 The relationship can therefore be followed:
 
@@ -1070,17 +1083,30 @@ HTTP request
 Application
     │
     ▼
-Job
+Database        ← db.read / db.write spans
+    │
+    ▼
+Job             ← job payload carries request_id
     │
  job_id
     ▼
-Worker
+Worker          ← job.execute span (worker_pid, attempt)
     │
     ▼
-Job execution
+Job execution   ← duration, per attempt
 ```
 
-This makes asynchronous work traceable across process boundaries.
+The worker re-opens the producing request's scope from the payload before
+it runs anything, so its execution span and the database calls it makes
+stay correlated to the same `request_id`. Each attempt is its own
+`job.execute` span, so a retried job is the same `job_id` on consecutive
+spans — which answers "which request created the job, which worker ran
+it, how long it took, and did it retry?".
+
+All spans land in one append-only JSONL journal (`jobs.trace_store`), and
+`php bin/platform.php trace <request_id>` prints a request's whole chain
+across processes. Tracing is strictly opt-in at every seam — a process
+without a tracer runs exactly as before.
 
 ---
 

@@ -35,7 +35,16 @@ final readonly class OrderService
     ) {
     }
 
-    public function createOrder(string $customer, mixed $amount, ?string $product = null): Order
+    /**
+     * @param string|null $requestId the PLAN Step 24 request_id of the HTTP
+     *                               request this write answers, echoed into
+     *                               the job payload so the worker can
+     *                               re-open that request's trace scope; null
+     *                               when the caller is not a request at all
+     *                               (a test, a command), whose job simply
+     *                               carries no request_id
+     */
+    public function createOrder(string $customer, mixed $amount, ?string $product = null, ?string $requestId = null): Order
     {
         $customer = $this->normalizeCustomer($customer);
         $amount = $this->normalizeAmount($amount);
@@ -61,10 +70,18 @@ final readonly class OrderService
         // a delivery: `order.created:<order id>` means "this order was
         // created", so whichever of this order's deliveries arrives, the
         // queue-side IdempotencyGuard (PLAN Step 20) answers the same way -
-        // and a service without a producer never sees a key at all.
+        // and a service without a producer never sees a key at all. The
+        // job's payload carries the request_id it originated from (PLAN
+        // Step 24), faithfully and only when the write route knew one.
+        $payload = ['order_id' => $order->id];
+
+        if ($requestId !== null) {
+            $payload['request_id'] = $requestId;
+        }
+
         $this->producer?->dispatch(
             OrderCreatedJob::TYPE,
-            ['order_id' => $order->id],
+            $payload,
             idempotencyKey: 'order.created:' . $order->id,
         );
 

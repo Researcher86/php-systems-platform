@@ -10,6 +10,7 @@ use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Http\Request;
 use PhpSystemsPlatform\Http\Response;
+use PhpSystemsPlatform\Observability\Trace;
 use PhpSystemsPlatform\Queue\BackpressurePolicy;
 
 /**
@@ -39,6 +40,7 @@ final readonly class OrderCreateHandler
         private OrderService $orders,
         private CacheService $cache,
         private ?BackpressurePolicy $backpressure = null,
+        private ?Trace $trace = null,
     ) {
     }
 
@@ -76,7 +78,13 @@ final readonly class OrderCreateHandler
         }
 
         try {
-            $order = $this->orders->createOrder($customer, $amount, $product);
+            // PLAN Step 24: the write route leaks the request_id the
+            // Application boundary opened for THIS request into the job it
+            // publishes (OrderService copies it into the payload), so the
+            // queue-worker side can re-open the same trace scope. No active
+            // request (a direct handle() without a Trace) means null here
+            // and the job simply carries no request_id.
+            $order = $this->orders->createOrder($customer, $amount, $product, $this->trace?->activeRequestId());
         } catch (InvalidArgumentException $e) {
             return Response::json(['error' => $e->getMessage()], 400);
         }

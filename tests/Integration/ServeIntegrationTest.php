@@ -21,6 +21,7 @@ use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Domain\SequentialOrderLoader;
 use PhpSystemsPlatform\Http\Request;
 use PhpSystemsPlatform\Http\RequestMethod;
+use PhpSystemsPlatform\Observability\Trace;
 use PhpSystemsPlatform\Queue\BackpressurePolicy;
 use PhpSystemsPlatform\Queue\JobContext;
 use PhpSystemsPlatform\Queue\JobExecutor;
@@ -1632,7 +1633,7 @@ final class ServeIntegrationTest extends TestCase
      * PLAN Step 20 wiring (jobs.idempotency_store), exercised end to end
      * instead of only through the direct-execution tests.
      */
-    private function drainQueue(?string $idempotencyLogPath = null): void
+    private function drainQueue(?string $idempotencyLogPath = null, ?Trace $trace = null): void
     {
         $clock = new SystemClock();
         $logPath = self::DATA_DIR . '/queue/queue.log';
@@ -1644,6 +1645,7 @@ final class ServeIntegrationTest extends TestCase
             ['host' => self::HOST, 'port' => self::DB_PORT, 'timeout' => 2.0],
             ['host' => self::HOST, 'port' => self::CACHE_PORT, 'timeout' => 2.0],
             $idempotencyLogPath,
+            $trace,
         );
         $pool = new WorkerPool(
             size: 2,
@@ -1755,6 +1757,68 @@ final class ServeIntegrationTest extends TestCase
         return $metrics;
     }
 
+    public function testTraceCorrelatesTheRequestTheJobAndTheWorker(): void
+    {
+        // PLAN Step 24, end to end over the real stack: one X-Request-ID is
+        // echoed by the HTTP boundary, reaches the queue inside the job the
+        // write published, and follows that job into a worker whose
+        // job.execute span - pid, job_id, attempt, duration - is written to
+        // the same JSONL journal as the serve process's own http.request
+        // span. The `trace` CLI (TraceCommandTest) is the read side of the
+        // exact same file.
+        $traceLog = '/tmp/php-systems-platform/trace.log';
+        @unlink($traceLog);
+
+        $requestId = 'req-0102030405060708';
+        [$status, $body, $headers] = $this->request(
+            'POST',
+            '/orders',
+            json_encode(['customer' => 'Traced Ada', 'amount' => 42.0], JSON_THROW_ON_ERROR),
+            ['X-Request-ID: ' . $requestId],
+        );
+
+        self::assertSame(201, $status);
+        self::assertSame($requestId, $this->header($headers, 'X-Request-ID'));
+
+        $order = json_decode((string) $body, true, 512, JSON_THROW_ON_ERROR);
+        self::assertIsArray($order);
+
+        // The job that order.created published carried the request_id into
+        // the queue - the worker has something to re-open.
+        $journal = (string) file_get_contents(self::DATA_DIR . '/queue/queue.log');
+        self::assertStringContainsString('"request_id":"' . $requestId . '"', $journal);
+
+        // The same journal the serve process appends to, now on the worker
+        // side: drainQueue executes the ready job through JobExecutor, which
+        // records its job.execute span under the request_id.
+        $trace = new Trace($traceLog);
+        $this->drainQueue(null, $trace);
+
+        $spans = $trace->readLog($requestId);
+        $operations = array_column($spans, 'operation');
+
+        // The serve process already recorded the http.request span against
+        // the same journal path, so the chain covers both processes.
+        self::assertContains('http.request', $operations);
+        self::assertContains('job.execute', $operations);
+        self::assertContains('db.read', $operations);
+
+        $jobSpan = null;
+
+        foreach ($spans as $span) {
+            if ($span['operation'] === 'job.execute') {
+                $jobSpan = $span;
+            }
+        }
+
+        self::assertIsArray($jobSpan);
+        self::assertSame($requestId, $jobSpan['request_id']);
+        self::assertSame(1, $jobSpan['attempt']);
+        self::assertGreaterThan(0, $jobSpan['worker_pid']);
+        self::assertSame('completed', $jobSpan['meta']['outcome']);
+        self::assertGreaterThan(0.0, $jobSpan['duration']);
+    }
+
     /**
      * @return array<string, mixed>
      */
@@ -1861,12 +1925,12 @@ final class ServeIntegrationTest extends TestCase
     /**
      * @return array{int, string, list<string>} HTTP status, response body, raw headers
      */
-    private function request(string $method, string $path, ?string $body = null): array
+    private function request(string $method, string $path, ?string $body = null, array $headers = []): array
     {
         $options = [
             'http' => [
                 'method' => $method,
-                'header' => 'Content-Type: application/json',
+                'header' => 'Content-Type: application/json' . ($headers === [] ? '' : "\r\n" . implode("\r\n", $headers)),
                 'content' => $body,
                 'timeout' => 5.0,
                 'ignore_errors' => true,

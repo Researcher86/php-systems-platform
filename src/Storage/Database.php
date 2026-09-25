@@ -7,6 +7,7 @@ namespace PhpSystemsPlatform\Storage;
 use PhpMiniDatabase\Client\ClientConfig;
 use PhpMiniDatabase\Client\ConnectionPool;
 use PhpSystemsPlatform\Observability\MetricsRegistry;
+use PhpSystemsPlatform\Observability\Trace;
 
 /**
  * The platform's one seam over php-mini-database: a small, fixed-size pool of
@@ -20,6 +21,13 @@ use PhpSystemsPlatform\Observability\MetricsRegistry;
  * db.operation_duration, so the database load is observable the same way the
  * cache and HTTP paths are. Without one the wrapper behaves exactly as
  * before - observability is the server's wiring decision, never this class's.
+ *
+ * PLAN Step 24: the same opt-in seam carries a Trace. A read/write records
+ * a db.read / db.write span - still correlated to the HTTP request that
+ * issued it (serve opens the request scope around every answer, and a queue
+ * worker re-opens it from a job's payload), because the trace only records
+ * while a request is actually active. Every call keeps its exact behavior
+ * without one.
  */
 final readonly class Database
 {
@@ -31,12 +39,13 @@ final readonly class Database
     public function __construct(
         private ConnectionPool $pool,
         private ?MetricsRegistry $metrics = null,
+        private ?Trace $trace = null,
     ) {
     }
 
-    public static function fromConfig(ClientConfig $config, int $maxConnections = 10, ?MetricsRegistry $metrics = null): self
+    public static function fromConfig(ClientConfig $config, int $maxConnections = 10, ?MetricsRegistry $metrics = null, ?Trace $trace = null): self
     {
-        return new self(new ConnectionPool($config, $maxConnections), $metrics);
+        return new self(new ConnectionPool($config, $maxConnections), $metrics, $trace);
     }
 
     /**
@@ -47,9 +56,9 @@ final readonly class Database
      *
      * @param array<string, mixed> $config
      */
-    public static function connect(array $config, int $maxConnections = 10, ?MetricsRegistry $metrics = null): self
+    public static function connect(array $config, int $maxConnections = 10, ?MetricsRegistry $metrics = null, ?Trace $trace = null): self
     {
-        return self::fromConfig(self::configFrom($config), $maxConnections, $metrics);
+        return self::fromConfig(self::configFrom($config), $maxConnections, $metrics, $trace);
     }
 
     /**
@@ -89,6 +98,7 @@ final readonly class Database
             $this->metrics?->increment(MetricsRegistry::DB_OPERATIONS);
             $this->metrics?->increment(MetricsRegistry::DB_ERRORS);
             $this->metrics?->observe(MetricsRegistry::DB_OPERATION_DURATION, microtime(true) - $startedAt);
+            $this->trace?->record('db.read', microtime(true) - $startedAt, ['meta' => ['ok' => false]]);
             throw $e;
         } finally {
             $this->pool->release($connection);
@@ -96,6 +106,7 @@ final readonly class Database
 
         $this->metrics?->increment(MetricsRegistry::DB_OPERATIONS);
         $this->metrics?->observe(MetricsRegistry::DB_OPERATION_DURATION, microtime(true) - $startedAt);
+        $this->trace?->record('db.read', microtime(true) - $startedAt, ['meta' => ['ok' => true]]);
 
         return $rows;
     }
@@ -118,6 +129,7 @@ final readonly class Database
             $this->metrics?->increment(MetricsRegistry::DB_OPERATIONS);
             $this->metrics?->increment(MetricsRegistry::DB_ERRORS);
             $this->metrics?->observe(MetricsRegistry::DB_OPERATION_DURATION, microtime(true) - $startedAt);
+            $this->trace?->record('db.write', microtime(true) - $startedAt, ['meta' => ['ok' => false]]);
             throw $e;
         } finally {
             $this->pool->release($connection);
@@ -125,6 +137,7 @@ final readonly class Database
 
         $this->metrics?->increment(MetricsRegistry::DB_OPERATIONS);
         $this->metrics?->observe(MetricsRegistry::DB_OPERATION_DURATION, microtime(true) - $startedAt);
+        $this->trace?->record('db.write', microtime(true) - $startedAt, ['meta' => ['ok' => true]]);
 
         return $affected;
     }

@@ -44,6 +44,7 @@ use PhpSystemsPlatform\Memory\MemoryReporter;
 use PhpSystemsPlatform\Memory\MemorySnapshot;
 use PhpSystemsPlatform\Observability\MetricsRegistry;
 use PhpSystemsPlatform\Observability\MetricsReporter;
+use PhpSystemsPlatform\Observability\Trace;
 use PhpSystemsPlatform\Queue\BackpressurePolicy;
 use PhpSystemsPlatform\Queue\JobExecutor;
 use PhpSystemsPlatform\Queue\JobRegistry;
@@ -100,6 +101,7 @@ final class PlatformCli
         'idempotency:demo' => 'Demonstrate at-least-once delivery and the idempotency guard.',
         'failure:demo' => 'Reproduce the failure scenarios end to end.',
         'metrics' => 'Print the platform\'s standard metric snapshot.',
+        'trace' => 'Print the spans recorded for one request_id: trace <request_id>.',
     ];
 
     /**
@@ -174,6 +176,7 @@ final class PlatformCli
             'idempotency:demo' => $this->idempotencyDemo(),
             'failure:demo' => $this->failureDemo(),
             'metrics' => $this->metricsCommand(),
+            'trace' => $this->traceCommand(array_slice($argv, 2)),
 
             // Real handlers land with their implementation phase.
             default => $this->notImplemented($command),
@@ -196,7 +199,13 @@ final class PlatformCli
         // at construction time; serve()'s own report picks it up afterwards.
         $systemMetrics = new MetricsRegistry();
 
-        $database = Database::connect($databaseConfig, 10, $systemMetrics);
+        // PLAN Step 24: the serve side's tracer over the same journal the
+        // pool workers write into, so one request's whole chain - this
+        // process's request/database spans and every worker's job.execute
+        // spans - is readable from a single file.
+        $systemTrace = new Trace($this->traceStorePath($config));
+
+        $database = Database::connect($databaseConfig, 10, $systemMetrics, $systemTrace);
 
         $ownsDatabaseServer = false;
 
@@ -320,7 +329,7 @@ final class PlatformCli
             new MemoryReporter(),
         );
 
-        $application = $this->application($database, $cache, $producer, $runner, $config['queue']['data_dir'] . '/queue.log', $config['workers']['data_dir'] . '/workers.status.json', (int) $config['queue']['max_size'], $failureInjector, $metricsReporter);
+        $application = $this->application($database, $cache, $producer, $runner, $config['queue']['data_dir'] . '/queue.log', $config['workers']['data_dir'] . '/workers.status.json', (int) $config['queue']['max_size'], $failureInjector, $metricsReporter, $systemTrace);
 
         $loop->onReadable($server->socket(), static function () use ($loop, $server, $parser, $encoder, $application, $metrics, $logger): void {
             $connection = $server->accept();
@@ -405,7 +414,7 @@ final class PlatformCli
      * environments, per the step's own "only enabled in development/demo
      * mode" rule; a production serve has no such route at all.
      */
-    private function application(Database $database, CacheService $cache, ?Producer $producer = null, ?ConcurrentTaskRunner $runner = null, string $queueLogPath = '', string $workersStatusPath = '', ?int $maxQueueSize = null, ?WorkerFailureInjector $failureInjector = null, ?MetricsReporter $metricsReporter = null): Application
+    private function application(Database $database, CacheService $cache, ?Producer $producer = null, ?ConcurrentTaskRunner $runner = null, string $queueLogPath = '', string $workersStatusPath = '', ?int $maxQueueSize = null, ?WorkerFailureInjector $failureInjector = null, ?MetricsReporter $metricsReporter = null, ?Trace $trace = null): Application
     {
         $orders = new OrderService(new OrderRepository($database), $producer);
 
@@ -418,7 +427,7 @@ final class PlatformCli
 
         $router = new Router();
         $router->get('/health', (new HealthHandler())(...));
-        $router->post('/orders', (new OrderCreateHandler($orders, $cache, $backpressure))(...));
+        $router->post('/orders', (new OrderCreateHandler($orders, $cache, $backpressure, $trace))(...));
         $router->get('/orders/{id}', (new OrderReadHandler($orders, $cache))(...));
         $router->put('/orders/{id}', (new OrderUpdateHandler($orders, $cache))(...));
         $router->get('/parallel', (new ParallelHandler($runner))(...));
@@ -439,7 +448,10 @@ final class PlatformCli
             $router->post('/debug/fail-worker', (new FailWorkerHandler($failureInjector))(...));
         }
 
-        return new Application($router, $metricsReporter?->registry());
+        // PLAN Step 24: the Application boundary opens and closes one request
+        // scope per HTTP answer, echoes X-Request-ID and records the
+        // http.request span - all off, the moment no tracer is wired.
+        return new Application($router, $metricsReporter?->registry(), $trace);
     }
 
     /**
@@ -2073,6 +2085,92 @@ final class PlatformCli
         echo implode(PHP_EOL, $lines) . PHP_EOL;
 
         return 0;
+    }
+
+    /**
+     * PLAN Step 24's read side: the whole trace chain for one request_id,
+     * from the same JSONL journal serve and every pool worker write into.
+     * The serve's own http.request / db.* spans and each worker's
+     * job.execute span are one contiguous answer to the demo's four
+     * questions - which request created the job, which worker ran it, how
+     * long it took, and how many retries it burned.
+     *
+     * @param list<string> $args
+     */
+    private function traceCommand(array $args): int
+    {
+        $requestId = $args[0] ?? null;
+
+        if (!is_string($requestId) || $requestId === '') {
+            fwrite(STDERR, "usage: php bin/platform.php trace <request_id>\n");
+
+            return 1;
+        }
+
+        $config = $this->config();
+        $spans = new Trace($this->traceStorePath($config))->readLog($requestId);
+
+        if ($spans === []) {
+            echo sprintf("No spans recorded for %s.\n", $requestId);
+
+            return 0;
+        }
+
+        foreach ($spans as $span) {
+            $meta = is_array($span['meta'] ?? null) ? $span['meta'] : [];
+            $fields = '';
+
+            if (($span['job_id'] ?? null) !== null) {
+                $fields .= sprintf(' job=%s', (string) $span['job_id']);
+            }
+
+            if (($span['worker_pid'] ?? null) !== null) {
+                $fields .= sprintf(' worker_pid=%d', (int) $span['worker_pid']);
+            }
+
+            if (($span['attempt'] ?? null) !== null) {
+                $fields .= sprintf(' attempt=%d', (int) $span['attempt']);
+            }
+
+            $detail = '';
+
+            if (isset($meta['method'], $meta['path'], $meta['status'])) {
+                $detail .= sprintf(' %s %s -> %d', (string) $meta['method'], (string) $meta['path'], (int) $meta['status']);
+            }
+
+            if (isset($meta['outcome'])) {
+                $detail .= sprintf(' %s', (string) $meta['outcome']);
+
+                if (isset($meta['error'])) {
+                    $detail .= sprintf(' (%s)', (string) $meta['error']);
+                }
+            }
+
+            printf(
+                "%-13s %7.4fs%s%s%s\n",
+                (string) $span['operation'],
+                (float) $span['duration'],
+                $detail,
+                $fields,
+                ' ' . (string) $span['request_id'],
+            );
+        }
+
+        return 0;
+    }
+
+    /**
+     * The trace journal path: `jobs.trace_store` when the config declares
+     * one, nothing when it does not - a config predating Step 24 runs the
+     * platform with tracing simply off.
+     *
+     * @param array<string, mixed> $config
+     */
+    private function traceStorePath(array $config): ?string
+    {
+        return isset($config['jobs']['trace_store']) && is_string($config['jobs']['trace_store'])
+            ? $config['jobs']['trace_store']
+            : null;
     }
 
     /**

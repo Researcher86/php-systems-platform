@@ -18,6 +18,7 @@ use PhpSystemsPlatform\Http\Response;
 use PhpSystemsPlatform\Http\RouteNotFoundException;
 use PhpSystemsPlatform\Http\Router;
 use PhpSystemsPlatform\Observability\MetricsRegistry;
+use PhpSystemsPlatform\Observability\Trace;
 use Throwable;
 
 /**
@@ -38,11 +39,19 @@ final readonly class Application implements RequestHandler
     public function __construct(
         private Router $router,
         private ?MetricsRegistry $metrics = null,
+        private ?Trace $trace = null,
     ) {
     }
 
     public function handle(HttpRequest $request): HttpResponse
     {
+        // PLAN Step 24: every HTTP request gets a request_id, kept when the
+        // client carried one (X-Request-ID) so a chain can span the whole
+        // system, generated otherwise. The scope stays open for everything
+        // this request does - database calls, the queue write path - and
+        // the id is echoed on the answer so the caller can follow its chain
+        // into the queue. Without a Trace none of this runs.
+        $requestId = $this->trace?->beginRequest($request->header('x-request-id'));
         $startedAt = microtime(true);
         $response = $this->respond($request);
 
@@ -59,6 +68,18 @@ final readonly class Application implements RequestHandler
             }
 
             $this->metrics->observe(MetricsRegistry::HTTP_REQUEST_DURATION, microtime(true) - $startedAt);
+        }
+
+        if ($this->trace !== null) {
+            $response->headers->set('X-Request-ID', (string) $requestId);
+            $this->trace->record('http.request', microtime(true) - $startedAt, [
+                'meta' => [
+                    'method' => $request->method->value,
+                    'path' => $request->path(),
+                    'status' => $response->status->value,
+                ],
+            ]);
+            $this->trace->finishRequest();
         }
 
         return $response;

@@ -15,6 +15,7 @@ use PhpSystemsPlatform\Http\Request;
 use PhpSystemsPlatform\Http\Response;
 use PhpSystemsPlatform\Http\Router;
 use PhpSystemsPlatform\Observability\MetricsRegistry;
+use PhpSystemsPlatform\Observability\Trace;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -129,13 +130,52 @@ final class ApplicationTest extends TestCase
         self::assertGreaterThan(0.0, $metrics->get(MetricsRegistry::HTTP_REQUEST_DURATION));
     }
 
-    private function request(HttpMethod $method, string $target): HttpRequest
+    public function testRequestIdIsEchoedAndRecordedAsASpan(): void
     {
+        // PLAN Step 24: a well-formed inbound X-Request-ID is kept for the
+        // whole request, echoed on the answer, and each answer records one
+        // http.request span carrying it; a request without one gets a fresh
+        // id. Without a Trace nothing runs - the boundary is a no-op.
+        $router = new Router();
+        $router->get('/health', (new HealthHandler())(...));
+
+        $trace = new Trace();
+        $application = new Application($router, null, $trace);
+
+        $answer = $application->handle($this->request(HttpMethod::GET, '/health', ['X-Request-ID' => 'req-0102030405060708']));
+
+        self::assertSame('req-0102030405060708', $answer->headers->get('X-Request-ID'));
+        self::assertNull($trace->activeRequestId(), 'the request scope must be closed after the answer');
+
+        $spans = $trace->spans();
+
+        self::assertCount(1, $spans);
+        self::assertSame('http.request', $spans[0]['operation']);
+        self::assertSame('req-0102030405060708', $spans[0]['request_id']);
+        self::assertSame(['method' => 'GET', 'path' => '/health', 'status' => 200], $spans[0]['meta']);
+
+        // A second request opens its own fresh scope - no leakage between
+        // requests, and the id generation itself is covered.
+        $application->handle($this->request(HttpMethod::GET, '/health'));
+
+        self::assertCount(2, $trace->spans());
+        self::assertNotSame('req-0102030405060708', $trace->spans()[1]['request_id']);
+        self::assertMatchesRegularExpression('/^req-[a-f0-9]{16}$/', (string) $trace->spans()[1]['request_id']);
+    }
+
+    private function request(HttpMethod $method, string $target, array $headers = []): HttpRequest
+    {
+        $httpHeaders = new Headers();
+
+        foreach ($headers as $name => $value) {
+            $httpHeaders->set($name, $value);
+        }
+
         return new HttpRequest(
             method: $method,
             target: $target,
             version: HttpVersion::HTTP_1_1,
-            headers: new Headers(),
+            headers: $httpHeaders,
             body: '',
         );
     }

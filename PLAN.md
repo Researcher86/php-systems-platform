@@ -2391,7 +2391,7 @@ Phase 5 is complete when all of the following are true.
 * [x] Request IDs exist.
 * [x] Job IDs exist.
 * [x] Basic request/job tracing works.
-* [ ] Platform status is available.
+* [x] Platform status is available.
 
 ## Failure handling
 

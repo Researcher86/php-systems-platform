@@ -911,6 +911,34 @@ the worker's `job.execute` span alongside the serve's `http.request` in
 the same journal) and `tests/Integration/TraceCommandTest` (the CLI
 printing the chain as a subprocess).
 
+### Platform status (Step 25, shipped)
+
+Step 25's `platform.php status` is the whole platform in one view: every
+component's state and headline numbers, laid out as PLAN.md's example
+prints it. It is deliberately a *read* command - it starts nothing and
+owns nothing - and its three sources map straight onto the platform's own
+observability seams:
+
+- a running serve's `GET /metrics`: the HTTP/cache/database counters and
+  the master process's own RSS exist only inside serve, so `status` reads
+  them over HTTP - one raw `GET /metrics` with `Connection: close`, the
+  same wire exercise the vendor component's `bin/client.php` demonstrates
+  (`Cli\PlatformCli::statusMetrics`);
+- live probes: a short TCP connect to the database and cache ports and
+  one `stats()` round-trip to the pool (`Cli\PlatformCli::statusWorkerStats`,
+  mirroring `MetricsReporter`'s own aggregation so the numbers agree with a
+  /metrics read) tell *running* from *stopped*;
+- the durable queue journal: `depth`/`processed`/`failed` read exactly the
+  way `queue:status` and `GET /queue/status` read them.
+
+No source failing is an error: a stopped platform is what the command is
+for, so HTTP/cache/database counters print as 0 when no serve is answering
+(this `process.rss` reads as n/a) while pool- and journal-backed sections
+stay truthful on their own. Exercised by `tests/Integration/
+StatusCommandTest` (every section printed, the journal-backed Queue
+counters) and one `ServeIntegrationTest` method that asserts all four
+components answer *running* when the real stack is up.
+
 ## Adapter mapping (used by later phases)
 
 | Platform class                 | Wraps                                  |

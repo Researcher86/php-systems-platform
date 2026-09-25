@@ -1820,6 +1820,48 @@ final class ServeIntegrationTest extends TestCase
     }
 
     /**
+     * PLAN Step 25, against the real running platform: the `status` CLI
+     * reports the whole stack - it reads the serve's /metrics over HTTP for
+     * the HTTP/cache/database counters and the master process's own RSS,
+     * probes the database/cache ports, and asks the worker pool for its
+     * live tally. Every component this serve owns must answer running.
+     */
+    public function testStatusCommandReportsTheRunningPlatform(): void
+    {
+        $process = proc_open(
+            [PHP_BINARY, dirname(__DIR__, 2) . '/bin/platform.php', 'status'],
+            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+        );
+
+        self::assertIsResource($process);
+
+        $output = stream_get_contents($pipes[1]);
+        $errors = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $code = proc_close($process);
+
+        self::assertSame(0, $code, $errors . $output);
+
+        $output = (string) $output;
+
+        foreach (['HTTP Server', 'Cache', 'Database', 'Queue', 'Workers', 'Memory'] as $section) {
+            self::assertStringContainsString($section, $output);
+        }
+
+        // HTTP + Cache + Database + Queue all answer running on this serve.
+        self::assertSame(4, preg_match_all('/^  status:\s+running$/m', $output), $output);
+
+        // The serve-side counters are readable across the process boundary:
+        // requests grew with the traffic this class's tests produced, and the
+        // master's own RSS is reported over /metrics.
+        self::assertMatchesRegularExpression('/^  requests:\s+\d+/m', $output);
+        self::assertMatchesRegularExpression('/^  master RSS:\s+[\d.]+M$/m', $output);
+        self::assertMatchesRegularExpression('/^  workers RSS:\s+(?:[\d.]+M|n\/a)$/m', $output);
+    }
+
+    /**
      * @return array<string, mixed>
      */
     private function postOrder(string $customer, float|int $amount): array

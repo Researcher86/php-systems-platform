@@ -177,6 +177,7 @@ final class PlatformCli
             'failure:demo' => $this->failureDemo(),
             'metrics' => $this->metricsCommand(),
             'trace' => $this->traceCommand(array_slice($argv, 2)),
+            'status' => $this->statusCommand(),
 
             // Real handlers land with their implementation phase.
             default => $this->notImplemented($command),
@@ -2171,6 +2172,257 @@ final class PlatformCli
         return isset($config['jobs']['trace_store']) && is_string($config['jobs']['trace_store'])
             ? $config['jobs']['trace_store']
             : null;
+    }
+
+    /**
+     * PLAN Step 25's whole-platform view: one command that shows every
+     * component's state and headline numbers, laid out exactly as PLAN.md's
+     * example prints it. The simplest way to see the whole platform.
+     *
+     * Three kinds of source back the sections:
+     *
+     *   a running serve's GET /metrics - the HTTP, cache and database
+     *                                    counters and the master process's
+     *                                    own RSS exist only inside serve, so
+     *                                    they are read over HTTP when a
+     *                                    serve is answering
+     *   live probes                    - a TCP connect to each server's port
+     *                                    and one stats round-trip to the pool
+     *                                    tell running from stopped
+     *   the durable queue journal      - the queue.* counts, read exactly the
+     *                                    way queue:status and GET
+     *                                    /queue/status read them
+     *
+     * Every source is optional and none failing is an error: a stopped
+     * platform IS what this command is for. Counters that only live in a
+     * serve that is not answering print as 0 (process.rss reads as n/a),
+     * while the pool- and journal-backed sections stay truthful on their own.
+     */
+    private function statusCommand(): int
+    {
+        $config = $this->config();
+        $http = $config['http'];
+        $databaseConfig = $config['database'];
+        $cacheConfig = $config['cache'];
+        $workersConfig = $config['workers'];
+
+        $metrics = $this->statusMetrics($http);
+        $httpRunning = $metrics !== null;
+        $databaseRunning = $this->waitForPort((string) $databaseConfig['host'], (int) $databaseConfig['port'], 0.3);
+        $cacheRunning = $this->waitForPort((string) $cacheConfig['host'], (int) $cacheConfig['port'], 0.3);
+        [$poolRunning, $workers] = $this->statusWorkerStats($workersConfig);
+        $queue = new QueueJournal($config['queue']['data_dir'] . '/queue.log')->snapshot();
+
+        printf("PHP Systems Platform\n--------------------\n\n");
+
+        $this->printStatusSection('HTTP Server', [
+            'status' => $httpRunning ? 'running' : 'stopped',
+            'requests' => $this->formatStatusCount($this->statusMetricInt($metrics, 'http.requests')),
+            'errors' => $this->formatStatusCount($this->statusMetricInt($metrics, 'http.errors')),
+        ]);
+
+        $this->printStatusSection('Cache', [
+            'status' => $cacheRunning ? 'running' : 'stopped',
+            'hits' => $this->formatStatusCount($this->statusMetricInt($metrics, 'cache.hit')),
+            'misses' => $this->formatStatusCount($this->statusMetricInt($metrics, 'cache.miss')),
+        ]);
+
+        $this->printStatusSection('Database', [
+            'status' => $databaseRunning ? 'running' : 'stopped',
+            'operations' => $this->formatStatusCount($this->statusMetricInt($metrics, 'db.operations')),
+        ]);
+
+        $this->printStatusSection('Queue', [
+            'status' => $poolRunning ? 'running' : 'stopped',
+            'depth' => $this->formatStatusCount($queue['depth']),
+            'processed' => $this->formatStatusCount($queue['completed']),
+            'failed' => $this->formatStatusCount($queue['failed']),
+        ]);
+
+        $this->printStatusSection('Workers', [
+            'total' => $this->formatStatusCount($workers['active'] + $workers['failed']),
+            'idle' => $this->formatStatusCount($workers['idle']),
+            'busy' => $this->formatStatusCount($workers['busy']),
+            'failed' => $this->formatStatusCount($workers['failed']),
+        ]);
+
+        // master = the serve process itself (process.rss, which serve
+        // reports about itself over /metrics); workers RSS is the pool's
+        // average, taken from /metrics or computed from the same stats when
+        // no serve is answering.
+        $this->printStatusSection('Memory', [
+            'master RSS' => $this->formatMegabytes($this->statusMetricInt($metrics, 'process.rss')),
+            'workers RSS' => $this->formatMegabytes($this->statusMetricInt($metrics, 'worker.rss') ?? $workers['rss']),
+        ]);
+
+        return 0;
+    }
+
+    /**
+     * One status section exactly as PLAN.md prints it: a heading line, then
+     * one row per fact with the labels right-padded to one column so every
+     * value aligns.
+     *
+     * @param array<string, string> $rows
+     */
+    private function printStatusSection(string $title, array $rows): void
+    {
+        printf("%s\n", $title);
+
+        foreach ($rows as $label => $value) {
+            printf("  %-14s%s\n", $label . ':', $value);
+        }
+
+        echo "\n";
+    }
+
+    /**
+     * A count with thousands separators when it exists, plain 0 when it
+     * does not - the live counters a stopped serve cannot still hold are
+     * surfaced as 0 rather than as an error.
+     */
+    private function formatStatusCount(?int $value): string
+    {
+        return number_format($value ?? 0);
+    }
+
+    /**
+     * One metric out of a /metrics dump, when the dump carries it.
+     *
+     * @param array<string, string>|null $metrics
+     */
+    private function statusMetricInt(?array $metrics, string $name): ?int
+    {
+        return $metrics !== null && isset($metrics[$name]) ? (int) $metrics[$name] : null;
+    }
+
+    /**
+     * Read a running serve's GET /metrics from another process - the only
+     * place the http/cache/db counters and the master's own RSS live. One
+     * raw HTTP GET over a single connection (the same exercise the vendor
+     * component's own bin/client.php demonstrates): "Connection: close"
+     * makes "read until EOF" a complete answer, and everything after the
+     * blank header/body separator is the metric dump.
+     *
+     * Null when no serve answers or the answer carries no metric lines, and
+     * the caller then falls back to what live probes and the journal still
+     * prove.
+     *
+     * @param array<string, mixed> $http
+     *
+     * @return array<string, string>|null metric name → value, exactly as the
+     *                                 snapshot printed them
+     */
+    private function statusMetrics(array $http): ?array
+    {
+        $host = (string) $http['host'];
+        $port = (int) $http['port'];
+        $socket = @stream_socket_client(sprintf('tcp://%s:%d', $host, $port), $errorCode, $errorMessage, 0.5);
+
+        if ($socket === false) {
+            return null;
+        }
+
+        stream_set_timeout($socket, 2);
+
+        fwrite($socket, sprintf("GET /metrics HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", $host));
+
+        $raw = stream_get_contents($socket);
+        fclose($socket);
+
+        if (!is_string($raw) || $raw === '') {
+            return null;
+        }
+
+        $lines = preg_split('/\R/', $raw);
+
+        if ($lines === false) {
+            return null;
+        }
+
+        $metrics = [];
+        $inBody = false;
+
+        foreach ($lines as $line) {
+            if (!$inBody) {
+                $inBody = $line === '';
+
+                continue;
+            }
+
+            $pair = explode(' ', $line, 2);
+
+            if (count($pair) === 2) {
+                $metrics[$pair[0]] = $pair[1];
+            }
+        }
+
+        return $metrics === [] ? null : $metrics;
+    }
+
+    /**
+     * Ask the pool for its workers' live tally - the Worker table of PLAN
+     * Step 25's example - and whether a Master answered at all. The tally
+     * mirrors MetricsReporter's own aggregation (active/busy/idle/failed,
+     * average worker RSS) so these numbers and a /metrics read agree, but
+     * the two are read independently: a pool working without a serve still
+     * answers.
+     *
+     * @param array<string, mixed> $config
+     *
+     * @return array{0: bool, 1: array{active: int, busy: int, idle: int, failed: int, rss: int|null}}
+     *               whether the pool answered, then the tally
+     */
+    private function statusWorkerStats(array $config): array
+    {
+        $client = new WorkerPoolClient((string) $config['socket'], (float) $config['task_timeout']);
+
+        try {
+            $stats = $client->stats();
+        } catch (\Throwable) {
+            return [false, ['active' => 0, 'busy' => 0, 'idle' => 0, 'failed' => 0, 'rss' => null]];
+        }
+
+        $client->close();
+
+        $active = 0;
+        $busy = 0;
+        $idle = 0;
+        $failed = 0;
+        $samples = [];
+
+        foreach ($stats as $worker) {
+            $state = (string) $worker['state'];
+
+            if ($state === 'DEAD') {
+                $failed++;
+
+                continue;
+            }
+
+            $active++;
+
+            if ($state === 'BUSY') {
+                $busy++;
+            } elseif ($state === 'IDLE') {
+                $idle++;
+            }
+
+            if ($worker['memoryBytes'] !== null) {
+                $samples[] = (int) $worker['memoryBytes'];
+            }
+        }
+
+        return [
+            true,
+            [
+                'active' => $active,
+                'busy' => $busy,
+                'idle' => $idle,
+                'failed' => $failed,
+                'rss' => $samples === [] ? null : (int) round(array_sum($samples) / count($samples)),
+            ],
+        ];
     }
 
     /**

@@ -339,7 +339,51 @@ with a forked process per independent part, and on the worker pool.
 php bin/platform.php status
 ```
 
-Show the current platform status.
+The simplest way to see the whole platform: every component's state and
+headline numbers in one view (Step 25).
+
+```text
+PHP Systems Platform
+--------------------
+
+HTTP Server
+  status:       running
+  requests:     131
+  errors:       8
+
+Cache
+  status:       running
+  hits:         1,024
+  misses:       310
+
+Database
+  status:       running
+  operations:   9,532
+
+Queue
+  status:       running
+  depth:        23
+  processed:    4,821
+  failed:       12
+
+Workers
+  total:        4
+  idle:         2
+  busy:         2
+  failed:       0
+
+Memory
+  master RSS:   30.2M
+  workers RSS:  4.0M
+```
+
+Three sources back the sections: a running serve's `GET /metrics` supplies
+the HTTP/cache/database counters and the master process's own RSS (they
+only exist inside serve, so they are read over HTTP); a TCP probe of each
+server's port and one round-trip to the pool tell *running* from *stopped*;
+and the queue journal supplies `depth`/`processed`/`failed` the same way
+`GET /queue/status` does. Every source is optional, so a stopped platform is
+exactly what the command reports — none of the probes failing is an error.
 
 ```bash
 php bin/platform.php demo

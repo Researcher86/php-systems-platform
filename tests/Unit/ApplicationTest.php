@@ -14,6 +14,7 @@ use PhpSystemsPlatform\Application\Handlers\HealthHandler;
 use PhpSystemsPlatform\Http\Request;
 use PhpSystemsPlatform\Http\Response;
 use PhpSystemsPlatform\Http\Router;
+use PhpSystemsPlatform\Observability\MetricsRegistry;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -105,6 +106,27 @@ final class ApplicationTest extends TestCase
 
         self::assertSame(503, $response->statusCode());
         self::assertSame('{"error":"failure_injection_disabled"}', $response->body);
+    }
+
+    public function testRequestsRecordIntoTheSharedMetricsRegistry(): void
+    {
+        // PLAN Step 23: with a registry attached, the HTTP boundary reports
+        // a request count, the answer's whole duration, and one error count
+        // per non-2xx response. Without one nothing is recorded - the same
+        // path every existing test already exercises.
+        $router = new Router();
+        $router->get('/health', (new HealthHandler())(...));
+
+        $metrics = new MetricsRegistry();
+        $application = new Application($router, $metrics);
+
+        $application->handle($this->request(HttpMethod::GET, '/health'));
+        $error = $application->handle($this->request(HttpMethod::GET, '/nope'));
+
+        self::assertSame(404, $error->statusCode());
+        self::assertSame(2, $metrics->get(MetricsRegistry::HTTP_REQUESTS));
+        self::assertSame(1, $metrics->get(MetricsRegistry::HTTP_ERRORS));
+        self::assertGreaterThan(0.0, $metrics->get(MetricsRegistry::HTTP_REQUEST_DURATION));
     }
 
     private function request(HttpMethod $method, string $target): HttpRequest

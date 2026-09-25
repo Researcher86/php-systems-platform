@@ -17,6 +17,7 @@ use PhpSystemsPlatform\Http\RequestMethod;
 use PhpSystemsPlatform\Http\Response;
 use PhpSystemsPlatform\Http\RouteNotFoundException;
 use PhpSystemsPlatform\Http\Router;
+use PhpSystemsPlatform\Observability\MetricsRegistry;
 use Throwable;
 
 /**
@@ -36,10 +37,34 @@ final readonly class Application implements RequestHandler
 {
     public function __construct(
         private Router $router,
+        private ?MetricsRegistry $metrics = null,
     ) {
     }
 
     public function handle(HttpRequest $request): HttpResponse
+    {
+        $startedAt = microtime(true);
+        $response = $this->respond($request);
+
+        // PLAN Step 23: the HTTP boundary reports into the shared registry -
+        // one count per request, one count per non-2xx answer, and the
+        // request's whole duration (route dispatch and response building).
+        // Without a registry none of this runs; observability is serve()'s
+        // wiring decision.
+        if ($this->metrics !== null) {
+            $this->metrics->increment(MetricsRegistry::HTTP_REQUESTS);
+
+            if ($response->status->value >= 400) {
+                $this->metrics->increment(MetricsRegistry::HTTP_ERRORS);
+            }
+
+            $this->metrics->observe(MetricsRegistry::HTTP_REQUEST_DURATION, microtime(true) - $startedAt);
+        }
+
+        return $response;
+    }
+
+    private function respond(HttpRequest $request): HttpResponse
     {
         $internal = new Request(
             method: RequestMethod::from($request->method->value),

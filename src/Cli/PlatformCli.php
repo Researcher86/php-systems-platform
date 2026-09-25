@@ -28,6 +28,7 @@ use PhpMiniHttpServer\Support\StderrLogger;
 use PhpSystemsPlatform\Application\Application;
 use PhpSystemsPlatform\Application\Handlers\FailWorkerHandler;
 use PhpSystemsPlatform\Application\Handlers\HealthHandler;
+use PhpSystemsPlatform\Application\Handlers\MetricsHandler;
 use PhpSystemsPlatform\Application\Handlers\OrderCreateHandler;
 use PhpSystemsPlatform\Application\Handlers\OrderReadHandler;
 use PhpSystemsPlatform\Application\Handlers\OrderUpdateHandler;
@@ -39,7 +40,10 @@ use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Domain\SequentialOrderLoader;
 use PhpSystemsPlatform\Http\Router;
 use PhpSystemsPlatform\Memory\ForkedMemoryDemo;
+use PhpSystemsPlatform\Memory\MemoryReporter;
 use PhpSystemsPlatform\Memory\MemorySnapshot;
+use PhpSystemsPlatform\Observability\MetricsRegistry;
+use PhpSystemsPlatform\Observability\MetricsReporter;
 use PhpSystemsPlatform\Queue\BackpressurePolicy;
 use PhpSystemsPlatform\Queue\JobExecutor;
 use PhpSystemsPlatform\Queue\JobRegistry;
@@ -95,6 +99,7 @@ final class PlatformCli
         'workers:memory' => 'Measure worker process memory (1, 2, 4, 8 workers).',
         'idempotency:demo' => 'Demonstrate at-least-once delivery and the idempotency guard.',
         'failure:demo' => 'Reproduce the failure scenarios end to end.',
+        'metrics' => 'Print the platform\'s standard metric snapshot.',
     ];
 
     /**
@@ -168,6 +173,7 @@ final class PlatformCli
             'workers:memory' => $this->workersMemory(array_slice($argv, 2)),
             'idempotency:demo' => $this->idempotencyDemo(),
             'failure:demo' => $this->failureDemo(),
+            'metrics' => $this->metricsCommand(),
 
             // Real handlers land with their implementation phase.
             default => $this->notImplemented($command),
@@ -185,7 +191,12 @@ final class PlatformCli
         $config = $this->config();
         $databaseConfig = $config['database'];
 
-        $database = Database::connect($databaseConfig);
+        // PLAN Step 23: the one shared registry every component reports into.
+        // Wired before any client so the database and cache can be handed it
+        // at construction time; serve()'s own report picks it up afterwards.
+        $systemMetrics = new MetricsRegistry();
+
+        $database = Database::connect($databaseConfig, 10, $systemMetrics);
 
         $ownsDatabaseServer = false;
 
@@ -201,7 +212,7 @@ final class PlatformCli
 
         $cacheConfig = $config['cache'];
 
-        $cache = CacheService::fromConfig($cacheConfig);
+        $cache = CacheService::fromConfig($cacheConfig, $systemMetrics);
 
         $ownsCacheServer = false;
 
@@ -295,7 +306,21 @@ final class PlatformCli
         $metrics = new ServerMetrics();
         $loop = new SelectLoop();
 
-        $application = $this->application($database, $cache, $producer, $runner, $config['queue']['data_dir'] . '/queue.log', $config['workers']['data_dir'] . '/workers.status.json', (int) $config['queue']['max_size'], $failureInjector);
+        // PLAN Step 23: the platform's own report sits next to the
+        // component's ServerMetrics and reads the shared registry plus the
+        // live sources (queue journal, worker pool, this process's memory).
+        // It backs both the /metrics route and the `metrics` CLI command.
+        $metricsReporter = new MetricsReporter(
+            $systemMetrics,
+            new QueueJournal($config['queue']['data_dir'] . '/queue.log'),
+            new WorkerPoolClient(
+                $workersConfig['socket'],
+                (float) $workersConfig['task_timeout'],
+            ),
+            new MemoryReporter(),
+        );
+
+        $application = $this->application($database, $cache, $producer, $runner, $config['queue']['data_dir'] . '/queue.log', $config['workers']['data_dir'] . '/workers.status.json', (int) $config['queue']['max_size'], $failureInjector, $metricsReporter);
 
         $loop->onReadable($server->socket(), static function () use ($loop, $server, $parser, $encoder, $application, $metrics, $logger): void {
             $connection = $server->accept();
@@ -380,7 +405,7 @@ final class PlatformCli
      * environments, per the step's own "only enabled in development/demo
      * mode" rule; a production serve has no such route at all.
      */
-    private function application(Database $database, CacheService $cache, ?Producer $producer = null, ?ConcurrentTaskRunner $runner = null, string $queueLogPath = '', string $workersStatusPath = '', ?int $maxQueueSize = null, ?WorkerFailureInjector $failureInjector = null): Application
+    private function application(Database $database, CacheService $cache, ?Producer $producer = null, ?ConcurrentTaskRunner $runner = null, string $queueLogPath = '', string $workersStatusPath = '', ?int $maxQueueSize = null, ?WorkerFailureInjector $failureInjector = null, ?MetricsReporter $metricsReporter = null): Application
     {
         $orders = new OrderService(new OrderRepository($database), $producer);
 
@@ -400,6 +425,13 @@ final class PlatformCli
         $router->get('/queue/status', (new QueueStatusHandler($queueLogPath))(...));
         $router->get('/workers', (new WorkersStatusHandler($workersStatusPath))(...));
 
+        // PLAN Step 23: observability is serve()'s wiring decision - the
+        // route exists exactly when serve handed application() a reporter,
+        // and serve always does.
+        if ($metricsReporter !== null) {
+            $router->get('/metrics', (new MetricsHandler($metricsReporter))(...));
+        }
+
         // PLAN Step 22: the failure injection endpoint is not null-tolerant
         // - its absence on purpose is the point. A serve without injection
         // simply never registers the route.
@@ -407,7 +439,7 @@ final class PlatformCli
             $router->post('/debug/fail-worker', (new FailWorkerHandler($failureInjector))(...));
         }
 
-        return new Application($router);
+        return new Application($router, $metricsReporter?->registry());
     }
 
     /**
@@ -2002,6 +2034,43 @@ final class PlatformCli
         printf("  queue.completed %d\n", $snapshot['completed']);
         printf("  queue.failed    %d\n", $snapshot['failed']);
         printf("  queue.retried   %d\n", $snapshot['retried']);
+
+        return 0;
+    }
+
+    /**
+     * PLAN Step 23's CLI side of observability, mirroring GET /metrics: the
+     * standard metric snapshot over the same MetricsReporter a serve wires.
+     * Without a serve running the registry is empty, so what shows is the
+     * pull side - queue journal, live worker pool (when one answers) and
+     * this process's own RSS - which a pool that refuses to answer simply
+     * omits rather than letting fail the whole read.
+     */
+    private function metricsCommand(): int
+    {
+        $config = $this->config();
+
+        $reporter = new MetricsReporter(
+            new MetricsRegistry(),
+            new QueueJournal($config['queue']['data_dir'] . '/queue.log'),
+            new WorkerPoolClient(
+                $config['workers']['socket'],
+                (float) $config['workers']['task_timeout'],
+            ),
+            new MemoryReporter(),
+        );
+
+        $lines = [];
+
+        foreach ($reporter->snapshot() as $name => $value) {
+            if (is_float($value)) {
+                $value = sprintf('%.4f', $value);
+            }
+
+            $lines[] = sprintf('%s %s', $name, $value);
+        }
+
+        echo implode(PHP_EOL, $lines) . PHP_EOL;
 
         return 0;
     }

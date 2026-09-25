@@ -6,6 +6,7 @@ namespace PhpSystemsPlatform\Storage;
 
 use PhpMiniDatabase\Client\ClientConfig;
 use PhpMiniDatabase\Client\ConnectionPool;
+use PhpSystemsPlatform\Observability\MetricsRegistry;
 
 /**
  * The platform's one seam over php-mini-database: a small, fixed-size pool of
@@ -13,6 +14,12 @@ use PhpMiniDatabase\Client\ConnectionPool;
  * reconnects a stale connection between requests, which is all this wrapper
  * needs to care about - the SQL itself stays in the repositories, and the
  * component's types never leak past here.
+ *
+ * PLAN Step 23: with a MetricsRegistry attached, every read/write reports
+ * db.operations, db.errors (a failed query still counts the operation) and
+ * db.operation_duration, so the database load is observable the same way the
+ * cache and HTTP paths are. Without one the wrapper behaves exactly as
+ * before - observability is the server's wiring decision, never this class's.
  */
 final readonly class Database
 {
@@ -23,12 +30,13 @@ final readonly class Database
 
     public function __construct(
         private ConnectionPool $pool,
+        private ?MetricsRegistry $metrics = null,
     ) {
     }
 
-    public static function fromConfig(ClientConfig $config, int $maxConnections = 10): self
+    public static function fromConfig(ClientConfig $config, int $maxConnections = 10, ?MetricsRegistry $metrics = null): self
     {
-        return new self(new ConnectionPool($config, $maxConnections));
+        return new self(new ConnectionPool($config, $maxConnections), $metrics);
     }
 
     /**
@@ -39,9 +47,9 @@ final readonly class Database
      *
      * @param array<string, mixed> $config
      */
-    public static function connect(array $config, int $maxConnections = 10): self
+    public static function connect(array $config, int $maxConnections = 10, ?MetricsRegistry $metrics = null): self
     {
-        return self::fromConfig(self::configFrom($config), $maxConnections);
+        return self::fromConfig(self::configFrom($config), $maxConnections, $metrics);
     }
 
     /**
@@ -72,13 +80,24 @@ final readonly class Database
      */
     public function read(string $sql, array $parameters = []): array
     {
+        $startedAt = microtime(true);
         $connection = $this->pool->acquire();
 
         try {
-            return $connection->query($sql, $parameters)->fetchAll();
+            $rows = $connection->query($sql, $parameters)->fetchAll();
+        } catch (\Throwable $e) {
+            $this->metrics?->increment(MetricsRegistry::DB_OPERATIONS);
+            $this->metrics?->increment(MetricsRegistry::DB_ERRORS);
+            $this->metrics?->observe(MetricsRegistry::DB_OPERATION_DURATION, microtime(true) - $startedAt);
+            throw $e;
         } finally {
             $this->pool->release($connection);
         }
+
+        $this->metrics?->increment(MetricsRegistry::DB_OPERATIONS);
+        $this->metrics?->observe(MetricsRegistry::DB_OPERATION_DURATION, microtime(true) - $startedAt);
+
+        return $rows;
     }
 
     /**
@@ -90,13 +109,24 @@ final readonly class Database
      */
     public function write(string $sql, array $parameters = []): ?int
     {
+        $startedAt = microtime(true);
         $connection = $this->pool->acquire();
 
         try {
-            return $connection->query($sql, $parameters)->affectedRows();
+            $affected = $connection->query($sql, $parameters)->affectedRows();
+        } catch (\Throwable $e) {
+            $this->metrics?->increment(MetricsRegistry::DB_OPERATIONS);
+            $this->metrics?->increment(MetricsRegistry::DB_ERRORS);
+            $this->metrics?->observe(MetricsRegistry::DB_OPERATION_DURATION, microtime(true) - $startedAt);
+            throw $e;
         } finally {
             $this->pool->release($connection);
         }
+
+        $this->metrics?->increment(MetricsRegistry::DB_OPERATIONS);
+        $this->metrics?->observe(MetricsRegistry::DB_OPERATION_DURATION, microtime(true) - $startedAt);
+
+        return $affected;
     }
 
     public function close(): void

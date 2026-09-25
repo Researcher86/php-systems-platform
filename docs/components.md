@@ -832,6 +832,45 @@ endpoint crashing and replacing a real shared-pool worker) and
 `tests/Integration/FailureDemoCommandTest`, which runs `failure:demo` end
 to end as a subprocess.
 
+### Observability (Step 23, shipped)
+
+Step 23's metric set is one common model read from two halves. The first
+is `Observability\MetricsRegistry`, the in-process accumulator every
+component reports into with the standard names (`MetricsRegistry::*`
+constants — the vocabulary is readable in one place, a typo is a fatal
+error, a name is a contract): counters only go up, gauges keep only their
+latest value, durations keep sum+count and read back as their average.
+It is wired null-tolerantly, so components behave as before without one:
+`Application` records `http.requests`/`http.errors`/`http.request_duration`
+around each handled request, `CacheService` the `cache.hit`/`cache.miss`/
+`cache.operations` on its read/write path, `Database` the
+`db.operations`/`db.errors`/`db.operation_duration` around each query.
+
+The second half is `Observability\MetricsReporter`, the single reader that
+turns the registry plus the live sources into one snapshot: the queue
+journal answers `queue.*` the way `queue:status` reads it, the worker pool
+Master answers `workers.active`/`busy`/`idle`/`failed`, `worker.task_duration`
+(Σ working seconds / handled requests) and `worker.rss` (average memory)
+off `WorkerPoolClient::stats()`, and `process.rss` comes from
+`MemoryReporter`. A pool that will not answer simply leaves its lines out
+rather than failing the read.
+
+Two surfaces expose the same dump, one `name value` per line, sorted:
+`GET /metrics` (wired in `serve` the way every other route is; the
+`Application\Handlers\MetricsHandler` says the route exists exactly when
+serve hands `application()` a reporter) and the `platform.php metrics`
+command, which needs no serve behind it. The dump format is plain text on
+purpose — the contract is the metric names, not a server-specific
+encoding.
+
+Exercised by `tests/Unit/Observability/MetricsRegistryTest` (the model's
+three kinds), `tests/Unit/ApplicationTest` (a request and a 404 flowing
+into the registry), `tests/Integration/ServeIntegrationTest` (the
+endpoint exposing every standard name, and exact deltas across a
+create+read+404 round trip through HTTP, cache and database) and
+`tests/Integration/MetricsCommandTest` (the CLI printing the journal-based
+snapshot as a subprocess).
+
 ## Adapter mapping (used by later phases)
 
 | Platform class                 | Wraps                                  |

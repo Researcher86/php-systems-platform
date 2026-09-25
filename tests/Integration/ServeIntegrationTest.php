@@ -1668,6 +1668,93 @@ final class ServeIntegrationTest extends TestCase
         $pool->shutdown();
     }
 
+    public function testMetricsEndpointExposesTheStandardMetricNames(): void
+    {
+        // PLAN Step 23: GET /metrics answers with the platform's full
+        // standard set as plain text, one `name value` per line, sorted.
+        [$status, $body] = $this->request('GET', '/metrics');
+
+        self::assertSame(200, $status);
+
+        $metrics = $this->metricLines((string) $body);
+
+        foreach ([
+            'http.requests', 'http.errors', 'http.request_duration',
+            'cache.hit', 'cache.miss', 'cache.operations',
+            'db.operations', 'db.errors', 'db.operation_duration',
+            'queue.depth', 'queue.published', 'queue.completed', 'queue.failed', 'queue.retried',
+            'workers.active', 'workers.busy', 'workers.idle', 'workers.failed',
+            'worker.task_duration', 'worker.rss', 'process.rss',
+        ] as $name) {
+            self::assertArrayHasKey($name, $metrics, 'missing metric ' . $name);
+        }
+
+        $names = array_keys($metrics);
+        $sorted = $names;
+        sort($sorted);
+        self::assertSame($sorted, $names, 'metrics must be one per line, sorted');
+    }
+
+    public function testMetricsReflectTrafficAcrossHttpCacheAndDatabase(): void
+    {
+        // A delta-based read: snapshot, drive real traffic, read again. The
+        // deltas are exact because only this test's calls sit between the two
+        // /metrics reads (each of which records itself after its snapshot, so
+        // the second read includes the first).
+        $before = $this->metricLines($this->metricsBody());
+
+        $order = $this->postOrder('Metric Ada', 42.0);
+        $id = $order['id'];
+
+        $this->request('GET', '/orders/' . $id);
+        $this->request('GET', '/orders/' . $id);
+        [$status] = $this->request('GET', '/missing-order-metrics-check');
+        self::assertSame(404, $status);
+
+        $after = $this->metricLines($this->metricsBody());
+
+        // The first /metrics read, the create, two reads and the 404 are all
+        // requests; only the 404 is counted as an error.
+        self::assertSame($before['http.requests'] + 5, $after['http.requests']);
+        self::assertSame($before['http.errors'] + 1, $after['http.errors']);
+
+        // The create writes the entry through the cache (one set), and each
+        // read is exactly one lookup - so three operations, two of which are
+        // a hit or a miss each.
+        self::assertSame($before['cache.operations'] + 3, $after['cache.operations']);
+        self::assertSame(
+            $before['cache.hit'] + $before['cache.miss'] + 2,
+            $after['cache.hit'] + $after['cache.miss'],
+        );
+
+        // The create wrote the row; the reads may hit the database too.
+        self::assertGreaterThan($before['db.operations'], $after['db.operations']);
+        self::assertGreaterThan(0.0, $after['http.request_duration']);
+    }
+
+    /** @return array<string, int|float> */
+    private function metricsBody(): string
+    {
+        [$status, $body] = $this->request('GET', '/metrics');
+
+        self::assertSame(200, $status);
+
+        return (string) $body;
+    }
+
+    /** @return array<string, int|float> */
+    private function metricLines(string $body): array
+    {
+        $metrics = [];
+
+        foreach (preg_split('/\R/', trim($body)) as $line) {
+            [$name, $value] = explode(' ', $line, 2);
+            $metrics[$name] = str_contains($value, '.') ? (float) $value : (int) $value;
+        }
+
+        return $metrics;
+    }
+
     /**
      * @return array<string, mixed>
      */

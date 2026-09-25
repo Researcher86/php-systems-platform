@@ -7,6 +7,7 @@ namespace PhpSystemsPlatform\Cache;
 use PhpMiniCache\Sdk\CacheClient;
 use PhpMiniCache\Sdk\CacheClientException;
 use PhpSystemsPlatform\Domain\Order;
+use PhpSystemsPlatform\Observability\MetricsRegistry;
 
 /**
  * The platform's facade over one shared php-mini-cache connection, plus the
@@ -32,11 +33,12 @@ final readonly class CacheService
     public function __construct(
         private CacheClient $client,
         private CacheCounters $counters,
+        private ?MetricsRegistry $metrics = null,
     ) {
     }
 
     /** @param array<string, mixed> $config host, port, timeout */
-    public static function fromConfig(array $config): self
+    public static function fromConfig(array $config, ?MetricsRegistry $metrics = null): self
     {
         return new self(
             new CacheClient(
@@ -45,6 +47,7 @@ final readonly class CacheService
                 timeoutSeconds: $config['timeout'],
             ),
             new CacheCounters(),
+            $metrics,
         );
     }
 
@@ -69,6 +72,8 @@ final readonly class CacheService
 
         if ($json === null) {
             $this->counters->misses++;
+            $this->metrics?->increment(MetricsRegistry::CACHE_MISSES);
+            $this->metrics?->increment(MetricsRegistry::CACHE_OPERATIONS);
 
             return null;
         }
@@ -77,11 +82,15 @@ final readonly class CacheService
 
         if (!is_array($order)) {
             $this->counters->misses++;
+            $this->metrics?->increment(MetricsRegistry::CACHE_MISSES);
+            $this->metrics?->increment(MetricsRegistry::CACHE_OPERATIONS);
 
             return null;
         }
 
         $this->counters->hits++;
+        $this->metrics?->increment(MetricsRegistry::CACHE_HITS);
+        $this->metrics?->increment(MetricsRegistry::CACHE_OPERATIONS);
 
         return $order;
     }
@@ -102,6 +111,7 @@ final readonly class CacheService
             self::ORDER_TTL_SECONDS,
         );
         $this->counters->sets++;
+        $this->metrics?->increment(MetricsRegistry::CACHE_OPERATIONS);
     }
 
     /**
@@ -114,6 +124,7 @@ final readonly class CacheService
     {
         $this->client->delete(self::ORDER_KEY_PREFIX . $id);
         $this->counters->deletes++;
+        $this->metrics?->increment(MetricsRegistry::CACHE_OPERATIONS);
     }
 
     public function close(): void

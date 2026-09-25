@@ -2387,7 +2387,7 @@ Phase 5 is complete when all of the following are true.
 
 ## Observability
 
-* [ ] Metrics exist.
+* [x] Metrics exist.
 * [ ] Request IDs exist.
 * [ ] Job IDs exist.
 * [ ] Basic request/job tracing works.

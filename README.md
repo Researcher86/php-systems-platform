@@ -391,6 +391,16 @@ job and run the real dispatcher until the journal retires it into the
 injection only in development/demo environments; in a production one this
 command refuses with `PLATFORM_ENV=dev ...` as the hint.
 
+```bash
+php bin/platform.php metrics
+```
+
+Print the platform's standard metric snapshot as plain text, one
+`name value` per line — the same dump a running serve exposes at
+`GET /metrics`. The journal's `queue.*` lines and this process's RSS are
+always readable; the live worker pool contributes its `workers.*` lines
+only when one is answering.
+
 ---
 
 # Example API
@@ -962,7 +972,32 @@ delivery is skipped, stock drops by one), printing the counts.
 
 # Observability
 
-The platform exposes basic metrics across all major components.
+The platform exposes a standard metric set across all major components
+(Step 23): one shared registry collects what accumulates in-process — the
+HTTP, cache and database counters — while the queue, worker and memory
+numbers are pulled live from their own sources at read time. The two
+halves meet in one snapshot:
+
+```http
+GET /metrics
+```
+
+```bash
+php bin/platform.php metrics
+```
+
+Both answer with the same plain-text dump, one `name value` per line,
+sorted:
+
+```text
+cache.hit 3
+db.operations 5
+http.requests 12
+...
+```
+
+Every name below is the contract — a component reports into the registry
+or the reporter reads it back, but the string never changes.
 
 ### HTTP
 

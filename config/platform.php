@@ -6,6 +6,13 @@
  * to override - the file exists so the operational shape of the system is
  * visible in one place instead of being scattered across commands.
  */
+
+// Read as false-then-default rather than `getenv(...) ?: '1'`: the string
+// '0' is falsy in PHP, so the elvis form would turn CACHE_ENABLED=0 back
+// into 1 and the off switch would be the one value here that cannot be set
+// to false.
+$cacheEnabled = getenv('CACHE_ENABLED');
+
 return [
     'http' => [
         'host' => '127.0.0.1',
@@ -38,6 +45,20 @@ return [
         'port' => 6380,
         'data_dir' => sys_get_temp_dir() . '/php-systems-platform/cache',
         'timeout' => 2.0,
+        // PLAN Step 29's "GET /orders/{id} without cache" needs a platform
+        // with no cache tier, not one whose cache is down: a refused or
+        // timed-out connection is itself a cost, and a benchmark that
+        // measured it would be measuring the failure, not the database.
+        // CACHE_ENABLED=0 therefore keeps the cache server from being started
+        // at all and answers every lookup with a miss. The off values are
+        // listed rather than cast: an environment variable is a string, and
+        // CACHE_ENABLED=false is something people write, but (bool) 'false'
+        // is true - the cast would read "off" as "on".
+        'enabled' => !in_array(
+            strtolower(trim($cacheEnabled === false ? '1' : $cacheEnabled)),
+            ['0', 'false', 'no', 'off'],
+            true,
+        ),
     ],
     'queue' => [
         'data_dir' => sys_get_temp_dir() . '/php-systems-platform/queue',

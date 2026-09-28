@@ -1,0 +1,414 @@
+<?php
+
+declare(strict_types=1);
+
+namespace PhpSystemsPlatform\Benchmarks;
+
+use Closure;
+use PhpSystemsPlatform\Storage\Database;
+use PhpSystemsPlatform\Storage\Migrator;
+use RuntimeException;
+use SplFileInfo;
+
+/**
+ * PLAN Step 29, run end to end: the load tests as one command that owns a
+ * platform for its duration, takes the five measurements the plan asks for,
+ * and stops everything it started.
+ *
+ * The five tests are five different questions about the same endpoint, which
+ * is why one run answers all of them from a single corpus of orders:
+ *
+ *   A  GET /health       what the server itself costs with no work behind it
+ *   C1 GET /orders/{id}  every order read for the first time: every request a
+ *                        cache miss, so every request reaches the database
+ *   C2 GET /orders/{id}  the same orders again: every request a cache hit, so
+ *                        the gap between C1 and C2 is the cache doing its job
+ *   B  GET /orders/{id}  the same orders on a serve started with
+ *                        CACHE_ENABLED=0 - which is what "without cache" means
+ *                        here: no cache server, no cache lookup, no fallback
+ *   D  background jobs   the platform's own queue benchmark, 1,000 jobs
+ *   E  worker scaling    the same workload through 1, 2, 4 and 8 workers
+ *
+ * The corpus is written straight into the database rather than created over
+ * HTTP, and that is not a shortcut: the create path populates the cache on
+ * write, so an order created through the API is already cached and a "cache
+ * miss" phase built from API-created orders would be measuring hits and
+ * calling them misses. Direct inserts mean the read phases start against an
+ * empty cache, and cost one write per order instead of an HTTP round trip.
+ *
+ * C1 and C2 run in that order on purpose: C2's hits are C1's misses having
+ * done their job, so the hit phase is a consequence of the miss phase instead
+ * of a second thing that had to be arranged.
+ *
+ * Test B restarts the platform, because the cache tier is decided when serve
+ * starts and not per request. Both serves are stopped by SIGTERM like any
+ * other process; a run that fails on the way keeps its child logs, since the
+ * serve's own output is the only place a start-up failure explains itself.
+ */
+final class LoadTestRunner
+{
+    public const float SERVE_START_DEADLINE_SECONDS = 25.0;
+
+    public const float SERVE_STOP_DEADLINE_SECONDS = 20.0;
+
+    public const int MAX_REQUESTS = 20000;
+
+    private const float PORT_PROBE_TIMEOUT_SECONDS = 0.3;
+
+    /**
+     * @param Closure(int, int): (array<string, mixed>|null) $queueBenchmark
+     *        the platform's own queue measurement, so Tests D and E run the
+     *        code path the `benchmark` command runs rather than a second one
+     * @param list<int>                              $workerCounts  Test E
+     */
+    public function __construct(
+        private readonly Closure $queueBenchmark,
+        private readonly int $requests = 1000,
+        private readonly int $concurrency = 8,
+        private readonly int $jobs = 1000,
+        private readonly int $baselineWorkers = 4,
+        private readonly array $workerCounts = [1, 2, 4, 8],
+        private readonly ProcessCostReader $costs = new ProcessCostReader(),
+    ) {
+    }
+
+    public function run(): LoadTestReport
+    {
+        $this->refuseWorkloadOutsideASaneRange();
+
+        /** @var array<string, mixed> $config */
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+        $http = (array) $config['http'];
+        $database = (array) $config['database'];
+        $port = (int) $http['port'];
+        $baseUrl = sprintf('http://%s:%d', $http['host'], $port);
+
+        $this->refuseIfPlatformAlreadyRunning($port);
+        $this->stopStaleDatabaseServer($database);
+        $this->removeTree(dirname((string) $database['data_dir']));
+
+        $logDir = sys_get_temp_dir() . '/php-systems-platform-load-' . uniqid('', true);
+        $this->mkdir($logDir);
+
+        try {
+            $this->startServe($logDir, 'serve', $port, []);
+            $corpus = $this->seedCorpus($database);
+            $paths = array_map(static fn (string $id): string => '/orders/' . $id, $corpus);
+
+            $phases = [
+                $this->phase('A', 'GET /health (server only)', ['/health'], $this->requests, $baseUrl),
+                $this->phase('C1', 'GET /orders/{id} (first read of each order)', $paths, count($paths), $baseUrl),
+                $this->phase('C2', 'GET /orders/{id} (same orders, now cached)', $paths, count($paths), $baseUrl),
+            ];
+
+            $this->stopServe();
+
+            $this->startServe($logDir, 'serve-nocache', $port, ['CACHE_ENABLED' => '0']);
+            $phases[] = $this->phase('B', 'GET /orders/{id} (CACHE_ENABLED=0)', $paths, count($paths), $baseUrl);
+            $this->stopServe();
+
+            $scaling = [];
+            $queue = [];
+
+            // Test D and Test E are asked for separately and overlap by one
+            // run: D is the platform's own configuration, E walks the pool
+            // sizes. Measuring the shared size twice would put two sets of
+            // slightly different numbers for the same configuration in one
+            // report, so the unique sizes are measured once and D is the row
+            // for the configured size.
+            $counts = array_values(array_unique([$this->baselineWorkers, ...$this->workerCounts]));
+            sort($counts);
+
+            foreach ($counts as $workers) {
+                $metrics = ($this->queueBenchmark)($this->jobs, $workers);
+
+                if (!is_array($metrics)) {
+                    throw new RuntimeException(sprintf(
+                        'The queue measurement for %d workers could not be taken.',
+                        $workers,
+                    ));
+                }
+
+                $scaling[] = $metrics;
+
+                if ($workers === $this->baselineWorkers) {
+                    $queue = $metrics;
+                }
+            }
+
+            $this->removeTree($logDir);
+
+            return new LoadTestReport(
+                $this->environment($config, $baseUrl, count($corpus)),
+                $phases,
+                $queue,
+                $scaling,
+            );
+        } finally {
+            $this->stopServe();
+        }
+    }
+
+    /**
+     * One measurement: $requests requests over $paths, with the serve's CPU
+     * and peak memory read either side of them.
+     *
+     * The request count is passed rather than derived from the path list
+     * because the two phases mean different things by it: the health phase
+     * cycles one path, and each read phase is given exactly one request per
+     * order, which is what makes "every request a miss" true rather than
+     * approximately true.
+     *
+     * @param list<string> $paths
+     *
+     * @return array<string, mixed>
+     */
+    private function phase(string $test, string $name, array $paths, int $requests, string $baseUrl): array
+    {
+        $load = new HttpLoadTest($baseUrl, $this->concurrency);
+        $before = $this->costs->read($this->servePid);
+        $result = $load->run($test, $paths, $requests);
+        $after = $this->costs->read($this->servePid);
+
+        return ['test' => $test, 'name' => $name]
+            + $result->toArray()
+            + [
+                'serve_cpu_seconds' => $after->cpuSince($before),
+                'serve_peak_rss_mb' => round($after->peakRssBytes / (1024 * 1024), 1),
+            ];
+    }
+
+    /**
+     * Write the corpus the read phases address.
+     *
+     * The rows are inserted directly because they are read-only input to a
+     * benchmark: the write path's job is to be measured elsewhere, and its
+     * cache-populating side effect would make the miss phases lie.
+     *
+     * @param array<string, mixed> $database
+     *
+     * @return list<string> the seeded order ids
+     */
+    private function seedCorpus(array $database): array
+    {
+        $db = Database::connect($database);
+        $ids = [];
+        $now = gmdate('Y-m-d\TH:i:s\Z');
+
+        try {
+            // The serve has already migrated a fresh data directory, but the
+            // schema is cheap to assert and this way the runner does not
+            // depend on having been run after some other process did it.
+            Migrator::migrate($db);
+
+            for ($i = 0; $i < $this->requests; $i++) {
+                $id = sprintf('load-%06d', $i);
+                $db->write(
+                    'INSERT INTO orders (id, customer, amount, product, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    [$id, 'Load Test Customer', '19.99', 'SKU-STANDARD', 'created', $now, $now],
+                );
+                $ids[] = $id;
+            }
+        } finally {
+            $db->close();
+        }
+
+        return $ids;
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     *
+     * @return array<string, mixed>
+     */
+    private function environment(array $config, string $baseUrl, int $corpus): array
+    {
+        return [
+            'base_url' => $baseUrl,
+            'php' => PHP_VERSION,
+            'os' => php_uname(),
+            'cpu_cores' => (int) (trim((string) shell_exec('nproc 2>/dev/null')) ?: 0),
+            'memory_limit' => (string) ini_get('memory_limit'),
+            'concurrency' => $this->concurrency,
+            'requests_per_phase' => $this->requests,
+            'corpus_orders' => $corpus,
+            'queue_jobs' => $this->jobs,
+            'scaling_worker_counts' => implode(',', $this->workerCounts),
+            'workers_configured' => (int) $config['workers']['count'],
+            'queue_max_size' => (int) $config['queue']['max_size'],
+            'cache_enabled_for_b' => 'no (CACHE_ENABLED=0)',
+        ];
+    }
+
+    private function refuseWorkloadOutsideASaneRange(): void
+    {
+        if ($this->requests < 1 || $this->requests > self::MAX_REQUESTS) {
+            throw new RuntimeException(sprintf(
+                'requests must be between 1 and %d; a run writes one row per request.',
+                self::MAX_REQUESTS,
+            ));
+        }
+
+        if ($this->concurrency < 1 || $this->concurrency > 64) {
+            throw new RuntimeException('concurrency must be between 1 and 64.');
+        }
+
+        if ($this->jobs < 1 || $this->jobs > 5000) {
+            throw new RuntimeException('jobs must be between 1 and 5000.');
+        }
+    }
+
+    private function refuseIfPlatformAlreadyRunning(int $port): void
+    {
+        if ($this->portAnswers($port)) {
+            throw new RuntimeException(sprintf(
+                'The platform is already answering on port %d. Stop the running serve before loading it.',
+                $port,
+            ));
+        }
+    }
+
+    /**
+     * A serve that was killed can leave the database server it started behind.
+     * Its pid file is the only unambiguous owner, and the data directory is
+     * about to be wiped for a fresh platform.
+     *
+     * @param array<string, mixed> $database
+     */
+    private function stopStaleDatabaseServer(array $database): void
+    {
+        if (!$this->portAnswers((int) $database['port'], 0.5)) {
+            return;
+        }
+
+        $pidFile = (string) $database['data_dir'] . '/minidb.pid';
+        $pid = is_file($pidFile) ? (int) trim((string) file_get_contents($pidFile)) : 0;
+
+        if ($pid > 0) {
+            posix_kill($pid, SIGTERM);
+            $this->waitFor(
+                static fn (): bool => !posix_kill($pid, 0),
+                self::SERVE_STOP_DEADLINE_SECONDS,
+                'the stale database server to stop',
+            );
+        }
+    }
+
+    /**
+     * @param array<string, string> $env
+     */
+    private function startServe(string $logDir, string $name, int $port, array $env): void
+    {
+        $proc = proc_open(
+            [PHP_BINARY, dirname(__DIR__, 2) . '/bin/platform.php', 'serve'],
+            [
+                1 => ['file', $logDir . '/' . $name . '.out', 'a'],
+                2 => ['file', $logDir . '/' . $name . '.err', 'a'],
+            ],
+            $pipes,
+            null,
+            $env === [] ? null : array_merge(getenv(), $env),
+        );
+
+        if (!is_resource($proc)) {
+            throw new RuntimeException('Could not start a serve process for the load run.');
+        }
+
+        $this->serveProcess = $proc;
+        $this->servePid = (int) proc_get_status($proc)['pid'];
+
+        if (!$this->portAnswers($port, self::SERVE_START_DEADLINE_SECONDS)) {
+            throw new RuntimeException(sprintf(
+                'The serve did not start listening on port %d. Output: %s',
+                $port,
+                (string) @file_get_contents($logDir . '/' . $name . '.out'),
+            ));
+        }
+    }
+
+    /**
+     * Stop the serve this run started, by SIGTERM, and wait for it: the exit
+     * is what tells a graceful stop from a kill, and a load run that leaves a
+     * serve behind has taken the port the next run needs.
+     */
+    private function stopServe(): void
+    {
+        if (!is_resource($this->serveProcess)) {
+            return;
+        }
+
+        proc_terminate($this->serveProcess);
+        $this->waitFor(
+            fn (): bool => !proc_get_status($this->serveProcess)['running'],
+            self::SERVE_STOP_DEADLINE_SECONDS,
+            'the serve process to stop on SIGTERM',
+        );
+        proc_close($this->serveProcess);
+        $this->serveProcess = null;
+    }
+
+    private function waitFor(Closure $probe, float $deadlineSeconds, string $what): void
+    {
+        $deadline = microtime(true) + $deadlineSeconds;
+
+        while (microtime(true) < $deadline) {
+            if ($probe()) {
+                return;
+            }
+
+            usleep(50_000);
+        }
+
+        throw new RuntimeException(sprintf('Timed out waiting for %s.', $what));
+    }
+
+    private function portAnswers(int $port, float $timeoutSeconds = self::PORT_PROBE_TIMEOUT_SECONDS): bool
+    {
+        $deadline = microtime(true) + $timeoutSeconds;
+
+        while (microtime(true) < $deadline) {
+            $socket = @stream_socket_client('tcp://127.0.0.1:' . $port, $code, $message, 0.2);
+
+            if ($socket !== false) {
+                fclose($socket);
+
+                return true;
+            }
+
+            usleep(50_000);
+        }
+
+        return false;
+    }
+
+    private function mkdir(string $dir): void
+    {
+        if (!is_dir($dir) && !@mkdir($dir, 0o777, true) && !is_dir($dir)) {
+            throw new RuntimeException(sprintf('Could not create "%s".', $dir));
+        }
+    }
+
+    private function removeTree(string $dir): void
+    {
+        if (!is_dir($dir)) {
+            return;
+        }
+
+        $entries = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::CHILD_FIRST,
+        );
+
+        foreach ($entries as $entry) {
+            /** @var SplFileInfo $entry */
+            $entry->isDir() ? @rmdir($entry->getPathname()) : @unlink($entry->getPathname());
+        }
+
+        @rmdir($dir);
+    }
+
+    /** @var resource|null */
+    private $serveProcess = null;
+
+    private int $servePid = 0;
+}

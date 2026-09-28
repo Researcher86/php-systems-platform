@@ -35,6 +35,7 @@ use PhpSystemsPlatform\Application\Handlers\OrderUpdateHandler;
 use PhpSystemsPlatform\Application\Handlers\ParallelHandler;
 use PhpSystemsPlatform\Application\Handlers\QueueStatusHandler;
 use PhpSystemsPlatform\Application\Handlers\WorkersStatusHandler;
+use PhpSystemsPlatform\Benchmarks\LoadTestRunner;
 use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Demo\PlatformDemo;
 use PhpSystemsPlatform\Domain\OrderService;
@@ -96,6 +97,7 @@ final class PlatformCli
         'status' => 'Show the state of every platform component.',
         'demo' => 'Run the complete end-to-end platform story.',
         'benchmark' => 'Run the queue benchmark: benchmark <jobs> <workers>.',
+        'load' => 'Run the Step 29 load tests: load [--requests=N] [--concurrency=N] [--jobs=N] [--workers=1,2,4,8] [--json].',
         'orders:compare' => 'Compare sequential and concurrent order loading: orders:compare <rounds> <delay-ms>.',
         'memory:demo' => 'Demonstrate fork() and copy-on-write memory behavior.',
         'workers:memory' => 'Measure worker process memory (1, 2, 4, 8 workers).',
@@ -171,6 +173,7 @@ final class PlatformCli
             'queue:job' => $this->queueJob(array_slice($argv, 2)),
             'workers:status' => $this->workersStatus(),
             'benchmark' => $this->queueBenchmark(array_slice($argv, 2)),
+            'load' => $this->loadTests(array_slice($argv, 2)),
             'orders:compare' => $this->ordersCompare(array_slice($argv, 2)),
             'memory:demo' => $this->memoryDemo(),
             'workers:memory' => $this->workersMemory(array_slice($argv, 2)),
@@ -242,7 +245,13 @@ final class PlatformCli
         $ownsCacheServer = false;
 
         try {
-            $ownsCacheServer = $this->ensureCacheServer($cacheConfig);
+            // CACHE_ENABLED=0 is a platform with no cache tier: no server is
+            // started, because a cache nobody reads is a process nobody asked
+            // for, and the line printed here is how the operator tells the two
+            // configurations apart in a load test's output.
+            $ownsCacheServer = $cache->isEnabled()
+                ? $this->ensureCacheServer($cacheConfig)
+                : $this->skipCacheServer($cacheConfig);
         } catch (RuntimeException $e) {
             fwrite(STDERR, $e->getMessage() . PHP_EOL);
             $database->close();
@@ -613,6 +622,23 @@ final class PlatformCli
     private function cacheServerBinary(): string
     {
         return dirname(__DIR__, 2) . '/bin/cache.php';
+    }
+
+    /**
+     * Announce a cache tier that was configured away (CACHE_ENABLED=0).
+     *
+     * It answers the same question ensureCacheServer() answers - is a cache
+     * server needed, and did this process start one - with the answer the
+     * configuration asked for, so the rest of serve() needs no special case
+     * and the shutdown path has nothing to stop.
+     *
+     * @param array<string, mixed> $config
+     */
+    private function skipCacheServer(array $config): bool
+    {
+        printf("Cache disabled (CACHE_ENABLED): no cache server on tcp://%s:%d\n", $config['host'], $config['port']);
+
+        return false;
     }
 
     /**
@@ -1170,6 +1196,121 @@ final class PlatformCli
             return 1;
         }
 
+        $metrics = $this->measureQueue($jobs, $workers);
+
+        if ($metrics === null) {
+            return 1;
+        }
+
+        printf("Queue benchmark: %d jobs, %d pool workers\n", $metrics['jobs'], $metrics['workers']);
+        printf("  total processing time  %.4fs\n", $metrics['wall_seconds']);
+        printf("  throughput             %.1f jobs/s\n", $metrics['throughput_per_sec']);
+        printf("  average latency        %.2f ms\n", $metrics['avg_latency_ms']);
+        printf("  p95 latency            %.2f ms\n", $metrics['p95_latency_ms']);
+        printf("  queue depth            %d\n", $metrics['queue_depth']);
+        printf("  worker utilization     %.1f%%\n", $metrics['worker_utilization'] * 100);
+
+        return 0;
+    }
+
+    /**
+     * PLAN Step 29: the load tests, as one run with one report.
+     *
+     * The command owns the flags and the baseline; the measurement belongs to
+     * `LoadTestRunner`, and the queue numbers are this class's own
+     * `measureQueue` so Test D and Test E are the `benchmark` command's
+     * workload rather than a lookalike.
+     *
+     * @param list<string> $args
+     */
+    private function loadTests(array $args): int
+    {
+        $options = ['requests' => 1000, 'concurrency' => 8, 'jobs' => 1000, 'workers' => '1,2,4,8', 'json' => false];
+
+        foreach ($args as $arg) {
+            if ($arg === '--json') {
+                $options['json'] = true;
+
+                continue;
+            }
+
+            if (!preg_match('/^--(requests|concurrency|jobs|workers)=(.+)$/', $arg, $matches)) {
+                fwrite(STDERR, sprintf("Unknown option \"%s\".\n", $arg));
+                $this->loadUsage();
+
+                return 1;
+            }
+
+            $options[$matches[1]] = $matches[2];
+        }
+
+        $workerCounts = array_values(array_filter(array_map(
+            static fn (string $count): int => (int) trim($count),
+            explode(',', (string) $options['workers']),
+        ), static fn (int $count): bool => $count > 0));
+
+        if ($workerCounts === []) {
+            fwrite(STDERR, "--workers needs at least one pool size, for example --workers=1,2,4,8.\n");
+
+            return 1;
+        }
+
+        $config = $this->config();
+        $runner = new LoadTestRunner(
+            queueBenchmark: fn (int $jobs, int $workers): ?array => $this->measureQueue($jobs, $workers),
+            requests: (int) $options['requests'],
+            concurrency: (int) $options['concurrency'],
+            jobs: (int) $options['jobs'],
+            baselineWorkers: (int) $config['workers']['count'],
+            workerCounts: $workerCounts,
+        );
+
+        try {
+            $report = $runner->run();
+        } catch (RuntimeException $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+
+            return 1;
+        }
+
+        echo $options['json'] ? $report->toJson() . PHP_EOL : $report->toText();
+
+        return 0;
+    }
+
+    private function loadUsage(): void
+    {
+        fwrite(STDERR, <<<TXT
+            Usage: platform.php load [options]
+
+              --requests=N      read requests per HTTP phase, and read orders
+                                seeded for them (default 1000, max 20000)
+              --concurrency=N   in-flight HTTP requests, 1-64 (default 8)
+              --jobs=N          queue jobs per worker-scaling run (default 1000)
+              --workers=LIST    pool sizes to compare, comma separated
+                                (default 1,2,4,8)
+              --json            the report as JSON instead of a table
+
+            The run owns the platform: it refuses to start if a serve is
+            already listening, and it stops everything it started.
+
+            TXT);
+    }
+
+    /**
+     * One run of that workload, measured and returned instead of printed.
+     *
+     * The measurement belongs here and the printing belongs to the command,
+     * so `load` (PLAN Step 29) can take the same numbers for five different
+     * pool sizes in one report - Test D and Test E are this method called
+     * once and then once per worker count, and a second implementation of it
+     * would be a second thing to be wrong.
+     *
+     * @return array<string, mixed>|null the metrics, or null when the run
+     *                                   could not be set up
+     */
+    private function measureQueue(int $jobs, int $workers): ?array
+    {
         $config = $this->config();
         $databaseConfig = $config['database'];
         $cacheConfig = $config['cache'];
@@ -1189,7 +1330,7 @@ final class PlatformCli
             $this->stopCacheServerIfOwned($ownsCacheServer);
             $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
 
-            return 1;
+            return null;
         }
 
         // An isolated pool with exactly $workers processes on its own socket,
@@ -1202,7 +1343,7 @@ final class PlatformCli
             $this->stopCacheServerIfOwned($ownsCacheServer);
             $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
 
-            return 1;
+            return null;
         }
 
         $logPath = $benchDir . '/queue.log';
@@ -1233,7 +1374,7 @@ final class PlatformCli
             $this->stopCacheServerIfOwned($ownsCacheServer);
             $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
 
-            return 1;
+            return null;
         }
 
         $benchmark = new QueueBenchmark(
@@ -1250,7 +1391,7 @@ final class PlatformCli
             $this->stopCacheServerIfOwned($ownsCacheServer);
             $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
 
-            return 1;
+            return null;
         }
 
         try {
@@ -1263,16 +1404,8 @@ final class PlatformCli
             $this->stopCacheServerIfOwned($ownsCacheServer);
             $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
 
-            return 1;
+            return null;
         }
-
-        printf("Queue benchmark: %d jobs, %d pool workers\n", $metrics['jobs'], $metrics['workers']);
-        printf("  total processing time  %.4fs\n", $metrics['wall_seconds']);
-        printf("  throughput             %.1f jobs/s\n", $metrics['throughput_per_sec']);
-        printf("  average latency        %.2f ms\n", $metrics['avg_latency_ms']);
-        printf("  p95 latency            %.2f ms\n", $metrics['p95_latency_ms']);
-        printf("  queue depth            %d\n", $metrics['queue_depth']);
-        printf("  worker utilization     %.1f%%\n", $metrics['worker_utilization'] * 100);
 
         proc_terminate($master);
         proc_close($master);
@@ -1280,7 +1413,7 @@ final class PlatformCli
         $this->stopCacheServerIfOwned($ownsCacheServer);
         $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
 
-        return 0;
+        return $metrics;
     }
 
     /**

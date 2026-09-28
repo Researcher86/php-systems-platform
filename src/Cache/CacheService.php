@@ -18,6 +18,14 @@ use PhpSystemsPlatform\Observability\MetricsRegistry;
  * and a miss can repopulate it from the authoritative row. Cache-client
  * failures surface as CacheClientException and are the handler's decision to
  * degrade from, never this service's.
+ *
+ * The service can also be switched off entirely (CACHE_ENABLED=0, see
+ * config/platform.php): a platform with no cache tier at all. That is a
+ * different thing from a cache that is down, and the difference is the point
+ * - a disabled cache answers every lookup with a miss without a socket, a
+ * timeout or a fallback, which is what makes "what does this read cost
+ * without the cache" a measurement instead of an argument about how much a
+ * failed connection costs.
  */
 final readonly class CacheService
 {
@@ -34,10 +42,13 @@ final readonly class CacheService
         private CacheClient $client,
         private CacheCounters $counters,
         private ?MetricsRegistry $metrics = null,
+        private bool $enabled = true,
     ) {
     }
 
-    /** @param array<string, mixed> $config host, port, timeout */
+    /**
+     * @param array<string, mixed> $config host, port, timeout, enabled
+     */
     public static function fromConfig(array $config, ?MetricsRegistry $metrics = null): self
     {
         return new self(
@@ -48,7 +59,13 @@ final readonly class CacheService
             ),
             new CacheCounters(),
             $metrics,
+            (bool) ($config['enabled'] ?? true),
         );
+    }
+
+    public function isEnabled(): bool
+    {
+        return $this->enabled;
     }
 
     public function counters(): CacheCounters
@@ -60,7 +77,10 @@ final readonly class CacheService
      * The cached payload for an order, or null on a miss. A hit counts once;
      * a miss counts once too, so the two add up to every lookup made through
      * this method. A stored value that no longer parses as an object counts
-     * as a miss: it is not authoritative, so it must not be served.
+     * as a miss: it is not authoritative, so it must not be served. A lookup
+     * made against a disabled cache counts as a miss as well - the lookup
+     * happened, and the answer was that there is nothing cached - which keeps
+     * hits + misses equal to lookups whatever the platform is configured to.
      *
      * @return array<string, mixed>|null
      *
@@ -68,6 +88,14 @@ final readonly class CacheService
      */
     public function getOrder(string $id): ?array
     {
+        if (!$this->enabled) {
+            $this->counters->misses++;
+            $this->metrics?->increment(MetricsRegistry::CACHE_MISSES);
+            $this->metrics?->increment(MetricsRegistry::CACHE_OPERATIONS);
+
+            return null;
+        }
+
         $json = $this->client->get(self::ORDER_KEY_PREFIX . $id);
 
         if ($json === null) {
@@ -100,11 +128,19 @@ final readonly class CacheService
      * representation - the same bytes a direct database read would answer
      * with - so a hit is indistinguishable from a repository read.
      *
+     * A disabled cache is not written to and is not counted as written: the
+     * write never reached a server, and a counter that claimed otherwise
+     * would make /metrics describe a cache that does not exist.
+     *
      * @throws CacheClientException the cache is unreachable - the caller
      *                              serves the database copy anyway
      */
     public function setOrder(Order $order): void
     {
+        if (!$this->enabled) {
+            return;
+        }
+
         $this->client->set(
             self::ORDER_KEY_PREFIX . $order->id,
             (string) json_encode($order, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
@@ -116,12 +152,17 @@ final readonly class CacheService
 
     /**
      * Remove an entry - the write-path counterpart to setOrder(), used by
-     * the invalidation phase when a row changes.
+     * the invalidation phase when a row changes. Nothing to remove when the
+     * cache is disabled, for the same reason nothing is written to it.
      *
      * @throws CacheClientException the cache is unreachable
      */
     public function deleteOrder(string $id): void
     {
+        if (!$this->enabled) {
+            return;
+        }
+
         $this->client->delete(self::ORDER_KEY_PREFIX . $id);
         $this->counters->deletes++;
         $this->metrics?->increment(MetricsRegistry::CACHE_OPERATIONS);

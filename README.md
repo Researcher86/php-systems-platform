@@ -1424,6 +1424,121 @@ autoscales between its configured minimum and maximum, so the pid that
 replaced a dead one may itself have been recycled, and what the tests check
 is that the dead pid is gone, the pool is still serving, and no job was lost.
 
+## Load tests
+
+`php bin/platform.php load` takes the measurements the plan asks for, all in
+one run and against the real platform: the HTTP layer on its own, the read
+path with the cache, the same read path without one, and the same background
+workload through 1, 2, 4 and 8 workers.
+
+```text
+php bin/platform.php load
+php bin/platform.php load --requests=2000 --concurrency=16
+php bin/platform.php load --jobs=2000 --workers=1,2,4,8,16
+php bin/platform.php load --json
+```
+
+The run owns the platform. It refuses to start while something else is
+answering on the HTTP port rather than measuring a stranger's server, it
+wipes the data directory so the numbers come from a cold start, and it stops
+every process it started - including on failure, where the child's own output
+is left behind because that is the only place a start-up failure explains
+itself.
+
+Test B, "the same endpoint without cache", is the one that decides what this
+command is allowed to claim. A cache that is *down* is not a platform without
+a cache: every read would pay a refused connection and a timeout, and the
+report would call that saving money. So `CACHE_ENABLED=0` is a real off
+switch - the serve starts no cache server at all, the lookup answers `miss`
+without a socket, and `/metrics` reports zero cache operations. Test B runs on
+a serve started with it, and the run checks the platform's own `X-Cache`
+markers so a mislabelled phase would show up in the report rather than in a
+footnote.
+
+The corpus of orders is written straight into the database instead of created
+over HTTP, and that is not a shortcut. The create path populates the cache on
+write, so an order created through the API is already cached: a "cache miss"
+phase built out of API-created orders would have measured hits and called them
+misses. Direct inserts also mean the miss phase starts against an empty cache
+and costs one write per order instead of two HTTP round trips.
+
+### Measured: 1,000 requests per phase, 8 in flight, 1,000 jobs
+
+```text
+Load test (PLAN Step 29)
+
+Environment
+  base_url               http://127.0.0.1:8080
+  php                    8.5.10
+  os                     Linux aarch64
+  cpu_cores              12
+  memory_limit           128M
+  concurrency            8
+  requests_per_phase     1000
+  corpus_orders          1000
+  queue_jobs             1000
+  scaling_worker_counts  1,2,4,8
+  workers_configured     4
+  queue_max_size         500
+  cache_enabled_for_b    no (CACHE_ENABLED=0)
+
+Test A - HTTP only, and the read path (Tests B and C)
+  test workload                                   requests       rps    avg ms    p95 ms    p99 ms    cpu s peak MB
+  A    GET /health (server only)                     1000   26156.9      0.22      0.38      0.44     0.02    30.1
+  C1   GET /orders/{id} (first read of each order)    1000    1798.0      3.36      4.87      5.78     0.14    30.1
+  C2   GET /orders/{id} (same orders, now cached)    1000   12545.3      0.42      0.63      0.76     0.05    32.1
+  B    GET /orders/{id} (CACHE_ENABLED=0)            1000    2241.1      2.68      3.13      3.96     0.10    30.1
+
+  read path, by the platform's own X-Cache marker:
+    A    (none)=1000
+    C1   miss=1000
+    C2   hit=1000
+    B    miss=1000
+
+Test D - background jobs through the queue
+  1000 jobs, 4 workers: 4941.3 jobs/s, avg 114.40 ms, p95 186.97 ms, peak depth 1000, utilization 61.8%
+
+Test E - worker scaling (same workload, pool resized)
+  workers     jobs/s    avg ms    p95 ms      vs 1  utilization
+  1           2766.9    195.13    337.41      1.00        83.6%
+  2           4057.2    147.91    233.97      1.47        77.9%
+  4           4941.3    114.40    186.97      1.79        61.8%
+  8           6885.6    110.48    134.03      2.49        73.1%
+```
+
+### What those numbers say
+
+The first surprise is that a miss is *more* expensive with a cache than
+without one: 1,798 rps against 2,241. A miss is a cache lookup that found
+nothing, then the database, then a cache write to remember the answer - three
+steps where the cache-less platform takes one. The cache does not make the
+first read of an order cheaper; it taxes it, and buys that back on every
+later read: the same order again is 12,545 rps, seven times the miss and about
+half the cost of a `/health` call that does no work at all.
+
+The second is that a hit is indistinguishable from not touching the database.
+C2 at 12,545 rps against A at 26,157 rps means serving a cached order costs
+about what routing a request costs, and the remaining half is the cache
+socket. The platform's own numbers agree: a phase of 1,000 hits costs the
+serve 0.05s of CPU and 32.1MB peak, against 0.14s for the same 1,000 reads
+that had to reach the database.
+
+Worker scaling is where the plan's "do not assume linear scaling" earns its
+keep. Eight workers are 2.49x the throughput of one, not 8x, and 4x the
+workers bought 1.79x. Average job latency flattens out - 195ms at one worker,
+110ms at eight - because past two or three workers the queue's own bookkeeping
+and the file-backed journal are being serialized against each other, and
+utilization stops climbing while throughput keeps creeping. The honest reading
+of that table is that this platform's queue is a durable journal first and a
+throughput engine second; the workers are not the bottleneck at four.
+
+The queue depth of 1,000 in Test D is the point of that test, not a defect:
+every job is published before the pool starts draining, so the depth is the
+backlog the platform is asked to absorb, and the `QUEUE_MAX_SIZE=500` the
+platform is configured with would have rejected half of them. `load` is
+therefore measuring a burst the API would refuse, and it says so by publishing
+to the journal directly.
+
 ---
 
 # Documentation

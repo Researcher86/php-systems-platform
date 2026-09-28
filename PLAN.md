@@ -1854,6 +1854,13 @@ Observed throughput:
 
 Avoid presenting benchmark results without describing the workload.
 
+> Implemented: `docs/benchmarks.md` documents all four benchmarks (queue,
+> load tests, order loading, worker memory), each with the eight required
+> fields and real numbers from one run of the platform's own commands
+> (`benchmark`, `load`, `orders:compare`, `workers:memory`). The queue
+> benchmark caps at the command's own 5,000-job limit and is documented at
+> that size rather than at the example's 10,000.
+
 ---
 
 # 37. Step 32 — Architecture Documentation

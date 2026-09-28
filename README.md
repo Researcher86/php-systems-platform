@@ -1314,6 +1314,10 @@ Benchmarks should always record:
 
 Raw numbers without workload information are not considered meaningful benchmark results.
 
+Every benchmark is measured and interpreted in [`docs/benchmarks.md`](docs/benchmarks.md) -
+environment, configuration, workload, worker count, concurrency, dataset
+size, result and interpretation, from one run of the platform's own commands.
+
 ---
 
 # Testing

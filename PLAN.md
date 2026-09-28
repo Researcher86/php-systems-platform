@@ -1965,6 +1965,14 @@ Queue → HTTP server
 
 Infrastructure components should not become coupled to business logic.
 
+> Implemented: the dependency review is documented in
+> `docs/architecture.md` (Dependency boundaries), built from the real
+> cross-namespace imports. Three of the four avoided directions are absent
+> in code (`Database -> HTTP`, `Worker -> Controller`, `Queue -> HTTP
+> server`). `Cache -> Domain` exists but only to the `Order` *type* for
+> serialization and keying - never to business behavior - and that one nuance
+> is called out explicitly rather than hidden.
+
 ---
 
 # 40. Step 35 — Resource Ownership

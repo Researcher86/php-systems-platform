@@ -101,3 +101,44 @@ miss -> database -> cache refill -> `X-Cache: miss`. The queue worker side
 re-opens the producing request's `request_id` trace scope from the job's
 payload, so one logical request is one trace chain across processes (see
 `observability.md`).
+
+## Dependency boundaries
+
+PLAN Step 34: dependencies should flow Application -> Interfaces ->
+Infrastructure, and infrastructure must not become coupled to business
+logic. The actual cross-namespace imports in `src/`:
+
+```text
+Application -> Http, Observability, Domain, Cache, Workers, Queue
+Domain      -> Storage (repositories), Queue (job type constants)
+Observability -> Queue (journal), Memory
+Cache       -> Domain (Order), Observability
+Queue       -> Storage, Domain, Cache, Workers, Observability
+Storage     -> Domain (entities), Observability
+Workers     -> Domain, Queue, Storage, Memory, Observability
+Cli         -> everything (the composition root)
+```
+
+The directions the PLAN warns against, checked against the code:
+
+- `Database -> HTTP` — absent. Storage imports nothing from `Http`.
+- `Worker -> Controller` — absent. `Workers` imports nothing from
+  `Application`.
+- `Queue -> HTTP server` — absent. `Queue` imports nothing from `Http`.
+- `Cache -> Domain` — present, and it is the one nuance to call out.
+  `CacheService` imports the `Order` entity, but only to serialize it and to
+  build its cache key (`order:<id>`). It never applies business rules to it -
+  the cache cannot decide what an order *means*, only what a cached order
+  *is* (its JSON). The rule's reason - infrastructure should not make
+  business decisions - is intact; the coupling is to a serialized data shape,
+  the same coupling a serializer or mapper has. Replacing it would push
+  `json_encode` into four call sites and duplicate the one serialization
+  concern the facade exists to own, so it is deliberately left and documented
+  rather than hidden.
+
+The rule in one line: **infrastructure knows the domain's data shapes and
+speaks the domain's services, but never decides the domain's behavior.**
+Every arrow above follows that; the direction Application -> Domain ->
+Storage is the classic "services against repository interfaces" shape, with
+the repositories (Storage) and the queue jobs (Queue) carrying the domain's
+types rather than the other way around.

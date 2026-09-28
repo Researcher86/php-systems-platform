@@ -1632,6 +1632,7 @@ the *why* behind one part of it:
 | `failure-handling.md`  | the failure modes and their reproduction |
 | `observability.md`     | the reports and one-request-one-chain traces |
 | `ownership.md`         | who owns each resource and who stops it |
+| `process-model.md`     | the live process tree, readable with `ps`/`pstree` |
 | `benchmarks.md`        | every benchmark, measured and interpreted |
 
 `docs/components.md` fixes the surface of each integrated component.

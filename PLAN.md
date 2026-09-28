@@ -2038,6 +2038,13 @@ If the architecture uses a different model, document the actual model rather tha
 
 The process tree should be inspectable using standard OS tools.
 
+> Implemented: `docs/process-model.md` documents the actual model - `serve`
+> owns the pool Master and the cache, `queue:consume` adopts the pool and
+> runs its four forwarders, `minidb.php` daemonizes (ppid 1) - captured from
+> a live `ps` read, with the exact `ps`/`pstree` commands, what each line
+> proves, and why the correct startup order (serve, then consumer) makes the
+> tree deterministic.
+
 ---
 
 # 42. Step 37 — Shutdown and Recovery Matrix

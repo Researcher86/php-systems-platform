@@ -2186,6 +2186,13 @@ and the complete integration suite.
 
 The platform must work from a clean environment.
 
+> Implemented (verification): `rm -rf vendor && composer install` (73
+> packages, clean), then `php bin/platform.php demo` (103 requests, 100 jobs
+> processed, crash detected 1.0 ms / replaced 1.7 ms, graceful shutdown),
+> then `composer test` - OK (250 tests, 1161 assertions) - plus PHPStan
+> clean and format 0 of 132 files. The platform works from a clean
+> environment.
+
 ---
 
 # 46. Final Test Matrix

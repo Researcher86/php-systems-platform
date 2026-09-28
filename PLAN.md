@@ -1931,6 +1931,13 @@ README should contain one high-level diagram:
           └─────────────────────────────────┘
 ```
 
+> Implemented: the README `## Architecture` section carries this one
+> high-level diagram (HTTP -> HTTP Server -> Application -> Cache/Database/
+> Queue -> Worker Pool -> Workers -> Jobs, with the cross-cutting box), now
+> annotated with the process ownership that makes the shape work - `serve`,
+> `queue:consume` and `bin/worker.php` - tying the diagram to
+> `docs/architecture.md`.
+
 ---
 
 # 39. Step 34 — Dependency Boundaries

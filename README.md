@@ -87,6 +87,15 @@ The final system provides a practical environment for experimenting with the con
              └─────────────────────────────────────────┘
 ```
 
+One high-level picture of the same shape, with the process ownership that
+makes it work (see `docs/architecture.md`):
+
+```text
+serve           HTTP server + routes, owns database/cache servers + pool Master
+queue:consume   owns the queue consumer, adopts the pool Master, drains the journal
+bin/worker.php  the pool Master: forks, supervises and replaces worker processes
+```
+
 ---
 
 ## Systems Lab Components

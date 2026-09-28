@@ -2404,7 +2404,7 @@ Phase 5 is complete when all of the following are true.
 ## Testing
 
 * [ ] Unit tests pass.
-* [ ] Integration tests pass.
+* [x] Integration tests pass.
 * [ ] System tests pass.
 * [ ] E2E tests pass.
 * [ ] Failure tests pass.

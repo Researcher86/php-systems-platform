@@ -1345,6 +1345,37 @@ The integration tests start the real database, cache, worker pool and HTTP
 server as child processes, so CI exercises the same process model a local
 run does - no mocks standing in for a component.
 
+## Integration tests by boundary
+
+Every boundary of the platform is a real component reached over a real
+socket, so the integration suites are organised by boundary rather than by
+class under test:
+
+```text
+tests/Integration/Boundary/
+├── HttpApplicationBoundaryTest.php      routing, response handling, errors
+├── ApplicationDatabaseBoundaryTest.php  create, read, update, error behavior
+├── ApplicationCacheBoundaryTest.php     hit, miss, invalidation
+├── ApplicationQueueBoundaryTest.php     publish, consume, failure, retry
+└── QueueWorkerPoolBoundaryTest.php      dispatch, completion, failure, replacement
+```
+
+`tests/Support/PlatformTestStack.php` is the one place those suites get a
+running platform from. It starts the platform's own
+`php bin/platform.php serve` - the same process an operator starts, with the
+real ports, data directories and wiring - and hands out clients for what that
+serve owns. A serve that is already answering is reused; one the harness
+started is stopped again when the last suite releases it, by SIGTERM, and the
+harness fails the suite if that shutdown was not graceful. Nothing is left
+running for the next suite, which is what lets the demo and the other
+integration suites keep the ports to themselves.
+
+The queue boundary is the one that cannot be tested in a single process: the
+platform publishes from `serve` and consumes in `queue:consume`, sharing only
+the append-only journal. Those tests therefore start the real consumer as a
+child process, wait for the journal to settle, and stop it with SIGTERM -
+judging the graceful shutdown by its exit code.
+
 ---
 
 # Documentation

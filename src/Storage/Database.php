@@ -28,6 +28,21 @@ use PhpSystemsPlatform\Observability\Trace;
  * worker re-opens it from a job's payload), because the trace only records
  * while a request is actually active. Every call keeps its exact behavior
  * without one.
+ *
+ * PLAN Step 30: the same seam carries a deliberate delay, off unless the
+ * config asks for it. A platform that has only ever talked to a database
+ * answering in microseconds has never seen what it does when the database
+ * stops doing that - the latency lands in the request, the workers hold their
+ * connections while they wait, and the queue behind them grows. That is
+ * measurable but not demonstrable without a slow database, so the config can
+ * ask for one. It is a fault, not a setting, which is why the delay is only
+ * honored where failure injection is on at all (dev/demo/test, see
+ * config/platform.php) and only when it is asked for by name.
+ *
+ * The delay sits inside the timed region rather than around it, so
+ * db.operation_duration reports what the caller actually waited - the point
+ * of the experiment is to watch the platform react to slow I/O, and a
+ * measurement that excluded the slowness would be measuring nothing.
  */
 final readonly class Database
 {
@@ -40,12 +55,29 @@ final readonly class Database
         private ConnectionPool $pool,
         private ?MetricsRegistry $metrics = null,
         private ?Trace $trace = null,
+        private float $delayMs = 0.0,
     ) {
     }
 
-    public static function fromConfig(ClientConfig $config, int $maxConnections = 10, ?MetricsRegistry $metrics = null, ?Trace $trace = null): self
+    public static function fromConfig(ClientConfig $config, int $maxConnections = 10, ?MetricsRegistry $metrics = null, ?Trace $trace = null, float $delayMs = 0.0): self
     {
-        return new self(new ConnectionPool($config, $maxConnections), $metrics, $trace);
+        return new self(new ConnectionPool($config, $maxConnections), $metrics, $trace, $delayMs);
+    }
+
+    /**
+     * PLAN Step 30's slow-database experiment: a whole-platform delay, off by
+     * default, that every read and every write pays. connect() is the only
+     * caller that can be asked for it - fromConfig() is the pure config
+     * mapping and deliberately does not take it, so the shape of a ClientConfig
+     * stays the component's own.
+     *
+     * @param array<string, mixed> $config
+     */
+    private static function delayFrom(array $config): float
+    {
+        $delay = (float) ($config['delay_ms'] ?? 0.0);
+
+        return $delay > 0.0 ? $delay : 0.0;
     }
 
     /**
@@ -58,7 +90,7 @@ final readonly class Database
      */
     public static function connect(array $config, int $maxConnections = 10, ?MetricsRegistry $metrics = null, ?Trace $trace = null): self
     {
-        return self::fromConfig(self::configFrom($config), $maxConnections, $metrics, $trace);
+        return self::fromConfig(self::configFrom($config), $maxConnections, $metrics, $trace, self::delayFrom($config));
     }
 
     /**
@@ -90,6 +122,7 @@ final readonly class Database
     public function read(string $sql, array $parameters = []): array
     {
         $startedAt = microtime(true);
+        $this->slowDown();
         $connection = $this->pool->acquire();
 
         try {
@@ -121,6 +154,7 @@ final readonly class Database
     public function write(string $sql, array $parameters = []): ?int
     {
         $startedAt = microtime(true);
+        $this->slowDown();
         $connection = $this->pool->acquire();
 
         try {
@@ -145,5 +179,14 @@ final readonly class Database
     public function close(): void
     {
         $this->pool->close();
+    }
+
+    private function slowDown(): void
+    {
+        if ($this->delayMs <= 0.0) {
+            return;
+        }
+
+        usleep((int) round($this->delayMs * 1000.0));
     }
 }

@@ -7,8 +7,8 @@ namespace PhpSystemsPlatform\Benchmarks;
 use Closure;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Migrator;
+use PhpSystemsPlatform\Support\OwnedProcess;
 use RuntimeException;
-use SplFileInfo;
 
 /**
  * PLAN Step 29, run end to end: the load tests as one command that owns a
@@ -85,10 +85,10 @@ final class LoadTestRunner
 
         $this->refuseIfPlatformAlreadyRunning($port);
         $this->stopStaleDatabaseServer($database);
-        $this->removeTree(dirname((string) $database['data_dir']));
+        OwnedProcess::removeTree(dirname((string) $database['data_dir']));
 
         $logDir = sys_get_temp_dir() . '/php-systems-platform-load-' . uniqid('', true);
-        $this->mkdir($logDir);
+        OwnedProcess::mkdir($logDir);
 
         try {
             $this->startServe($logDir, 'serve', $port, []);
@@ -136,7 +136,7 @@ final class LoadTestRunner
                 }
             }
 
-            $this->removeTree($logDir);
+            OwnedProcess::removeTree($logDir);
 
             return new LoadTestReport(
                 $this->environment($config, $baseUrl, count($corpus)),
@@ -166,9 +166,10 @@ final class LoadTestRunner
     private function phase(string $test, string $name, array $paths, int $requests, string $baseUrl): array
     {
         $load = new HttpLoadTest($baseUrl, $this->concurrency);
-        $before = $this->costs->read($this->servePid);
+        $pid = $this->serve?->pid() ?? 0;
+        $before = $this->costs->read($pid);
         $result = $load->run($test, $paths, $requests);
-        $after = $this->costs->read($this->servePid);
+        $after = $this->costs->read($pid);
 
         return ['test' => $test, 'name' => $name]
             + $result->toArray()
@@ -260,7 +261,7 @@ final class LoadTestRunner
 
     private function refuseIfPlatformAlreadyRunning(int $port): void
     {
-        if ($this->portAnswers($port)) {
+        if (OwnedProcess::portAnswers('127.0.0.1', $port, self::PORT_PROBE_TIMEOUT_SECONDS)) {
             throw new RuntimeException(sprintf(
                 'The platform is already answering on port %d. Stop the running serve before loading it.',
                 $port,
@@ -277,7 +278,7 @@ final class LoadTestRunner
      */
     private function stopStaleDatabaseServer(array $database): void
     {
-        if (!$this->portAnswers((int) $database['port'], 0.5)) {
+        if (!OwnedProcess::portAnswers('127.0.0.1', (int) $database['port'], 0.5)) {
             return;
         }
 
@@ -286,7 +287,7 @@ final class LoadTestRunner
 
         if ($pid > 0) {
             posix_kill($pid, SIGTERM);
-            $this->waitFor(
+            OwnedProcess::waitFor(
                 static fn (): bool => !posix_kill($pid, 0),
                 self::SERVE_STOP_DEADLINE_SECONDS,
                 'the stale database server to stop',
@@ -299,31 +300,14 @@ final class LoadTestRunner
      */
     private function startServe(string $logDir, string $name, int $port, array $env): void
     {
-        $proc = proc_open(
+        $this->serve = OwnedProcess::startAndWaitForPort(
             [PHP_BINARY, dirname(__DIR__, 2) . '/bin/platform.php', 'serve'],
-            [
-                1 => ['file', $logDir . '/' . $name . '.out', 'a'],
-                2 => ['file', $logDir . '/' . $name . '.err', 'a'],
-            ],
-            $pipes,
-            null,
-            $env === [] ? null : array_merge(getenv(), $env),
+            $name,
+            $logDir,
+            '127.0.0.1',
+            $port,
+            $env === [] ? [] : array_merge(getenv(), $env),
         );
-
-        if (!is_resource($proc)) {
-            throw new RuntimeException('Could not start a serve process for the load run.');
-        }
-
-        $this->serveProcess = $proc;
-        $this->servePid = (int) proc_get_status($proc)['pid'];
-
-        if (!$this->portAnswers($port, self::SERVE_START_DEADLINE_SECONDS)) {
-            throw new RuntimeException(sprintf(
-                'The serve did not start listening on port %d. Output: %s',
-                $port,
-                (string) @file_get_contents($logDir . '/' . $name . '.out'),
-            ));
-        }
     }
 
     /**
@@ -333,82 +317,10 @@ final class LoadTestRunner
      */
     private function stopServe(): void
     {
-        if (!is_resource($this->serveProcess)) {
-            return;
-        }
-
-        proc_terminate($this->serveProcess);
-        $this->waitFor(
-            fn (): bool => !proc_get_status($this->serveProcess)['running'],
-            self::SERVE_STOP_DEADLINE_SECONDS,
-            'the serve process to stop on SIGTERM',
-        );
-        proc_close($this->serveProcess);
-        $this->serveProcess = null;
+        $this->serve?->stop();
+        $this->serve = null;
     }
 
-    private function waitFor(Closure $probe, float $deadlineSeconds, string $what): void
-    {
-        $deadline = microtime(true) + $deadlineSeconds;
-
-        while (microtime(true) < $deadline) {
-            if ($probe()) {
-                return;
-            }
-
-            usleep(50_000);
-        }
-
-        throw new RuntimeException(sprintf('Timed out waiting for %s.', $what));
-    }
-
-    private function portAnswers(int $port, float $timeoutSeconds = self::PORT_PROBE_TIMEOUT_SECONDS): bool
-    {
-        $deadline = microtime(true) + $timeoutSeconds;
-
-        while (microtime(true) < $deadline) {
-            $socket = @stream_socket_client('tcp://127.0.0.1:' . $port, $code, $message, 0.2);
-
-            if ($socket !== false) {
-                fclose($socket);
-
-                return true;
-            }
-
-            usleep(50_000);
-        }
-
-        return false;
-    }
-
-    private function mkdir(string $dir): void
-    {
-        if (!is_dir($dir) && !@mkdir($dir, 0o777, true) && !is_dir($dir)) {
-            throw new RuntimeException(sprintf('Could not create "%s".', $dir));
-        }
-    }
-
-    private function removeTree(string $dir): void
-    {
-        if (!is_dir($dir)) {
-            return;
-        }
-
-        $entries = new \RecursiveIteratorIterator(
-            new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
-            \RecursiveIteratorIterator::CHILD_FIRST,
-        );
-
-        foreach ($entries as $entry) {
-            /** @var SplFileInfo $entry */
-            $entry->isDir() ? @rmdir($entry->getPathname()) : @unlink($entry->getPathname());
-        }
-
-        @rmdir($dir);
-    }
-
-    /** @var resource|null */
-    private $serveProcess = null;
-
-    private int $servePid = 0;
+    /** @var OwnedProcess|null */
+    private ?OwnedProcess $serve = null;
 }

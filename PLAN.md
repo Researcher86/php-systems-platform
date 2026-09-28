@@ -1716,6 +1716,15 @@ Record actual results.
 
 The platform should contain reproducible experiments.
 
+> Implemented by `php bin/platform.php experiments` - five scenarios, each
+> against a platform the command owns and stops, all five observable through
+> the platform's own `/metrics`, `/queue/status`, `/workers` and `X-Cache`
+> rather than a second instrumentation. The one new production seam is the
+> `database.delay_ms` config (env `DATABASE_LATENCY_MS`), honored by
+> `Database::read/write` only where failure injection is armed. Shared
+> process lifecycle lives in `src/Support/OwnedProcess` (used by both the
+> load run and the experiments).
+
 ### Experiment 1
 
 ```text
@@ -1727,6 +1736,9 @@ Observe:
 ```text
 queue depth ↑
 ```
+
+Implemented: a fixed two-worker pool, eight `demo.slow` (1.0s) jobs, journal
+depth sampled over time - `8 -> 6 -> 4 -> 2 -> 0`, peak 8, drained.
 
 ### Experiment 2
 
@@ -1741,6 +1753,10 @@ worker count ↓
 recovery
 ```
 
+Implemented: `POST /debug/fail-worker` against a two-worker pool, worker pids
+sampled before and after - the crashed pid disappears and a replacement pid
+appears, the manager's detection-and-replacement evidenced by the pid change.
+
 ### Experiment 3
 
 ```text
@@ -1753,6 +1769,10 @@ Observe:
 cache failure
 database fallback
 ```
+
+Implemented: the experiment owns the cache server (serve adopts an
+already-running one), reads are `X-Cache: hit`, the cache is killed, the same
+read answers `200 X-Cache: miss` from the database and `db.operations` rises.
 
 ### Experiment 4
 
@@ -1768,6 +1788,12 @@ worker utilization
 queue growth
 ```
 
+Implemented: `DATABASE_LATENCY_MS=300` on a serve without a cache tier, so
+every read reaches the database - POST pays the delay, GET pays the delay,
+`db.operation_duration` reports ~300ms. The delay is the one genuinely new
+production code in the step, gated on the same environment notion as failure
+injection.
+
 ### Experiment 5
 
 ```text
@@ -1780,6 +1806,11 @@ Observe:
 backpressure
 producer behavior
 ```
+
+Implemented: `QUEUE_MAX_SIZE=5` with a single worker and a backlog of slow
+jobs; the producer answers `429 Retry-After: 1` with `queueDepth` while at
+capacity, and the same call is accepted once the queue drains below it -
+backpressure is a signal, not a wall.
 
 These experiments are more valuable than simply reporting benchmark numbers.
 

@@ -40,6 +40,7 @@ use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Demo\PlatformDemo;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Domain\SequentialOrderLoader;
+use PhpSystemsPlatform\Experiments\FailureExperiments;
 use PhpSystemsPlatform\Http\Router;
 use PhpSystemsPlatform\Memory\ForkedMemoryDemo;
 use PhpSystemsPlatform\Memory\MemoryReporter;
@@ -103,6 +104,7 @@ final class PlatformCli
         'workers:memory' => 'Measure worker process memory (1, 2, 4, 8 workers).',
         'idempotency:demo' => 'Demonstrate at-least-once delivery and the idempotency guard.',
         'failure:demo' => 'Reproduce the failure scenarios end to end.',
+        'experiments' => 'Run the Step 30 failure/overload experiments.',
         'metrics' => 'Print the platform\'s standard metric snapshot.',
         'trace' => 'Print the spans recorded for one request_id: trace <request_id>.',
     ];
@@ -179,6 +181,7 @@ final class PlatformCli
             'workers:memory' => $this->workersMemory(array_slice($argv, 2)),
             'idempotency:demo' => $this->idempotencyDemo(),
             'failure:demo' => $this->failureDemo(),
+            'experiments' => $this->experiments(),
             'metrics' => $this->metricsCommand(),
             'trace' => $this->traceCommand(array_slice($argv, 2)),
             'status' => $this->statusCommand(),
@@ -1885,6 +1888,17 @@ final class PlatformCli
         $jobExit = $this->failureDemoFailingJob();
 
         return $crashExit === 0 && $jobExit === 0 ? 0 : 1;
+    }
+
+    /**
+     * PLAN Step 30's failure/overload experiments: five reproducible runs
+     * against a platform this command owns and stops. Each experiment is its
+     * own serve with the piece of configuration it needs, so the whole set is
+     * one pass and each one is repeatable on its own.
+     */
+    private function experiments(): int
+    {
+        return new FailureExperiments()->run();
     }
 
     /**

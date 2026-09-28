@@ -12,6 +12,8 @@
 // into 1 and the off switch would be the one value here that cannot be set
 // to false.
 $cacheEnabled = getenv('CACHE_ENABLED');
+$platformEnv = strtolower(trim((string) (getenv('PLATFORM_ENV') ?: 'dev')));
+$faultInjection = in_array($platformEnv, ['dev', 'development', 'demo', 'test'], true);
 
 return [
     'http' => [
@@ -39,6 +41,14 @@ return [
         // what already ran - it only makes the number visible.
         'read_timeout' => 30.0,
         'write_timeout' => 30.0,
+        // PLAN Step 30's slow-database experiment: how long every read and
+        // every write pretends to take, in milliseconds. Off by default and
+        // gated on the same notion of environment as failure injection - a
+        // delay is a fault, not a setting, so it is never honored anywhere a
+        // deployment could be serving. Only the experiment sets it, by name,
+        // so an env var that happens to be set cannot quietly follow a
+        // process into a real run.
+        'delay_ms' => $faultInjection ? (float) (getenv('DATABASE_LATENCY_MS') ?: 0.0) : 0.0,
     ],
     'cache' => [
         'host' => '127.0.0.1',
@@ -117,12 +127,9 @@ return [
     // development/demo mode." PLATFORM_ENV is the one switch: anything
     // other than a dev/demo/test environment (production, say) disarms all
     // of it without code changes, so an HTTP route that kills a worker
-    // cannot exist next to a deployment that is actually serving.
+    // cannot exist next to a deployment that is actually serving. The same
+    // switch gates Step 30's database delay above.
     'failure_injection' => [
-        'enabled' => in_array(
-            (string) (getenv('PLATFORM_ENV') ?: 'dev'),
-            ['dev', 'development', 'demo', 'test'],
-            true,
-        ),
+        'enabled' => $faultInjection,
     ],
 ];

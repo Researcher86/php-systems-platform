@@ -463,6 +463,19 @@ injection only in development/demo environments; in a production one this
 command refuses with `PLATFORM_ENV=dev ...` as the hint.
 
 ```bash
+php bin/platform.php experiments
+```
+
+Run Step 30's five failure/overload experiments, each against its own
+platform the command owns and stops: slow workers growing the queue, a
+crashed worker being replaced, a dead cache falling through to the
+database, a slow database costing every read its configured delay, and a
+full queue answering 429 (then the same call once it drains). Everything
+the experiments observe is what the platform already reports - `/metrics`,
+`/queue/status`, `/workers` and the `X-Cache` header - so they watch the
+real platform rather than a second instrumentation of it.
+
+```bash
 php bin/platform.php metrics
 ```
 
@@ -1538,6 +1551,36 @@ backlog the platform is asked to absorb, and the `QUEUE_MAX_SIZE=500` the
 platform is configured with would have rejected half of them. `load` is
 therefore measuring a burst the API would refuse, and it says so by publishing
 to the journal directly.
+
+---
+
+# Failure experiments
+
+`php bin/platform.php experiments` runs Step 30's five reproducible
+failure/overload scenarios, each against a platform the command owns and
+stops. The five are the two failure axes the plan names - the workers and the
+dependencies they wait on - crossed with the queue's own capacity:
+
+```text
+1. Slow workers      the pool is the bottleneck, so the queue grows
+2. Worker crash      the pool manager detects the dead worker and replaces it
+3. Cache down        a dead cache is a miss, not a failure: reads fall through
+4. Slow database     every read pays the configured 300 ms delay
+5. Queue full        the producer gets a 429, then the same call is accepted
+```
+
+Each experiment restarts the platform with the one piece of configuration it
+needs (a fixed pool, a latency, a small queue), and each is reproducible on
+its own. The command owns the platform the way `load` does: it refuses to run
+while something else answers on the HTTP port, wipes the data directory, and
+stops every process it started on every path.
+
+The `database` config's one new knob is `delay_ms`, set by
+`DATABASE_LATENCY_MS` and read only where failure injection is armed - a
+delay is a fault, not a setting, so it cannot follow a process into a
+deployment that is actually serving. `Database::read`/`write` pay it inside
+their timed region, so `db.operation_duration` reports what the caller
+actually waited.
 
 ---
 

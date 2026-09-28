@@ -22,6 +22,7 @@ final class PlatformConfigTest extends TestCase
         putenv('QUEUE_MAX_SIZE');
         putenv('PLATFORM_ENV');
         putenv('CACHE_ENABLED');
+        putenv('DATABASE_LATENCY_MS');
     }
 
     public function testQueueMaxSizeDefaultsToFiveHundred(): void
@@ -114,5 +115,41 @@ final class PlatformConfigTest extends TestCase
         $config = require dirname(__DIR__, 2) . '/config/platform.php';
 
         self::assertTrue($config['cache']['enabled']);
+    }
+
+    /**
+     * PLAN Step 30's slow-database experiment: DATABASE_LATENCY_MS makes
+     * every read/write pay a delay, but only where failure injection is
+     * armed - a delay is a fault, not a setting, so it must not be honored
+     * next to a deployment that is actually serving.
+     */
+    public function testDatabaseDelayFollowsTheEnvironmentWhenInjectionIsArmed(): void
+    {
+        putenv('PLATFORM_ENV=demo');
+        putenv('DATABASE_LATENCY_MS=300');
+
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+
+        self::assertSame(300.0, $config['database']['delay_ms']);
+    }
+
+    public function testDatabaseDelayDefaultsToZeroWhenNotAskedFor(): void
+    {
+        putenv('PLATFORM_ENV=demo');
+        putenv('DATABASE_LATENCY_MS');
+
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+
+        self::assertSame(0.0, $config['database']['delay_ms']);
+    }
+
+    public function testDatabaseDelayIsNeverHonoredOutsideDevelopmentEnvironments(): void
+    {
+        putenv('PLATFORM_ENV=production');
+        putenv('DATABASE_LATENCY_MS=300');
+
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+
+        self::assertSame(0.0, $config['database']['delay_ms']);
     }
 }

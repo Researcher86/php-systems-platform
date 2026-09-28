@@ -2149,6 +2149,15 @@ php bin/platform.php demo
 
 should work.
 
+> Implemented: the Docker setup was already the working environment for every
+> command in this lab - one `php` service (php:8.5-cli with pcntl, posix,
+> sockets, shmop, sysv*, ffi, composer) mounting the repo to `/app`. Verified
+> the acceptance criterion end to end: `docker compose up` starts the
+> container and `php bin/platform.php demo` runs the whole platform inside
+> it (103 HTTP requests, worker crash detected in 1.0 ms, replacement in
+> 1.7 ms, graceful shutdown, exit clean). Added `.dockerignore` so the build
+> context stays clean on a fresh clone.
+
 ---
 
 # 45. Step 40 — Clean Installation Test

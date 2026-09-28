@@ -2006,6 +2006,13 @@ Job
 
 This is important because process ownership and resource ownership are central topics of the entire lab.
 
+> Implemented: `docs/ownership.md` - the full ownership map (sockets,
+> request lifecycle, database/cache state, worker processes, pending jobs,
+> one job's execution), the three rules that make ownership unambiguous (a
+> process stops only what it started; a pid file is authoritative but the
+> port is ground truth; the pool is owned once and adopted freely), and the
+> graceful-stop contract. Linked from the README docs table.
+
 ---
 
 # 41. Step 36 — Process Model

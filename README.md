@@ -1631,6 +1631,7 @@ the *why* behind one part of it:
 | `backpressure.md`      | reject-not-block at the producer's door |
 | `failure-handling.md`  | the failure modes and their reproduction |
 | `observability.md`     | the reports and one-request-one-chain traces |
+| `ownership.md`         | who owns each resource and who stops it |
 | `benchmarks.md`        | every benchmark, measured and interpreted |
 
 `docs/components.md` fixes the surface of each integrated component.

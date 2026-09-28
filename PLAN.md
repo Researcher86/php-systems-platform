@@ -2107,6 +2107,17 @@ The CLI itself should remain small.
 
 Do not turn it into another framework.
 
+> Implemented (verification): all ten required commands exist and run
+> (`serve`, `worker`, `queue:consume`, `queue:status`, `status`, `demo`,
+> `benchmark`, `memory:demo`, `workers:memory`, `failure:demo`), plus the
+> experiment/demo extras added by later steps (`load`, `experiments`,
+> `orders:compare`, `idempotency:demo`, `metrics`, `trace`, `queue:job`,
+> `queue:publish`, `workers:status`). The dispatch stays small and
+> framework-free: a `COMMANDS` const + a `match`, one file, no command
+> objects, no container, no autodiscovery - heavy command bodies live in
+> their own classes (`PlatformDemo`, `LoadTestRunner`,
+> `FailureExperiments`) where they were built.
+
 ---
 
 # 44. Step 39 — Docker Environment

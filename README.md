@@ -1607,7 +1607,24 @@ docs/
 └── benchmarks.md
 ```
 
-The README explains the overall system.
+The README explains the overall system; each document in `docs/` explains
+the *why* behind one part of it:
+
+| Document               | What it is the why of |
+| ---------------------- | --------------------- |
+| `architecture.md`      | the process split and ownership rules |
+| `concurrency.md`       | when the three concurrency models pay |
+| `memory.md`            | the copy-on-write price of process workers |
+| `workers.md`           | the pool lifecycle and its timeouts |
+| `queue.md`             | the journal as the queue's source of truth |
+| `cache.md`             | derived state, and down vs disabled |
+| `database.md`          | the pool, the timeouts, the slow-database seam |
+| `backpressure.md`      | reject-not-block at the producer's door |
+| `failure-handling.md`  | the failure modes and their reproduction |
+| `observability.md`     | the reports and one-request-one-chain traces |
+| `benchmarks.md`        | every benchmark, measured and interpreted |
+
+`docs/components.md` fixes the surface of each integrated component.
 
 The individual documents explain the experiments and implementation details.
 

@@ -1884,6 +1884,19 @@ docs/
 
 The documentation should explain not only **what** the platform does, but **why**.
 
+> Implemented: all ten documents exist in `docs/`. Each explains the *why*
+> behind a decision, not just the what: the producer/consumer process split
+> and ownership rules (`architecture.md`), when concurrency pays and the two
+> fan-out bargains (`concurrency.md`), the copy-on-write memory price of
+> process concurrency (`memory.md`), the pool lifecycle and its four distinct
+> timeouts (`workers.md`), the journal as the queue's source of truth
+> (`queue.md`), cache-as-derived-state and "down vs disabled"
+> (`cache.md`), the three database timeouts and the slow-database seam
+> (`database.md`), reject-not-block backpressure (`backpressure.md`), the
+> five failure modes and controlled reproduction (`failure-handling.md`),
+> and the one-request-one-chain trace model (`observability.md`).
+> `benchmarks.md` was created by Step 31.
+
 ---
 
 # 38. Step 33 — Architecture Diagram

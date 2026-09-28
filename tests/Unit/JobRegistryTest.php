@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Tests\Unit;
 
+use PhpJobQueue\Job\Job as QueueJob;
 use PhpJobQueue\Producer\JobFactory;
 use PhpJobQueue\Producer\Producer;
 use PhpJobQueue\Queue\InMemoryQueue;
@@ -15,6 +16,7 @@ use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Queue\JobContext;
 use PhpSystemsPlatform\Queue\JobRegistry;
+use PhpSystemsPlatform\Queue\Jobs\DemoSlowJob;
 use PhpSystemsPlatform\Queue\Jobs\FailingJob;
 use PhpSystemsPlatform\Queue\Jobs\OrderCreatedJob;
 use PhpSystemsPlatform\Storage\Database;
@@ -121,12 +123,74 @@ final class JobRegistryTest extends TestCase
         self::assertTrue($eligible);
     }
 
+    public function testSlowJobIsRegisteredAndHoldsTheWorkerForTheSecondsItWasGiven(): void
+    {
+        // PLAN Step 28: the duration lever, on the same terms as
+        // demo.failing - a registered type, executed by the registry, so the
+        // queue treats a slow job as an ordinary one. A quarter of a second
+        // is the shortest honest measurement: the assertion is that time
+        // passed, not that a timer is exact.
+        $carrier = $this->carrier(DemoSlowJob::TYPE, ['seconds' => 0.25]);
+
+        $started = microtime(true);
+        new JobRegistry()->execute($carrier, $this->context($carrier));
+        $elapsed = microtime(true) - $started;
+
+        self::assertGreaterThanOrEqual(0.25, $elapsed);
+        self::assertLessThan(5.0, $elapsed);
+    }
+
+    public function testValidateRejectsASlowJobWithoutSeconds(): void
+    {
+        self::assertNotNull(JobRegistry::validate(DemoSlowJob::TYPE, []));
+    }
+
+    public function testValidateRejectsASlowJobAskingForNoTimeAtAll(): void
+    {
+        self::assertNotNull(JobRegistry::validate(DemoSlowJob::TYPE, ['seconds' => 0]));
+    }
+
+    public function testValidateRejectsASlowJobAskingToOutliveThePool(): void
+    {
+        // Longer than the pool's execution timeout is not a slow job, it is a
+        // request to be killed - a different failure, and one this type
+        // refuses to stage by accident.
+        self::assertNotNull(JobRegistry::validate(DemoSlowJob::TYPE, ['seconds' => DemoSlowJob::MAX_SECONDS + 1]));
+    }
+
+    public function testValidateAcceptsASlowJobInsideItsWindow(): void
+    {
+        self::assertNull(JobRegistry::validate(DemoSlowJob::TYPE, ['seconds' => 2.5]));
+        self::assertNull(JobRegistry::validate(DemoSlowJob::TYPE, ['seconds' => DemoSlowJob::MAX_SECONDS]));
+    }
+
+    public function testShouldRetryRefusesASlowJobWhoseSecondsCouldNeverBeRead(): void
+    {
+        $job = $this->carrier(DemoSlowJob::TYPE, ['seconds' => 'soon']);
+
+        $eligible = (JobRegistry::shouldRetry())($job, new RuntimeException('demo.slow payload is missing a numeric "seconds".'));
+
+        self::assertFalse($eligible);
+    }
+
+    /**
+     * @param array<string, mixed> $payload
+     */
+    private function carrier(string $type, array $payload = []): QueueJob
+    {
+        return new Producer(
+            new InMemoryQueue(new SystemClock()),
+            new JobFactory(new SystemClock()),
+        )->dispatch($type, $payload);
+    }
+
     /**
      * A JobContext over services pointed at an unreachable port. Nothing is
-     * actually queried here - the registry throws before any handler runs -
-     * so the connections only have to exist, not answer.
+     * actually queried here - the registry throws before any handler runs, and
+     * demo.slow touches no service at all - so the connections only have to
+     * exist, not answer.
      */
-    private function context(): JobContext
+    private function context(?QueueJob $carrier = null): JobContext
     {
         $database = Database::fromConfig(new ClientConfig(
             host: '127.0.0.1',
@@ -140,10 +204,7 @@ final class JobRegistryTest extends TestCase
         );
 
         return new JobContext(
-            new Producer(
-                new InMemoryQueue(new SystemClock()),
-                new JobFactory(new SystemClock()),
-            )->dispatch('unused'),
+            $carrier ?? $this->carrier('unused'),
             $orders,
             $cache,
         );

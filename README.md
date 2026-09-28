@@ -1376,6 +1376,54 @@ the append-only journal. Those tests therefore start the real consumer as a
 child process, wait for the journal to settle, and stop it with SIGTERM -
 judging the graceful shutdown by its exit code.
 
+## End-to-end tests
+
+`tests/E2E/` holds the seven scenarios the platform promises, in the order an
+operator meets them. They are not variations on the integration suites: the
+integration suites ask a boundary whether it works, these ask the whole
+system a question and then read the answer where the platform keeps it - in
+the database over a second connection, in the append-only journal another
+process owns, in the pool's own statistics, in a process's exit code.
+
+```text
+tests/E2E/
+├── OrderLifecycleE2ETest.php     create, cache hit/miss, background processing
+├── WorkerCrashE2ETest.php        worker crash and replacement, retry and recovery
+├── QueueOverloadE2ETest.php      backpressure on a platform with a small queue
+└── GracefulShutdownE2ETest.php   SIGTERM while a job is still running
+```
+
+Three of them need a platform configured for what they are testing, so the
+harness starts one of its own instead of sharing the suite-wide one:
+
+* the overload scenario runs on a serve started with `QUEUE_MAX_SIZE=5`, so
+  the queue fills in four extra requests instead of five hundred - the
+  platform's own environment override, read by `config/platform.php`, not a
+  patched file;
+* the shutdown scenario owns its serve, because the claim being tested is that
+  the platform stops when it is asked to, and a platform somebody else started
+  may not be stopped at all;
+* both stop what they started, and the overload and shutdown suites judge that
+  teardown by its exit code instead of hiding it in a cleanup.
+
+One job exists only for these tests. `demo.slow` takes the number of seconds
+it is given and then succeeds, which is what makes "which worker is holding
+this job right now" and "what happens to work in flight when this process is
+SIGTERMed" answerable instead of a race against a scheduler. Its duration is
+bounded to `(0, 30]` seconds, because a job that outlives the pool's task
+timeout fails in a way that has nothing to do with the question being asked,
+and one that outlives the pool's execution timeout gets its worker killed
+underneath it.
+
+The crash scenario sends the platform's own
+`POST /debug/fail-worker` and reads the pool's report of what it did; the
+retry scenario kills a busy worker with `SIGKILL` from the test, and then
+waits for the queue to recover the job and finish it on another worker. Both
+assert on the pool's worker list only as far as it is a promise: the pool
+autoscales between its configured minimum and maximum, so the pid that
+replaced a dead one may itself have been recycled, and what the tests check
+is that the dead pid is gone, the pool is still serving, and no job was lost.
+
 ---
 
 # Documentation

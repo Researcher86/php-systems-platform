@@ -6,6 +6,7 @@ namespace PhpSystemsPlatform\Queue;
 
 use Closure;
 use PhpJobQueue\Job\Job as QueueJob;
+use PhpSystemsPlatform\Queue\Jobs\DemoSlowJob;
 use PhpSystemsPlatform\Queue\Jobs\FailingJob;
 use PhpSystemsPlatform\Queue\Jobs\NoopJob;
 use PhpSystemsPlatform\Queue\Jobs\OrderCreatedJob;
@@ -34,6 +35,7 @@ final class JobRegistry
         OrderProcessJob::TYPE => OrderProcessJob::class,
         NoopJob::TYPE => NoopJob::class,
         FailingJob::TYPE => FailingJob::class,
+        DemoSlowJob::TYPE => DemoSlowJob::class,
     ];
 
     public function execute(QueueJob $carrier, JobContext $context): void

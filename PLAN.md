@@ -2302,6 +2302,16 @@ GET /orders/1
 
 This becomes the final "story" of the project.
 
+> Implemented (verified): the README's `# Run the Demo` section is the one
+> complete walkthrough - start platform, initialize components, create
+> orders, publish jobs, process with workers, inject a controlled failure,
+> recover the worker, retry failed work, final statistics, graceful
+> shutdown - with real example output. The walkthrough's other beats (cache
+> hit on re-read, load, queue growth, throughput, SIGTERM) are each a
+> dedicated documented command (`load`, `experiments`, `orders:compare`,
+> `benchmark`) rather than stages of the demo script, and are linked from
+> the same README.
+
 ---
 
 # 48. Final Repository Structure
@@ -2354,6 +2364,22 @@ php-systems-platform/
 ├── README.md
 └── LICENSE
 ```
+
+> Implemented: the actual structure is the target with three honest
+> deviations. `bin/` is `platform.php`, `minidb.php`, `cache.php`,
+> `worker.php` (one launcher per long-running process, not a single
+> `platform`). `src/` is a superset: `Application`, `Http`, `Domain`,
+> `Storage`, `Cache`, `Queue`, `Workers`, `Observability` plus `Cli` (the
+> command entry), `Benchmarks`/`Experiments`/`Demo`/`Memory`/`Support` (the
+> command bodies and shared seams). `tests/` is `Unit`/`Integration`/`E2E`/
+> `Support`: the target's "System" level is `tests/Integration/Boundary`
+> (HTTP -> Application -> DB/Cache/Queue, Queue -> WorkerPool) and the
+> "Failure" level is the failure suites (`FailureDemoCommandTest`,
+> `FailureExperimentsCommandTest`, `WorkerFailureTasksTest`). `benchmarks/`
+> and `examples/` have no separate directory: benchmark commands live in
+> `src/Benchmarks` and are measured in `docs/benchmarks.md`, and the demo
+> command is the example. `docs/` is a superset (added `ownership.md`,
+> `process-model.md`, `failure-matrix.md`).
 
 ---
 
@@ -2435,11 +2461,11 @@ Phase 5 is complete when all of the following are true.
 
 ## Architecture
 
-* [ ] All selected Systems Lab components are integrated.
-* [ ] Components retain clear boundaries.
-* [ ] No unnecessary framework abstraction has been introduced.
-* [ ] Process ownership is documented.
-* [ ] Resource ownership is documented.
+* [x] All selected Systems Lab components are integrated.
+* [x] Components retain clear boundaries.
+* [x] No unnecessary framework abstraction has been introduced.
+* [x] Process ownership is documented.
+* [x] Resource ownership is documented.
 
 ## HTTP
 
@@ -2483,7 +2509,7 @@ Phase 5 is complete when all of the following are true.
 
 * [x] At least one real concurrent workload is demonstrated.
 * [x] Sequential vs concurrent behavior can be compared.
-* [ ] Concurrency limits are explicit.
+* [x] Concurrency limits are explicit.
 
 ## Memory
 
@@ -2511,31 +2537,31 @@ Phase 5 is complete when all of the following are true.
 * [x] Worker crash can be reproduced.
 * [x] Job failure can be reproduced.
 * [x] Retry can be reproduced.
-* [ ] Timeout can be reproduced.
+* [x] Timeout can be reproduced.
 * [x] Graceful shutdown can be reproduced.
 
 ## Testing
 
-* [ ] Unit tests pass.
+* [x] Unit tests pass.
 * [x] Integration tests pass.
-* [ ] System tests pass.
+* [x] System tests pass.
 * [x] E2E tests pass.
 * [x] Load tests run, and their actual results are recorded.
-* [ ] Failure tests pass.
+* [x] Failure tests pass.
 
 ## Documentation
 
-* [ ] Architecture is documented.
-* [ ] Process model is documented.
-* [ ] Failure behavior is documented.
-* [ ] Benchmarks are documented.
+* [x] Architecture is documented.
+* [x] Process model is documented.
+* [x] Failure behavior is documented.
+* [x] Benchmarks are documented.
 * [x] Final demo is documented.
 
 ## Reproducibility
 
-* [ ] Clean checkout works.
-* [ ] Clean Composer installation works.
-* [ ] Docker environment works.
+* [x] Clean checkout works.
+* [x] Clean Composer installation works.
+* [x] Docker environment works.
 * [x] Demo works from a clean environment.
 
 ---

@@ -74,3 +74,27 @@ large structure pays the copy (see `memory.md`). The platform deliberately
 uses the fork/pool model because it is the platform's components' native
 model, and it documents the memory price instead of pretending it is not
 there.
+
+## Explicit concurrency limits
+
+Every concurrency limit the platform has is a named, overrideable number, not
+an accident of the machine:
+
+| Limit                        | Value / bounds                      | Where |
+| ---------------------------- | ----------------------------------- | ----- |
+| Worker pool floor            | `WORKER_POOL_MIN`, default 2        | `config/platform.php` |
+| Worker pool ceiling          | `WORKER_POOL_MAX`, default 16       | `config/platform.php` |
+| Queue consumer forwarders    | `queue.consumers`, default 4        | `config/platform.php` |
+| Database connections         | `Database::connect(..., 10)`        | `serve` |
+| `benchmark` jobs             | 1 .. 5000                           | CLI guard |
+| `benchmark` workers          | 1 .. 16                             | CLI guard |
+| `load` requests per phase    | 1 .. 20000 (`MAX_REQUESTS`)         | `LoadTestRunner` |
+| `load` HTTP concurrency      | 1 .. 64 (default 8 in flight)       | `LoadTestRunner` |
+| `load` queue jobs            | 1 .. 5000                           | `LoadTestRunner` |
+| `orders:compare` rounds/delay| 1..100 rounds, 1..1000 ms delay     | CLI guard |
+
+The HTTP server itself has no hard concurrent-connection cap - it is a
+select loop, so its concurrency is bounded by the idle and header timeouts
+that reclaim stalled connections, not by a fixed slot count. That is a
+deliberate property of the component's model, and it is why the timeouts are
+enforced by a periodic sweep rather than left as configuration.

@@ -1630,6 +1630,7 @@ the *why* behind one part of it:
 | `database.md`          | the pool, the timeouts, the slow-database seam |
 | `backpressure.md`      | reject-not-block at the producer's door |
 | `failure-handling.md`  | the failure modes and their reproduction |
+| `failure-matrix.md`    | every failure -> its expected behavior, at a glance |
 | `observability.md`     | the reports and one-request-one-chain traces |
 | `ownership.md`         | who owns each resource and who stops it |
 | `process-model.md`     | the live process tree, readable with `ps`/`pstree` |

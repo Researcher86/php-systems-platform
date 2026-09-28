@@ -2069,6 +2069,12 @@ Example:
 | SIGTERM                 | Graceful shutdown             |
 | SIGINT                  | Graceful shutdown             |
 
+> Implemented: `docs/failure-matrix.md` - the full matrix (the nine required
+> rows plus the platform's own: retryable-vs-foregone job failure, execution
+> timeout, slow database, idempotent redelivery, ignored SIGTERM, cold-start
+> restore), each with how it is observed and how it is reproduced, and the
+> two independent recovery axes (workers vs jobs).
+
 ---
 
 # 43. Step 38 — Final CLI

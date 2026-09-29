@@ -63,7 +63,8 @@ final class ShutdownStackTest extends TestCase
     public function testAThrowingStepDoesNotSkipTheOnesBehindIt(): void
     {
         $releases = [];
-        $stack = new ShutdownStack('test');
+        $errors = fopen('php://memory', 'w+');
+        $stack = new ShutdownStack('test', $errors);
 
         $stack->push(static function () use (&$releases): void {
             $releases[] = 'database';
@@ -78,12 +79,18 @@ final class ShutdownStackTest extends TestCase
         $stack->run();
 
         self::assertSame(['cache', 'database'], $releases);
+        rewind($errors);
+        self::assertSame(
+            "[test] could not release the worker pool: pool refused to stop\n",
+            stream_get_contents($errors),
+        );
     }
 
     public function testRunIsIdempotentAfterATruncatedRun(): void
     {
         $releases = [];
-        $stack = new ShutdownStack('test');
+        $errors = fopen('php://memory', 'w+');
+        $stack = new ShutdownStack('test', $errors);
         $stack->push(static function () use (&$releases): void {
             $releases[] = 'database';
         }, 'database');
@@ -95,6 +102,12 @@ final class ShutdownStackTest extends TestCase
         $stack->run();
 
         self::assertSame(['database'], $releases);
+        rewind($errors);
+        self::assertSame(
+            "[test] could not release the cache server: cache refused to stop\n",
+            stream_get_contents($errors),
+            'the failure is reported once, not once per run()',
+        );
     }
 
     public function testRegisteringAfterRunIsRefused(): void

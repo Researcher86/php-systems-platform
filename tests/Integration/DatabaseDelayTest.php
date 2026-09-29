@@ -109,7 +109,11 @@ final class DatabaseDelayTest extends TestCase
             array_push($arguments, '--pid-file', self::DATA_DIR . '/minidb.pid');
         }
 
-        exec(implode(' ', array_map('escapeshellarg', $arguments)));
+        $process = proc_open($arguments, [1 => ['file', '/dev/null', 'a'], 2 => ['file', '/dev/null', 'a']], $pipes);
+
+        if (is_resource($process)) {
+            proc_close($process);
+        }
 
         if ($command === 'start' && !self::portAnswers()) {
             throw new RuntimeException('The scratch database server did not start listening in time.');

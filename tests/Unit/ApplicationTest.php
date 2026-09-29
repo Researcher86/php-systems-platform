@@ -8,6 +8,7 @@ use PhpMiniHttpServer\Http\Headers\Headers;
 use PhpMiniHttpServer\Http\Protocol\HttpMethod;
 use PhpMiniHttpServer\Http\Protocol\HttpVersion;
 use PhpMiniHttpServer\Http\Request\HttpRequest;
+use PhpMiniHttpServer\Support\Logger;
 use PhpSystemsPlatform\Application\Application;
 use PhpSystemsPlatform\Application\Handlers\FailWorkerHandler;
 use PhpSystemsPlatform\Application\Handlers\HealthHandler;
@@ -65,10 +66,21 @@ final class ApplicationTest extends TestCase
             throw new \RuntimeException('boom');
         });
 
-        $response = new Application($router)->handle($this->request(HttpMethod::GET, '/boom'));
+        $logger = new class () implements Logger {
+            /** @var list<string> */
+            public array $lines = [];
+
+            public function log(string $message): void
+            {
+                $this->lines[] = $message;
+            }
+        };
+
+        $response = new Application($router, logger: $logger)->handle($this->request(HttpMethod::GET, '/boom'));
 
         self::assertSame(500, $response->statusCode());
         self::assertSame("Internal Server Error\n", $response->body);
+        self::assertStringStartsWith('unhandled GET: /boom: RuntimeException at ', $logger->lines[0] ?? '');
     }
 
     public function testQueryAndBodyMakeItThrough(): void

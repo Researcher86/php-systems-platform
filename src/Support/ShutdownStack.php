@@ -29,8 +29,10 @@ final class ShutdownStack
 
     private bool $ran = false;
 
+    /** @param resource $errorOutput where a failing step is reported */
     public function __construct(
         private readonly string $command = 'command',
+        private readonly mixed $errorOutput = STDERR,
     ) {
     }
 
@@ -62,7 +64,7 @@ final class ShutdownStack
             try {
                 ($entry['step'])();
             } catch (Throwable $e) {
-                fwrite(STDERR, sprintf(
+                fwrite($this->errorOutput, sprintf(
                     "[%s] could not release the %s: %s\n",
                     $this->command,
                     $entry['name'] === '' ? 'resource' : $entry['name'],

@@ -106,4 +106,63 @@ final class RouterTest extends TestCase
 
         self::assertSame('{"content_type":"application/json","length":7}', $response->body);
     }
+
+    /**
+     * A registered path is a path, not a regex. Unescaped, the `.` in a path
+     * matched any character, so `/hea.th` also answered `/health` and two
+     * different registrations could quietly become one.
+     */
+    public function testLiteralSegmentsAreNotRegexWildcards(): void
+    {
+        $router = new Router();
+        $router->get('/health', static fn (Request $request, array $params): Response => Response::json(['kind' => 'health']));
+        $router->get('/hea.th', static fn (Request $request, array $params): Response => Response::json(['kind' => 'literal']));
+
+        // Its own path still matches...
+        self::assertSame('{"kind":"literal"}', $router->dispatch(new Request(RequestMethod::GET, '/hea.th'))->body);
+        self::assertSame('{"kind":"health"}', $router->dispatch(new Request(RequestMethod::GET, '/health'))->body);
+
+        // ...and a path that only the unescaped pattern would have matched
+        // now matches nothing.
+        $this->expectException(RouteNotFoundException::class);
+        $router->dispatch(new Request(RequestMethod::GET, '/heaXth'));
+    }
+
+    /**
+     * Regex punctuation in a path is a path, not a broken pattern: an
+     * unescaped `(` would not even compile, and `+` would have meant "the
+     * previous character, one or more times".
+     */
+    public function testRegexPunctuationInAPathIsLiteral(): void
+    {
+        $router = new Router();
+        $router->get('/a+b', static fn (Request $request, array $params): Response => Response::json(['kind' => 'plus']));
+        $router->get('/c(d)', static fn (Request $request, array $params): Response => Response::json(['kind' => 'group']));
+
+        self::assertSame('{"kind":"plus"}', $router->dispatch(new Request(RequestMethod::GET, '/a+b'))->body);
+        self::assertSame('{"kind":"group"}', $router->dispatch(new Request(RequestMethod::GET, '/c(d)'))->body);
+
+        // "one or more" would have made /a+b answer /ab and /aaab too.
+        $this->expectException(RouteNotFoundException::class);
+        $router->dispatch(new Request(RequestMethod::GET, '/aaab'));
+    }
+
+    /**
+     * Escaping the literal runs must not touch the placeholders: they stay
+     * named groups, still one segment each.
+     */
+    public function testPlaceholdersStillCaptureOneSegmentEach(): void
+    {
+        $router = new Router();
+        $router->get('/orders/{id}/items/{itemId}', static fn (Request $request, array $params): Response => Response::json($params));
+
+        self::assertSame(
+            '{"id":"42","itemId":"7"}',
+            $router->dispatch(new Request(RequestMethod::GET, '/orders/42/items/7'))->body,
+        );
+
+        // A placeholder is still [^/]+, so it does not span a slash.
+        $this->expectException(RouteNotFoundException::class);
+        $router->dispatch(new Request(RequestMethod::GET, '/orders/42/items/7/extra'));
+    }
 }

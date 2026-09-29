@@ -1355,17 +1355,30 @@ Run the test suite with:
 composer test
 ```
 
-The exact test commands may evolve with the implementation.
+The three commands may evolve with the implementation.
 
 Every push and pull request runs the same three commands on GitHub Actions
 (`.github/workflows/ci.yml`), on PHP 8.5 with the extensions the integrated
 components need:
 
 ```bash
-composer test          # unit + integration against the real stack
+composer test          # all three suites, in order
 composer analyse       # PHPStan
 composer format:check  # PHP CS Fixer, no changes allowed
 ```
+
+`composer test` is three suites, and the split exists because they are three
+different kinds of feedback at three very different costs:
+
+```bash
+composer test:unit          # 131 tests, well under a second - no processes
+composer test:integration   # starts real servers, speaks HTTP to them
+composer test:e2e           # drives the CLI as a user would
+```
+
+While editing, run `composer test:unit`; it is the loop that can keep up with
+you. `composer test` still runs all three, in that order, so the full run is
+unchanged.
 
 The integration tests start the real database, cache, worker pool and HTTP
 server as child processes, so CI exercises the same process model a local

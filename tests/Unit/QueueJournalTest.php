@@ -68,6 +68,69 @@ final class QueueJournalTest extends TestCase
     }
 
     /**
+     * The cache must never make a caller read a stale queue. A producer
+     * appending between two reads is the ordinary case - the HTTP server's
+     * backpressure policy and its status route share one journal - so the
+     * second snapshot has to see the row the first one could not.
+     */
+    public function testAnAppendIsVisibleToTheNextSnapshot(): void
+    {
+        $storage = new FileStorage($this->logPath);
+        $journal = new QueueJournal($this->logPath);
+
+        $storage->store('job-1', $this->row('READY', 0));
+        self::assertSame(1, $journal->snapshot()['depth']);
+
+        // A second read with nothing appended is the cached one.
+        self::assertSame(1, $journal->snapshot()['depth']);
+
+        $storage->store('job-2', $this->row('READY', 0));
+        self::assertSame(2, $journal->snapshot()['depth']);
+
+        // A state change to an existing job appends a new line, so it is
+        // visible for the same reason a new row is.
+        $storage->store('job-1', $this->row('COMPLETED', 1));
+        $after = $journal->snapshot();
+        self::assertSame(1, $after['depth']);
+        self::assertSame(1, $after['completed']);
+    }
+
+    /**
+     * A file that does not exist yet and one that is created must not look
+     * alike: "no jobs" and "not created yet" are both zero rows, and a cache
+     * keyed on the absent file's stats must still notice the arrival.
+     */
+    public function testAJournalThatAppearsAfterTheFirstReadIsNoticed(): void
+    {
+        $journal = new QueueJournal($this->logPath);
+
+        self::assertSame([], $journal->rows());
+
+        new FileStorage($this->logPath)->store('job-1', $this->row('READY', 0));
+
+        self::assertCount(1, $journal->rows());
+    }
+
+    /**
+     * The same rows, twice, from the same instance: the cache is an
+     * optimization, so the answer must not depend on whether it was a hit.
+     */
+    public function testRepeatedReadsReturnEqualRows(): void
+    {
+        $storage = new FileStorage($this->logPath);
+        $storage->store('job-1', $this->row('READY', 0));
+        $storage->store('job-2', $this->row('COMPLETED', 1));
+
+        $journal = new QueueJournal($this->logPath);
+
+        $first = $journal->rows();
+        $second = $journal->rows();
+
+        self::assertSame($first, $second);
+        self::assertSame(['job-1', 'job-2'], array_keys($first));
+    }
+
+    /**
      * The shape FileStorage::store() writes for one job: the component's
      * Job::toArray() payload under 'data'.
      *

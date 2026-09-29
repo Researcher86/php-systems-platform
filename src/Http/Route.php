@@ -23,12 +23,39 @@ final readonly class Route
     }
 
     /**
-     * A {name} placeholder becomes a named group matching one path segment.
+     * A {name} placeholder becomes a named group matching one path segment;
+     * everything else is matched literally.
+     *
+     * "Literally" is the part that has to be earned. The literal segments used
+     * to be pasted into the pattern unescaped, so a registered path was also a
+     * piece of regex: `/health` and `/hea.th` compiled to the same pattern,
+     * and a path carrying a `+` or a `(` would not compile at all - preg would
+     * reject the pattern, or worse, match something the author never wrote.
+     * Splitting on the placeholder and quoting each literal run with
+     * preg_quote() makes the pattern mean what the path says: `/hea.th` now
+     * matches only that path, and a path with regex punctuation in it is
+     * simply a path.
      */
     public static function compile(string $path, Closure $handler): self
     {
-        $regex = '#^' . preg_replace('/\{(\w+)\}/', '(?P<$1>[^/]+)', $path) . '$#';
+        $pattern = '';
 
-        return new self($path, $handler, $regex);
+        // Split with the placeholders kept, so the literal runs between them
+        // can each be quoted on their own.
+        foreach (preg_split('/(\{\w+\})/', $path, -1, PREG_SPLIT_DELIM_CAPTURE) ?: [''] as $part) {
+            if ($part === '') {
+                continue;
+            }
+
+            if (preg_match('/^\{\w+\}$/', $part) === 1) {
+                $pattern .= '(?P<' . substr($part, 1, -1) . '>[^/]+)';
+
+                continue;
+            }
+
+            $pattern .= preg_quote($part, '#');
+        }
+
+        return new self($path, $handler, '#^' . $pattern . '$#');
     }
 }

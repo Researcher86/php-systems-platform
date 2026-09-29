@@ -11,6 +11,8 @@ use PhpMiniHttpServer\Http\Request\HttpRequest;
 use PhpMiniHttpServer\Http\Response\HttpResponse;
 use PhpMiniHttpServer\Http\Response\HttpStatusCode;
 use PhpMiniHttpServer\Http\Response\ResponseFactory;
+use PhpMiniHttpServer\Support\Logger;
+use PhpMiniHttpServer\Support\StderrLogger;
 use PhpSystemsPlatform\Http\MethodNotAllowedException;
 use PhpSystemsPlatform\Http\Request;
 use PhpSystemsPlatform\Http\RequestMethod;
@@ -40,6 +42,7 @@ final readonly class Application implements RequestHandler
         private Router $router,
         private ?MetricsRegistry $metrics = null,
         private ?Trace $trace = null,
+        private ?Logger $logger = null,
     ) {
     }
 
@@ -85,6 +88,14 @@ final readonly class Application implements RequestHandler
         return $response;
     }
 
+    /**
+     * A handler that throws becomes a 500 here, which is the right answer to
+     * give the client - but the Throwable itself is what an operator needs,
+     * and dropping it made a broken handler indistinguishable from a handler
+     * that was never called. The stack trace goes to STDERR, never into the
+     * response body: an exception message is the one thing on this path that
+     * routinely holds a connection string or a file path.
+     */
     private function respond(HttpRequest $request): HttpResponse
     {
         $internal = new Request(
@@ -104,9 +115,31 @@ final readonly class Application implements RequestHandler
             $headers->set('Allow', implode(', ', $e->allowed));
 
             return $this->error(HttpStatusCode::METHOD_NOT_ALLOWED, $headers);
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            $this->reportHandlerFailure($request, $e);
+
             return $this->error(HttpStatusCode::INTERNAL_SERVER_ERROR);
         }
+    }
+
+    /**
+     * One line on STDERR naming the request and the failure, then the
+     * throwable's own trace - which is the part that says which of the
+     * platform's handlers actually broke.
+     */
+    private function reportHandlerFailure(HttpRequest $request, Throwable $e): void
+    {
+        $logger = $this->logger ?? new StderrLogger();
+
+        $logger->log(sprintf(
+            'unhandled %s: %s: %s at %s:%d',
+            $request->method->value,
+            $request->path(),
+            $e::class,
+            $e->getFile(),
+            $e->getLine(),
+        ));
+        $logger->log($e->getTraceAsString());
     }
 
     private function toHttpResponse(Response $response): HttpResponse

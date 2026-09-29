@@ -147,6 +147,13 @@ final readonly class OrderService
      * Accept a JSON number or numeric string and normalize it to the
      * fixed-scale "12.34" shape DECIMAL(10,2) stores, rejecting anything
      * outside its integer-digit capacity.
+     *
+     * The sign is normalized, not just validated. A leading `-` is refused -
+     * an order is not a credit - but a leading `+` used to survive all the way
+     * into storage as "+5.00", because only `-` was checked. That made "+5"
+     * and "5" two different stored amounts: they compared unequal, they
+     * hashed to two different idempotency keys, and nothing in the domain
+     * would have complained, because each was a valid decimal on its own.
      */
     private function normalizeAmount(mixed $value): string
     {
@@ -164,7 +171,10 @@ final readonly class OrderService
             throw new InvalidArgumentException('amount must not be negative.');
         }
 
-        $parts = explode('.', $value);
+        // "+" means the same as no sign at all, so it is dropped rather than
+        // stored. ltrim() would also eat leading zeros, which the integer
+        // capacity check below counts, so only the sign is taken off here.
+        $parts = explode('.', ltrim($value, '+'));
         $integer = ltrim($parts[0], '0') === '' ? '0' : ltrim($parts[0], '0');
 
         if (strlen($integer) > 8) {

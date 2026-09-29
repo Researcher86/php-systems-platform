@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Storage;
 
 use PhpMiniDatabase\Client\ClientConfig;
+use PhpMiniDatabase\Client\Connection;
 use PhpMiniDatabase\Client\ConnectionPool;
 use PhpSystemsPlatform\Observability\MetricsRegistry;
 use PhpSystemsPlatform\Observability\Trace;
@@ -121,25 +122,8 @@ final readonly class Database
      */
     public function read(string $sql, array $parameters = []): array
     {
-        $startedAt = microtime(true);
-        $this->slowDown();
-        $connection = $this->pool->acquire();
-
-        try {
-            $rows = $connection->query($sql, $parameters)->fetchAll();
-        } catch (\Throwable $e) {
-            $this->metrics?->increment(MetricsRegistry::DB_OPERATIONS);
-            $this->metrics?->increment(MetricsRegistry::DB_ERRORS);
-            $this->metrics?->observe(MetricsRegistry::DB_OPERATION_DURATION, microtime(true) - $startedAt);
-            $this->trace?->record('db.read', microtime(true) - $startedAt, ['meta' => ['ok' => false]]);
-            throw $e;
-        } finally {
-            $this->pool->release($connection);
-        }
-
-        $this->metrics?->increment(MetricsRegistry::DB_OPERATIONS);
-        $this->metrics?->observe(MetricsRegistry::DB_OPERATION_DURATION, microtime(true) - $startedAt);
-        $this->trace?->record('db.read', microtime(true) - $startedAt, ['meta' => ['ok' => true]]);
+        /** @var list<array<string, mixed>> $rows */
+        $rows = $this->run('db.read', static fn (Connection $c): mixed => $c->query($sql, $parameters)->fetchAll());
 
         return $rows;
     }
@@ -153,27 +137,69 @@ final readonly class Database
      */
     public function write(string $sql, array $parameters = []): ?int
     {
+        /** @var int|null $affected */
+        $affected = $this->run('db.write', static fn (Connection $c): mixed => $c->query($sql, $parameters)->affectedRows());
+
+        return $affected;
+    }
+
+    /**
+     * One statement: acquire a connection, run it, and report the outcome -
+     * the same four bookkeeping steps whichever way it went.
+     *
+     * read() and write() used to carry this between them, twice each, and the
+     * duplication was not cosmetic: the failure path records its own
+     * duration and then rethrows, so any change to how an operation is
+     * reported had to be made in four places, and a missed one is a span that
+     * reports the wrong outcome while the metrics report the right one. The
+     * report is here once, with one success path and one failure path.
+     *
+     * The connection is released in `finally` whether the statement succeeded,
+     * failed or threw, so a failing query cannot leak a pool slot - which is
+     * how a database outage under load turns into a server that stops
+     * answering rather than one that reports errors.
+     *
+     * @template T
+     *
+     * @param callable(Connection): T $operation
+     *
+     * @return T
+     */
+    private function run(string $span, callable $operation): mixed
+    {
         $startedAt = microtime(true);
         $this->slowDown();
         $connection = $this->pool->acquire();
 
         try {
-            $affected = $connection->query($sql, $parameters)->affectedRows();
+            $result = $operation($connection);
         } catch (\Throwable $e) {
-            $this->metrics?->increment(MetricsRegistry::DB_OPERATIONS);
-            $this->metrics?->increment(MetricsRegistry::DB_ERRORS);
-            $this->metrics?->observe(MetricsRegistry::DB_OPERATION_DURATION, microtime(true) - $startedAt);
-            $this->trace?->record('db.write', microtime(true) - $startedAt, ['meta' => ['ok' => false]]);
+            $this->report($span, $startedAt, false);
+
             throw $e;
         } finally {
             $this->pool->release($connection);
         }
 
-        $this->metrics?->increment(MetricsRegistry::DB_OPERATIONS);
-        $this->metrics?->observe(MetricsRegistry::DB_OPERATION_DURATION, microtime(true) - $startedAt);
-        $this->trace?->record('db.write', microtime(true) - $startedAt, ['meta' => ['ok' => true]]);
+        $this->report($span, $startedAt, true);
 
-        return $affected;
+        return $result;
+    }
+
+    /**
+     * Count the operation, note its duration, and record the span - the same
+     * three things for every statement, in one place.
+     */
+    private function report(string $span, float $startedAt, bool $ok): void
+    {
+        $this->metrics?->increment(MetricsRegistry::DB_OPERATIONS);
+
+        if (!$ok) {
+            $this->metrics?->increment(MetricsRegistry::DB_ERRORS);
+        }
+
+        $this->metrics?->observe(MetricsRegistry::DB_OPERATION_DURATION, microtime(true) - $startedAt);
+        $this->trace?->record($span, microtime(true) - $startedAt, ['meta' => ['ok' => $ok]]);
     }
 
     public function close(): void

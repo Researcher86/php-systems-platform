@@ -38,6 +38,23 @@ cache tier" - a number, not a failure - so it uses the off switch, and the
 difference is the point of `cache.md`: measuring a down cache would be
 measuring the cost of a failed connection, which is a different question.
 
+`CACHE_ENABLED=0` now reaches the consumer as well. `queue:consume` used to
+start the cache server unconditionally, so a platform configured with no cache
+tier still spawned one for the worker side, and a test asserting "no cache
+process exists" would have found it. Both ends of the platform now honour the
+same switch: no tier, no cache process, and the consumer's lookups count as
+misses without a socket.
+
+## One miss, counted once
+
+`CacheService::getOrder()` has three distinct reasons to answer "no payload" -
+no cache tier, nothing stored, and something stored that does not parse back
+into an object. Each of them counted the miss itself, so the definition of a
+miss was three copies of three statements, and they had to stay equal by hand.
+They now go through `recordMiss()`, and the hit path's two increments sit
+beside it, so "hits + misses = lookups" is a property of one method rather
+than of three call sites agreeing.
+
 ## Why a miss is slower than no cache at all
 
 Measured in `benchmarks.md`: a cache *miss* (1911 rps) is slower than a

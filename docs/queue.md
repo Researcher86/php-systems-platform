@@ -22,6 +22,17 @@ Consequences that fall out of "journal as source of truth":
 - **`/queue/status` and `queue:status` are just journal counts.** Depth,
   published, completed, failed, retried are derived from the file, so a
   second process can observe the queue without owning it.
+- **The replay is cached, because it is append-only.** Those counts mean
+  re-reading the whole journal, and backpressure meant doing it *per request*
+  at the write path's front door - so a loaded platform paid a full file
+  parse to answer "is the queue full" on a request that had not enqueued
+  anything. `QueueJournal` now holds its rows and its snapshot in memory and
+  invalidates them on a `stat()` change to the file. On a 20 000-row journal
+  that is ~36.6 ms for the first read and ~0.16 ms for the next - about
+  225x - while still picking up a row appended by another process, because
+  the journal only ever grows and an append changes its size. The
+  backpressure check and `/queue/status` share one instance inside the
+  application, so the second reader of a request is free too.
 
 ## Producer / consumer split
 

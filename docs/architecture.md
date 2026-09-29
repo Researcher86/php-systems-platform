@@ -63,7 +63,11 @@ uses it:
    to the same router - health, order endpoints, cache-first reads, the
    producer seam, the backpressure policy in front of `POST /orders`, the
    `/metrics` and `/queue/status` and `/workers` observers, and (only in
-   dev/demo) `POST /debug/fail-worker`.
+   dev/demo) `POST /debug/fail-worker`. That function takes an
+   `ApplicationWiring` rather than a dozen positional arguments, because a
+   list of ten same-typed dependencies is one where a reordering compiles
+   cleanly and hands every component the wrong object. Named wiring means the
+   call site reads as the components' names, and a wrong one cannot compile.
 4. The HTTP server on a select loop, with the idle/header timeouts enforced
    by a one-second sweep - otherwise the config numbers would just sit there.
 

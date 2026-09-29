@@ -61,6 +61,23 @@ final class WorkerRegistry
 
     private const float JOURNAL_REFRESH_SECONDS = 0.05;
 
+    /**
+     * How long a resolution stays in resolvedAt() after it was credited.
+     *
+     * The entry exists to answer "when did this job finish" for a consumer
+     * that is polling, and it used to be kept forever - one entry per job for
+     * the life of the consumer, which is a leak proportional to throughput
+     * rather than to pool size. Time is the right axis instead of a count
+     * because the reader's contract is "poll within a window or copy the
+     * value out": QueueBenchmark copies each value into its own map on the
+     * tick after it appears, and it polls every few milliseconds, so a five
+     * minute window is orders of magnitude more than any reader needs while
+     * still bounding a consumer that runs for days.
+     */
+    private const float RESOLVED_TTL_SECONDS = 300.0;
+
+    private float $lastPruneAt = 0.0;
+
     /** @var array<string, array<string, mixed>>|null */
     private ?array $rowsCache = null;
 
@@ -78,6 +95,7 @@ final class WorkerRegistry
         private QueueJournal $journal,
         private Clock $clock = new SystemClock(),
         private string $statusPath = '',
+        private readonly float $resolvedTtl = self::RESOLVED_TTL_SECONDS,
     ) {
     }
 
@@ -119,14 +137,18 @@ final class WorkerRegistry
      */
     public function settle(): void
     {
+        $now = $this->clock->now();
+
         foreach ($this->pool->getWorkers() as $worker) {
             $this->observe($worker);
         }
 
         // The journal is replayed for attribution on a short interval, not
         // every tick: a benchmark with thousands of jobs would otherwise
-        // decode the whole log on every fast pass.
-        $rows = $this->rows();
+        // decode the whole log on every fast pass. The same $now both the
+        // replay and the pruning below judge staleness by, so a slow tick
+        // cannot make the two disagree about what "recent" means.
+        $rows = $this->rows($now);
 
         foreach (array_keys($this->inFlight) as $jobId) {
             $row = $rows[$jobId] ?? null;
@@ -137,7 +159,7 @@ final class WorkerRegistry
 
             switch (JobState::fromName((string) $row['state'])) {
                 case JobState::COMPLETED:
-                    $this->resolvedAt[$jobId] = $this->clock->now();
+                    $this->resolvedAt[$jobId] = $now;
                     $this->resolvedCount++;
                     unset($this->inFlight[$jobId]);
                     break;
@@ -150,6 +172,35 @@ final class WorkerRegistry
                     // work (a retry waiting, or a delivery in flight).
                     break;
             }
+        }
+
+        $this->pruneResolvedAt($now);
+    }
+
+    /**
+     * Drop resolutions older than the TTL.
+     *
+     * Only on the same interval the journal replay uses: pruning is a scan of
+     * the whole map, and doing it on every settle() of a tight consumer loop
+     * would be a per-tick cost proportional to everything resolved so far -
+     * the same growth the pruning exists to stop, paid on the hot path. Once
+     * per 50ms the scan is cheap regardless of throughput.
+     */
+    private function pruneResolvedAt(float $now): void
+    {
+        if ($now - $this->lastPruneAt < self::JOURNAL_REFRESH_SECONDS) {
+            return;
+        }
+
+        $this->lastPruneAt = $now;
+        $cutoff = $now - $this->resolvedTtl;
+
+        foreach ($this->resolvedAt as $jobId => $at) {
+            if ($at >= $cutoff) {
+                continue;
+            }
+
+            unset($this->resolvedAt[$jobId]);
         }
     }
 
@@ -217,9 +268,9 @@ final class WorkerRegistry
      *
      * @return array<string, array<string, mixed>>
      */
-    private function rows(): array
+    private function rows(?float $now = null): array
     {
-        $now = $this->clock->now();
+        $now ??= $this->clock->now();
 
         if ($this->rowsCache === null || $now - $this->rowsCacheAt >= self::JOURNAL_REFRESH_SECONDS) {
             $this->rowsCache = $this->journal->rows();

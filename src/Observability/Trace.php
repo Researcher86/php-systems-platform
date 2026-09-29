@@ -52,6 +52,17 @@ final class Trace
      */
     private const string INBOUND_PATTERN = '/^[A-Za-z0-9._-]{8,128}$/';
 
+    /**
+     * How many spans to keep in memory when the caller does not say. The
+     * journal is the durable record and this is the hot cache in front of it,
+     * so the oldest span is the one worth dropping - it is still readable
+     * through readLog() from the file. A serve that runs for days used to
+     * hold every span it ever recorded here, which is a slow leak that only
+     * shows up as an unexplained ceiling on a long enough run; the journal it
+     * was duplicating grows on disk either way, by design.
+     */
+    private const int DEFAULT_MEMORY_SPANS = 1000;
+
     /** @var list<array<string, mixed>> */
     private array $spans = [];
 
@@ -59,6 +70,7 @@ final class Trace
 
     public function __construct(
         private readonly ?string $logPath = null,
+        private readonly int $maxSpans = self::DEFAULT_MEMORY_SPANS,
     ) {
     }
 
@@ -112,12 +124,25 @@ final class Trace
 
         $this->spans[] = $span;
 
+        if (count($this->spans) > $this->maxSpans) {
+            // Drop from the front, once, rather than trimming to size on
+            // every record: the overshoot is at most one span, and a
+            // continuous serve then does one array_slice per maxSpans
+            // records instead of per record.
+            array_shift($this->spans);
+        }
+
         if ($this->logPath !== null) {
             $this->append($span);
         }
     }
 
     /**
+     * The spans this process still holds, newest-last. Bounded by the
+     * constructor's $maxSpans - pass a request id to get only that request's
+     * spans, and expect a request older than the window to be absent here
+     * while still being readable from the journal.
+     *
      * @return list<array<string, mixed>>
      */
     public function spans(?string $requestId = null): array
@@ -130,6 +155,23 @@ final class Trace
             $this->spans,
             static fn (array $span): bool => $span['request_id'] === $requestId,
         ));
+    }
+
+    /**
+     * Spans still in memory for one request, or null when the request has no
+     * live spans in this process at all. Null and "empty" are different
+     * answers and the difference matters: an empty list for a request this
+     * process never touched would be indistinguishable from a request whose
+     * spans have aged out of the memory window, and a caller would report a
+     * trace as empty when the real answer is "ask the journal".
+     *
+     * @return list<array<string, mixed>>|null
+     */
+    public function spansForRequest(string $requestId): ?array
+    {
+        $spans = $this->spans($requestId);
+
+        return $spans === [] ? null : $spans;
     }
 
     /**

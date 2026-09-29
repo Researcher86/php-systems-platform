@@ -26,6 +26,7 @@ use PhpMiniHttpServer\Server\ServerConfig;
 use PhpMiniHttpServer\Server\ServerStartException;
 use PhpMiniHttpServer\Support\StderrLogger;
 use PhpSystemsPlatform\Application\Application;
+use PhpSystemsPlatform\Application\ApplicationWiring;
 use PhpSystemsPlatform\Application\Handlers\FailWorkerHandler;
 use PhpSystemsPlatform\Application\Handlers\HealthHandler;
 use PhpSystemsPlatform\Application\Handlers\MetricsHandler;
@@ -59,6 +60,7 @@ use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Migrator;
 use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
+use PhpSystemsPlatform\Support\ShutdownStack;
 use PhpSystemsPlatform\Workers\ConcurrentOrderLoader;
 use PhpSystemsPlatform\Workers\ConcurrentTaskRunner;
 use PhpSystemsPlatform\Workers\ForkedOrderLoader;
@@ -210,155 +212,176 @@ final class PlatformCli
      * time on the component's select loop. Routes are registered in
      * application(); every later phase that adds a feature registers it there
      * too, keeping this method about serving, not about routing.
+     *
+     * Everything this command starts is registered with one ShutdownStack and
+     * released by a single finally, so "what serve owns" is written once, in
+     * the order things are acquired, instead of being re-asserted at every
+     * exit. That is not tidiness: the pool Master used to be forgotten on two
+     * of the five error paths below, which left a Master and its workers
+     * running with no parent - and the next serve then adopted the orphan
+     * rather than owning it, so nothing ever stopped it.
      */
     private function serve(): int
     {
         $config = $this->config();
         $databaseConfig = $config['database'];
-
-        // PLAN Step 23: the one shared registry every component reports into.
-        // Wired before any client so the database and cache can be handed it
-        // at construction time; serve()'s own report picks it up afterwards.
-        $systemMetrics = new MetricsRegistry();
-
-        // PLAN Step 24: the serve side's tracer over the same journal the
-        // pool workers write into, so one request's whole chain - this
-        // process's request/database spans and every worker's job.execute
-        // spans - is readable from a single file.
-        $systemTrace = new Trace($this->traceStorePath($config));
-
-        $database = Database::connect($databaseConfig, 10, $systemMetrics, $systemTrace);
-
-        $ownsDatabaseServer = false;
+        $shutdown = new ShutdownStack('serve');
 
         try {
-            $ownsDatabaseServer = $this->ensureDatabaseServer($databaseConfig);
+            // PLAN Step 23: the one shared registry every component reports
+            // into. Wired before any client so the database and cache can be
+            // handed it at construction time; serve()'s own report picks it up
+            // afterwards.
+            $systemMetrics = new MetricsRegistry();
+
+            // PLAN Step 24: the serve side's tracer over the same journal the
+            // pool workers write into, so one request's whole chain - this
+            // process's request/database spans and every worker's job.execute
+            // spans - is readable from a single file.
+            $systemTrace = new Trace($this->traceStorePath($config));
+
+            $database = Database::connect($databaseConfig, 10, $systemMetrics, $systemTrace);
+            $shutdown->push(static fn (): null => $database->close(), 'database');
+
+            // The database server is the one resource whose ownership cannot
+            // come from a handle: it daemonizes and is tracked by a pid file,
+            // so an already-running one must be adopted and left running. Only
+            // a server this call started is registered for stopping.
+            if ($this->ensureDatabaseServer($databaseConfig)) {
+                $shutdown->push(
+                    fn (): null => $this->stopDatabaseServerIfOwned(true, $databaseConfig),
+                    'database server',
+                );
+            }
+
             Migrator::migrate($database);
-        } catch (RuntimeException $e) {
-            fwrite(STDERR, $e->getMessage() . PHP_EOL);
-            $database->close();
 
-            return 1;
-        }
+            $cacheConfig = $config['cache'];
+            $cache = CacheService::fromConfig($cacheConfig, $systemMetrics);
+            $shutdown->push(static fn (): null => $cache->close(), 'cache');
 
-        $cacheConfig = $config['cache'];
-
-        $cache = CacheService::fromConfig($cacheConfig, $systemMetrics);
-
-        $ownsCacheServer = false;
-
-        try {
             // CACHE_ENABLED=0 is a platform with no cache tier: no server is
             // started, because a cache nobody reads is a process nobody asked
             // for, and the line printed here is how the operator tells the two
             // configurations apart in a load test's output.
-            $ownsCacheServer = $cache->isEnabled()
-                ? $this->ensureCacheServer($cacheConfig)
-                : $this->skipCacheServer($cacheConfig);
-        } catch (RuntimeException $e) {
-            fwrite(STDERR, $e->getMessage() . PHP_EOL);
-            $database->close();
-            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
+            if ($cache->isEnabled()) {
+                $this->ensureCacheServer($cacheConfig);
+            } else {
+                $this->skipCacheServer($cacheConfig);
+            }
 
-            return 1;
-        }
+            // Registered unconditionally and stopped by handle: skipCacheServer
+            // and an adopted cache both leave no handle, so the step is a
+            // no-op in exactly the cases where nothing is owned.
+            $shutdown->push(fn (): null => $this->stopCacheServer(), 'cache server');
 
-        $workersConfig = $config['workers'];
+            $workersConfig = $config['workers'];
+            $this->ensureWorkerPoolServer($workersConfig);
+            $shutdown->push(fn (): null => $this->stopWorkerPool(), 'worker pool');
 
-        $ownsWorkerPool = false;
-        $runner = null;
-
-        try {
-            $ownsWorkerPool = $this->ensureWorkerPoolServer($workersConfig);
             $runner = new ConcurrentTaskRunner(new WorkerPoolClient(
                 $workersConfig['socket'],
                 (float) $workersConfig['task_timeout'],
             ));
-        } catch (RuntimeException $e) {
-            fwrite(STDERR, $e->getMessage() . PHP_EOL);
-            $database->close();
-            $cache->close();
-            $this->stopCacheServerIfOwned($ownsCacheServer);
-            $this->stopWorkerPoolIfOwned($ownsWorkerPool);
-            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
 
-            return 1;
-        }
+            // PLAN Step 22: the /debug/fail-worker route exists only when the
+            // platform is in a development/demo environment. Otherwise the
+            // injector stays null and application() registers no such route.
+            $failureInjector = $config['failure_injection']['enabled']
+                ? new WorkerFailureInjector(new WorkerPoolClient(
+                    $workersConfig['socket'],
+                    (float) $workersConfig['task_timeout'],
+                ))
+                : null;
 
-        // PLAN Step 22: the /debug/fail-worker route exists only when the
-        // platform is in a development/demo environment. Otherwise the
-        // injector stays null and application() registers no such route.
-        $failureInjector = $config['failure_injection']['enabled']
-            ? new WorkerFailureInjector(new WorkerPoolClient(
-                $workersConfig['socket'],
-                (float) $workersConfig['task_timeout'],
-            ))
-            : null;
-
-        $http = $config['http'];
-
-        $producer = null;
-
-        try {
+            $http = $config['http'];
             $producer = $this->producer($config['queue']);
-        } catch (RuntimeException $e) {
-            fwrite(STDERR, $e->getMessage() . PHP_EOL);
-            $database->close();
-            $cache->close();
-            $this->stopCacheServerIfOwned($ownsCacheServer);
-            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
 
-            return 1;
-        }
-
-        $serverConfig = new ServerConfig(
-            host: $http['host'],
-            port: $http['port'],
-            // PLAN Step 18's HTTP request timeout, in the config's own two
-            // parts - a connection idle this long is reclaimed, one stuck
-            // mid-header-block is reclaimed sooner (the Slowloris guard).
-            // Both are only names for the component's own numbers until the
-            // periodic sweep below actually calls the methods that enforce
-            // them.
-            connectionTimeout: (float) $http['request_timeout'],
-            headerTimeout: (float) $http['header_timeout'],
-        );
-        $server = new Server($serverConfig);
-
-        try {
+            $serverConfig = new ServerConfig(
+                host: $http['host'],
+                port: $http['port'],
+                // PLAN Step 18's HTTP request timeout, in the config's own two
+                // parts - a connection idle this long is reclaimed, one stuck
+                // mid-header-block is reclaimed sooner (the Slowloris guard).
+                // Both are only names for the component's own numbers until the
+                // periodic sweep below actually calls the methods that enforce
+                // them.
+                connectionTimeout: (float) $http['request_timeout'],
+                headerTimeout: (float) $http['header_timeout'],
+            );
+            $server = new Server($serverConfig);
             $server->start();
-        } catch (ServerStartException $e) {
+
+            $parser = new HttpParser($serverConfig->maxHeaderBytes, $serverConfig->maxBodyBytes);
+            $encoder = new ResponseEncoder();
+            $logger = new StderrLogger();
+            $metrics = new ServerMetrics();
+            $loop = new SelectLoop();
+            // PLAN Step 23: the platform's own report sits next to the
+            // component's ServerMetrics and reads the shared registry plus the
+            // live sources (queue journal, worker pool, this process's memory).
+            // It backs both the /metrics route and the `metrics` CLI command.
+            $metricsReporter = new MetricsReporter(
+                $systemMetrics,
+                new QueueJournal($config['queue']['data_dir'] . '/queue.log'),
+                new WorkerPoolClient(
+                    $workersConfig['socket'],
+                    (float) $workersConfig['task_timeout'],
+                ),
+                new MemoryReporter(),
+            );
+
+            $application = $this->application(
+                new ApplicationWiring(
+                    database: $database,
+                    cache: $cache,
+                    producer: $producer,
+                    runner: $runner,
+                    queueLogPath: $config['queue']['data_dir'] . '/queue.log',
+                    workersStatusPath: $config['workers']['data_dir'] . '/workers.status.json',
+                    maxQueueSize: (int) $config['queue']['max_size'],
+                    failureInjector: $failureInjector,
+                    metricsReporter: $metricsReporter,
+                    trace: $systemTrace,
+                    logger: $logger,
+                ),
+            );
+
+            $this->runHttpLoop($loop, $server, $serverConfig, $parser, $encoder, $application, $metrics, $logger);
+
+            $server->stop();
+            printf("Shutdown complete.\n");
+
+            return 0;
+        } catch (RuntimeException | ServerStartException $e) {
             fwrite(STDERR, $e->getMessage() . PHP_EOL);
-            $database->close();
-            $cache->close();
-            $this->stopCacheServerIfOwned($ownsCacheServer);
-            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
 
             return 1;
+        } finally {
+            $shutdown->run();
         }
+    }
 
-        $parser = new HttpParser($serverConfig->maxHeaderBytes, $serverConfig->maxBodyBytes);
-        $encoder = new ResponseEncoder();
-        $logger = new StderrLogger();
-        $metrics = new ServerMetrics();
-        $loop = new SelectLoop();
-
-        // PLAN Step 23: the platform's own report sits next to the
-        // component's ServerMetrics and reads the shared registry plus the
-        // live sources (queue journal, worker pool, this process's memory).
-        // It backs both the /metrics route and the `metrics` CLI command.
-        $metricsReporter = new MetricsReporter(
-            $systemMetrics,
-            new QueueJournal($config['queue']['data_dir'] . '/queue.log'),
-            new WorkerPoolClient(
-                $workersConfig['socket'],
-                (float) $workersConfig['task_timeout'],
-            ),
-            new MemoryReporter(),
-        );
-
-        $application = $this->application($database, $cache, $producer, $runner, $config['queue']['data_dir'] . '/queue.log', $config['workers']['data_dir'] . '/workers.status.json', (int) $config['queue']['max_size'], $failureInjector, $metricsReporter, $systemTrace);
-
+    /**
+     * The select loop serve() spends its life in, with the two timeout
+     * categories enforced rather than merely configured.
+     *
+     * Split out of serve() so the wiring above reads as wiring: every line
+     * here is about the loop's behaviour - accept, dispatch, sweep - and none
+     * of it about which component was constructed first.
+     *
+     * @param Application $application
+     */
+    private function runHttpLoop(
+        SelectLoop $loop,
+        Server $server,
+        ServerConfig $serverConfig,
+        HttpParser $parser,
+        ResponseEncoder $encoder,
+        Application $application,
+        ServerMetrics $metrics,
+        StderrLogger $logger,
+    ): void {
         $loop->onReadable($server->socket(), static function () use ($loop, $server, $parser, $encoder, $application, $metrics, $logger): void {
             $connection = $server->accept();
 
@@ -408,17 +431,8 @@ final class PlatformCli
         printf("Listening on tcp://%s:%d\n", $server->getHost(), $server->getPort());
 
         $loop->run();
-
-        $server->stop();
-        $database->close();
-        $cache->close();
-        $this->stopWorkerPoolIfOwned($ownsWorkerPool);
-        $this->stopCacheServerIfOwned($ownsCacheServer);
-        $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
-        printf("Shutdown complete.\n");
-
-        return 0;
     }
+
 
     /**
      * The platform's routes, in their Application. Serves as the wiring note
@@ -442,44 +456,59 @@ final class PlatformCli
      * environments, per the step's own "only enabled in development/demo
      * mode" rule; a production serve has no such route at all.
      */
-    private function application(Database $database, CacheService $cache, ?Producer $producer = null, ?ConcurrentTaskRunner $runner = null, string $queueLogPath = '', string $workersStatusPath = '', ?int $maxQueueSize = null, ?WorkerFailureInjector $failureInjector = null, ?MetricsReporter $metricsReporter = null, ?Trace $trace = null): Application
+    private function application(ApplicationWiring $wiring): Application
     {
-        $orders = new OrderService(new OrderRepository($database), $producer);
+        $database = $wiring->database;
+        $cache = $wiring->cache;
+        $orders = new OrderService(new OrderRepository($database), $wiring->producer);
+
+        // One journal for the whole Application: the backpressure policy
+        // (POST /orders) and the status route (GET /queue/status) replay the
+        // same file, and sharing the instance lets them share its cache.
+        $journal = $wiring->queueJournal();
 
         // PLAN Step 17: only a real queue has a depth to be overloaded, so
         // the policy exists exactly when the producer and the journal it
         // writes to both do.
-        $backpressure = ($queueLogPath !== '' && $maxQueueSize !== null)
-            ? new BackpressurePolicy(new QueueJournal($queueLogPath), $maxQueueSize)
+        $backpressure = ($journal !== null && $wiring->maxQueueSize !== null)
+            ? new BackpressurePolicy($journal, $wiring->maxQueueSize)
             : null;
 
         $router = new Router();
         $router->get('/health', (new HealthHandler())(...));
-        $router->post('/orders', (new OrderCreateHandler($orders, $cache, $backpressure, $trace))(...));
+        $router->post('/orders', (new OrderCreateHandler($orders, $cache, $backpressure, $wiring->trace))(...));
         $router->get('/orders/{id}', (new OrderReadHandler($orders, $cache))(...));
         $router->put('/orders/{id}', (new OrderUpdateHandler($orders, $cache))(...));
-        $router->get('/parallel', (new ParallelHandler($runner))(...));
-        $router->get('/queue/status', (new QueueStatusHandler($queueLogPath))(...));
-        $router->get('/workers', (new WorkersStatusHandler($workersStatusPath))(...));
+        $router->get('/parallel', (new ParallelHandler($wiring->runner))(...));
+        $router->get('/workers', (new WorkersStatusHandler($wiring->workersStatusPath))(...));
+
+        // The queue status route is registered only with a journal to read,
+        // matching the null-tolerance the backpressure policy keeps: a
+        // caller with no queue log has no queue status to report.
+        if ($journal !== null) {
+            $router->get('/queue/status', (new QueueStatusHandler($journal))(...));
+        }
 
         // PLAN Step 23: observability is serve()'s wiring decision - the
         // route exists exactly when serve handed application() a reporter,
         // and serve always does.
-        if ($metricsReporter !== null) {
-            $router->get('/metrics', (new MetricsHandler($metricsReporter))(...));
+        if ($wiring->metricsReporter !== null) {
+            $router->get('/metrics', (new MetricsHandler($wiring->metricsReporter))(...));
         }
 
         // PLAN Step 22: the failure injection endpoint is not null-tolerant
         // - its absence on purpose is the point. A serve without injection
         // simply never registers the route.
-        if ($failureInjector !== null) {
-            $router->post('/debug/fail-worker', (new FailWorkerHandler($failureInjector))(...));
+        if ($wiring->failureInjector !== null) {
+            $router->post('/debug/fail-worker', (new FailWorkerHandler($wiring->failureInjector))(...));
         }
 
         // PLAN Step 24: the Application boundary opens and closes one request
         // scope per HTTP answer, echoes X-Request-ID and records the
-        // http.request span - all off, the moment no tracer is wired.
-        return new Application($router, $metricsReporter?->registry(), $trace);
+        // http.request span - all off, the moment no tracer is wired. The
+        // logger is serve()'s own, so a handler that throws is reported on
+        // the same stream as the connections it threw on.
+        return new Application($router, $wiring->metricsReporter?->registry(), $wiring->trace, $wiring->logger);
     }
 
     /**
@@ -695,7 +724,7 @@ final class PlatformCli
         $this->cacheProcess = $process;
 
         if (!$this->waitForPort($config['host'], (int) $config['port'])) {
-            $this->stopCacheServerIfOwned(true);
+            $this->stopCacheServer();
 
             throw new RuntimeException(sprintf(
                 'Cache server did not start listening on tcp://%s:%d in time.',
@@ -727,13 +756,20 @@ final class PlatformCli
     }
 
     /**
-     * Stop the cache server this serve started, if it started one: SIGTERM
-     * is the cache's graceful shutdown (final snapshot included), so the
-     * child is left to drain and exit before the handle is released.
+     * Stop the cache server, if this process holds one: SIGTERM is the
+     * cache's graceful shutdown (final snapshot included), so the child is
+     * left to drain and exit before the handle is released.
+     *
+     * No "if owned" flag, and that is the point. The cache has no daemon
+     * mode, so a process handle IS the proof of ownership: a cache that was
+     * already running was adopted and never stored here, and a disabled cache
+     * (CACHE_ENABLED=0) never started one. A boolean that had to be threaded
+     * through every exit was a second answer to the same question, and the
+     * two could disagree.
      */
-    private function stopCacheServerIfOwned(bool $owns): void
+    private function stopCacheServer(): void
     {
-        if (!$owns || !is_resource($this->cacheProcess)) {
+        if (!is_resource($this->cacheProcess)) {
             return;
         }
 
@@ -813,7 +849,7 @@ final class PlatformCli
         $this->workerProcess = $process;
 
         if (!$this->waitForSocket($config['socket'])) {
-            $this->stopWorkerPoolIfOwned(true);
+            $this->stopWorkerPool();
 
             throw new RuntimeException(sprintf('Worker pool did not start listening on "%s" in time.', $config['socket']));
         }
@@ -841,13 +877,16 @@ final class PlatformCli
     }
 
     /**
-     * Stop the worker pool Master this serve started, if it started one:
-     * SIGTERM triggers the component's graceful shutdown (drain in-flight
-     * tasks, exit the workers), then the handle is released.
+     * Stop the worker pool Master, if this process holds one: SIGTERM
+     * triggers the component's graceful shutdown (drain in-flight tasks,
+     * exit the workers), then the handle is released.
+     *
+     * Like the cache server, the pool has no daemon mode, so the handle is
+     * the ownership - see stopCacheServer() for why there is no flag here.
      */
-    private function stopWorkerPoolIfOwned(bool $owns): void
+    private function stopWorkerPool(): void
     {
-        if (!$owns || !is_resource($this->workerProcess)) {
+        if (!is_resource($this->workerProcess)) {
             return;
         }
 
@@ -1016,117 +1055,144 @@ final class PlatformCli
         printf("  %d published, %d ready/delayed/processing\n", $restored['published'], $restored['depth']);
 
         $database = Database::connect($databaseConfig);
-
-        $ownsDatabaseServer = false;
-        $ownsCacheServer = false;
-        $ownsWorkerPool = false;
+        $shutdown = new ShutdownStack('queue:consume');
 
         try {
-            $ownsDatabaseServer = $this->ensureDatabaseServer($databaseConfig);
+            $shutdown->push(static fn (): null => $database->close(), 'database');
+
+            // The database server is the one resource whose ownership cannot
+            // come from a handle: it daemonizes and is tracked by a pid file,
+            // so an already-running one is adopted and left running. Only a
+            // server this call started is registered for stopping.
+            if ($this->ensureDatabaseServer($databaseConfig)) {
+                $shutdown->push(
+                    fn (): null => $this->stopDatabaseServerIfOwned(true, $databaseConfig),
+                    'database server',
+                );
+            }
+
             Migrator::migrate($database);
-            $ownsCacheServer = $this->ensureCacheServer($cacheConfig);
-            $ownsWorkerPool = $this->ensureWorkerPoolServer($workersConfig);
+
+            // CACHE_ENABLED=0 is honored here exactly as serve() honors it: a
+            // consumer on a platform with no cache tier must not start one.
+            // It used to call ensureCacheServer() unconditionally, so a
+            // documented configuration was silently overridden on this path -
+            // which is also why queue:consume needed its own copy of the
+            // "if owned" bookkeeping, since it started a server serve would
+            // have skipped.
+            if ($cacheConfig['enabled']) {
+                $this->ensureCacheServer($cacheConfig);
+            } else {
+                $this->skipCacheServer($cacheConfig);
+            }
+
+            $shutdown->push(fn (): null => $this->stopCacheServer(), 'cache server');
+
+            $this->ensureWorkerPoolServer($workersConfig);
+            $shutdown->push(fn (): null => $this->stopWorkerPool(), 'worker pool');
+
+            // Each php-job-queue worker is now a forwarder: it takes a job
+            // from the dispatcher, hands it to the pool as a job.execute task
+            // through WorkerManager, and waits for the pool's verdict. The
+            // WorkerPoolClient is built lazily inside the handler so every
+            // forked forwarder gets its own connection to the Master instead
+            // of sharing the parent's.
+            $metrics = new MetricsCollector();
+            $workerManager = null;
+            $pool = new WorkerPool(
+                size: (int) $queueConfig['consumers'],
+                handler: static function (Job $job) use (&$workerManager, $workersConfig): mixed {
+                    $workerManager ??= new WorkerManager(new WorkerPoolClient(
+                        (string) $workersConfig['socket'],
+                        (float) $workersConfig['task_timeout'],
+                    ));
+
+                    $workerManager->execute($job);
+
+                    return null;
+                },
+                metrics: $metrics,
+            );
+            $dispatcher = new JobDispatcher(
+                queue: $queue,
+                workerPool: $pool,
+                retryPolicy: new FixedDelayRetry((int) $queueConfig['retry_delay']),
+                clock: $clock,
+                // A job can legitimately be in flight at the pool for up to the
+                // pool's task timeout; visibility must span that whole round-trip
+                // or a slow job is requeued while a worker is still finishing it.
+                visibilityTimeout: (int) $workersConfig['task_timeout'],
+                storage: new FileStorage($logPath),
+                metrics: $metrics,
+                // PLAN Step 19's "do not retry every possible error": a payload
+                // JobRegistry::validate() already knows can never succeed is
+                // never retried, no matter how many attempts remain - the same
+                // verdict a pre-dispatch check would reach, now made at the
+                // point the component itself exposes for it.
+                shouldRetry: JobRegistry::shouldRetry(),
+            );
+            $registry = $this->workerRegistry($pool, $logPath, $workersConfig);
+            $consumer = new QueueConsumer(
+                dispatcher: $dispatcher,
+                queue: $queue,
+                logPath: $logPath,
+                clock: $clock,
+                shutdownGrace: 10.0,
+                registry: $registry,
+                knownIds: $knownIds,
+            );
+
+            printf(
+                "Consumer started (forwarders=%d, max attempts=%d, retry delay=%ds, visibility=%ds). SIGTERM/SIGINT to stop.\n",
+                $queueConfig['consumers'],
+                $queueConfig['max_attempts'],
+                (int) $queueConfig['retry_delay'],
+                (int) $workersConfig['task_timeout'],
+            );
+
+            $consumer->run();
+
+            // PLAN Step 21, observable: run() has just stopped accepting new
+            // work and stopped pulling new jobs on its own signal-driven
+            // thread, and the dispatcher shutdown that ended it finished
+            // executing the jobs still running, drained the workers (idle out,
+            // busy left alone) and stopped them before returning.
+            printf("Consumer stopped.\n");
+            printf(
+                "  shutdown: no new work -> no new pulls -> finish executing -> drain workers -> stop workers -> close resources\n",
+            );
+
+            // The final snapshot: the workers' last states after the shutdown
+            // drained them (DRAINING/STOPPING/DEAD) are what the file keeps.
+            $registry->write();
+
+            $counters = $metrics->getCounters();
+            printf(
+                "  completed=%d failed=%d retried=%d\n",
+                $counters[MetricsCollector::JOBS_COMPLETED] ?? 0,
+                $counters[MetricsCollector::JOBS_FAILED] ?? 0,
+                $counters[MetricsCollector::JOBS_RETRIED] ?? 0,
+            );
+
+            // Verify before releasing anything: the invariant being checked is
+            // about the journal, so a shutdown in between would only mean
+            // re-reading a file the cleanup has already disturbed.
+            $cleanShutdown = $this->verifyNoJobLost($logPath);
+            $shutdown->run();
+
+            return $cleanShutdown ? 0 : 1;
         } catch (RuntimeException $e) {
             fwrite(STDERR, $e->getMessage() . PHP_EOL);
-            $database->close();
-            $this->stopWorkerPoolIfOwned($ownsWorkerPool);
-            $this->stopCacheServerIfOwned($ownsCacheServer);
-            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
 
             return 1;
+        } finally {
+            // Idempotent: the success path already ran the stack to release
+            // the servers before reporting, and a failure thrown anywhere in
+            // the body above - a job handler's own exception, a write to a
+            // full disk, a signal arriving during the verify - unwinds here
+            // and releases the same set exactly once.
+            $shutdown->run();
         }
-
-        // Each php-job-queue worker is now a forwarder: it takes a job from
-        // the dispatcher, hands it to the pool as a job.execute task through
-        // WorkerManager, and waits for the pool's verdict. The WorkerPoolClient
-        // is built lazily inside the handler so every forked forwarder gets
-        // its own connection to the Master instead of sharing the parent's.
-        $metrics = new MetricsCollector();
-        $workerManager = null;
-        $pool = new WorkerPool(
-            size: (int) $queueConfig['consumers'],
-            handler: static function (Job $job) use (&$workerManager, $workersConfig): mixed {
-                $workerManager ??= new WorkerManager(new WorkerPoolClient(
-                    (string) $workersConfig['socket'],
-                    (float) $workersConfig['task_timeout'],
-                ));
-
-                $workerManager->execute($job);
-
-                return null;
-            },
-            metrics: $metrics,
-        );
-        $dispatcher = new JobDispatcher(
-            queue: $queue,
-            workerPool: $pool,
-            retryPolicy: new FixedDelayRetry((int) $queueConfig['retry_delay']),
-            clock: $clock,
-            // A job can legitimately be in flight at the pool for up to the
-            // pool's task timeout; visibility must span that whole round-trip
-            // or a slow job is requeued while a worker is still finishing it.
-            visibilityTimeout: (int) $workersConfig['task_timeout'],
-            storage: new FileStorage($logPath),
-            metrics: $metrics,
-            // PLAN Step 19's "do not retry every possible error": a payload
-            // JobRegistry::validate() already knows can never succeed is
-            // never retried, no matter how many attempts remain - the same
-            // verdict a pre-dispatch check would reach, now made at the
-            // point the component itself exposes for it.
-            shouldRetry: JobRegistry::shouldRetry(),
-        );
-        $registry = $this->workerRegistry($pool, $logPath, $workersConfig);
-        $consumer = new QueueConsumer(
-            dispatcher: $dispatcher,
-            queue: $queue,
-            logPath: $logPath,
-            clock: $clock,
-            shutdownGrace: 10.0,
-            registry: $registry,
-            knownIds: $knownIds,
-        );
-
-        printf(
-            "Consumer started (forwarders=%d, max attempts=%d, retry delay=%ds, visibility=%ds). SIGTERM/SIGINT to stop.\n",
-            $queueConfig['consumers'],
-            $queueConfig['max_attempts'],
-            (int) $queueConfig['retry_delay'],
-            (int) $workersConfig['task_timeout'],
-        );
-
-        $consumer->run();
-
-        // PLAN Step 21, observable: run() has just stopped accepting new
-        // work and stopped pulling new jobs on its own signal-driven thread,
-        // and the dispatcher shutdown that ended it finished executing the
-        // jobs still running, drained the workers (idle out, busy left
-        // alone) and stopped them before returning. What remains here is the
-        // tail of the same sequence - close resources, verify, exit.
-        printf("Consumer stopped.\n");
-        printf(
-            "  shutdown: no new work -> no new pulls -> finish executing -> drain workers -> stop workers -> close resources\n",
-        );
-
-        // The final snapshot: the workers' last states after the shutdown
-        // drained them (DRAINING/STOPPING/DEAD) are what the file keeps.
-        $registry->write();
-
-        $counters = $metrics->getCounters();
-        printf(
-            "  completed=%d failed=%d retried=%d\n",
-            $counters[MetricsCollector::JOBS_COMPLETED] ?? 0,
-            $counters[MetricsCollector::JOBS_FAILED] ?? 0,
-            $counters[MetricsCollector::JOBS_RETRIED] ?? 0,
-        );
-
-        $cleanShutdown = $this->verifyNoJobLost($logPath);
-
-        $database->close();
-        $this->stopWorkerPoolIfOwned($ownsWorkerPool);
-        $this->stopCacheServerIfOwned($ownsCacheServer);
-        $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
-
-        return $cleanShutdown ? 0 : 1;
     }
 
     /**
@@ -1319,104 +1385,88 @@ final class PlatformCli
         $cacheConfig = $config['cache'];
 
         $database = Database::connect($databaseConfig);
-
-        $ownsDatabaseServer = false;
-        $ownsCacheServer = false;
+        $shutdown = new ShutdownStack('queue benchmark');
 
         try {
-            $ownsDatabaseServer = $this->ensureDatabaseServer($databaseConfig);
+            $shutdown->push(static fn (): null => $database->close(), 'database');
+
+            if ($this->ensureDatabaseServer($databaseConfig)) {
+                $shutdown->push(
+                    fn (): null => $this->stopDatabaseServerIfOwned(true, $databaseConfig),
+                    'database server',
+                );
+            }
+
             Migrator::migrate($database);
-            $ownsCacheServer = $this->ensureCacheServer($cacheConfig);
+            $this->ensureCacheServer($cacheConfig);
+            $shutdown->push(fn (): null => $this->stopCacheServer(), 'cache server');
+
+            // An isolated pool with exactly $workers processes on its own
+            // socket, so the benchmark controls the parallelism it is
+            // measuring. Six exit paths used to re-assert the same three
+            // releases by hand, which is exactly the shape that let serve()
+            // forget the pool on two of its five.
+            $benchDir = sys_get_temp_dir() . '/php-systems-platform/bench-' . uniqid('', true);
+
+            if (!is_dir($benchDir) && !@mkdir($benchDir, 0o777, true) && !is_dir($benchDir)) {
+                fwrite(STDERR, sprintf('Could not create benchmark directory "%s".', $benchDir) . PHP_EOL);
+
+                return null;
+            }
+
+            $logPath = $benchDir . '/queue.log';
+            $socketPath = sys_get_temp_dir() . '/php-bench-' . uniqid('', true) . '.sock';
+
+            $master = proc_open(
+                [PHP_BINARY, dirname(__DIR__, 2) . '/bin/worker.php'],
+                [
+                    1 => ['file', $benchDir . '/worker.out', 'a'],
+                    2 => ['file', $benchDir . '/worker.err', 'a'],
+                ],
+                $pipes,
+                null,
+                [
+                    'WORKER_POOL_SOCKET' => $socketPath,
+                    'WORKER_POOL_MIN' => (string) $workers,
+                    'WORKER_POOL_MAX' => (string) $workers,
+                    // A benchmark pushes thousands of jobs through a small pool;
+                    // the default 5s task timeout would fail jobs queued behind a
+                    // burst. Give the pool the full 30s the forwarders wait.
+                    'WORKER_POOL_TIMEOUT' => '30',
+                ],
+            );
+
+            if (!is_resource($master)) {
+                fwrite(STDERR, "Could not start the benchmark worker pool.\n");
+
+                return null;
+            }
+
+            $shutdown->push(static function () use ($master): void {
+                proc_terminate($master);
+                proc_close($master);
+            }, 'benchmark pool');
+
+            $benchmark = new QueueBenchmark(
+                logPath: $logPath,
+                socketPath: $socketPath,
+                forwarders: $workers,
+            );
+
+            if (!$this->waitForSocket($socketPath)) {
+                fwrite(STDERR, sprintf('Benchmark pool did not start listening on "%s" in time.', $socketPath) . PHP_EOL);
+
+                return null;
+            }
+
+            return $benchmark->run($jobs, $workers);
         } catch (RuntimeException $e) {
             fwrite(STDERR, $e->getMessage() . PHP_EOL);
-            $database->close();
-            $this->stopCacheServerIfOwned($ownsCacheServer);
-            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
 
             return null;
+        } finally {
+            $shutdown->run();
         }
-
-        // An isolated pool with exactly $workers processes on its own socket,
-        // so the benchmark controls the parallelism it is measuring.
-        $benchDir = sys_get_temp_dir() . '/php-systems-platform/bench-' . uniqid('', true);
-
-        if (!is_dir($benchDir) && !@mkdir($benchDir, 0o777, true) && !is_dir($benchDir)) {
-            fwrite(STDERR, sprintf('Could not create benchmark directory "%s".', $benchDir) . PHP_EOL);
-            $database->close();
-            $this->stopCacheServerIfOwned($ownsCacheServer);
-            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
-
-            return null;
-        }
-
-        $logPath = $benchDir . '/queue.log';
-        $socketPath = '/tmp/php-bench-' . uniqid('', true) . '.sock';
-
-        $master = proc_open(
-            [PHP_BINARY, dirname(__DIR__, 2) . '/bin/worker.php'],
-            [
-                1 => ['file', $benchDir . '/worker.out', 'a'],
-                2 => ['file', $benchDir . '/worker.err', 'a'],
-            ],
-            $pipes,
-            null,
-            [
-                'WORKER_POOL_SOCKET' => $socketPath,
-                'WORKER_POOL_MIN' => (string) $workers,
-                'WORKER_POOL_MAX' => (string) $workers,
-                // A benchmark pushes thousands of jobs through a small pool;
-                // the default 5s task timeout would fail jobs queued behind a
-                // burst. Give the pool the full 30s the forwarders wait.
-                'WORKER_POOL_TIMEOUT' => '30',
-            ],
-        );
-
-        if (!is_resource($master)) {
-            fwrite(STDERR, "Could not start the benchmark worker pool.\n");
-            $database->close();
-            $this->stopCacheServerIfOwned($ownsCacheServer);
-            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
-
-            return null;
-        }
-
-        $benchmark = new QueueBenchmark(
-            logPath: $logPath,
-            socketPath: $socketPath,
-            forwarders: $workers,
-        );
-
-        if (!$this->waitForSocket($socketPath)) {
-            proc_terminate($master);
-            proc_close($master);
-            fwrite(STDERR, sprintf('Benchmark pool did not start listening on "%s" in time.', $socketPath) . PHP_EOL);
-            $database->close();
-            $this->stopCacheServerIfOwned($ownsCacheServer);
-            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
-
-            return null;
-        }
-
-        try {
-            $metrics = $benchmark->run($jobs, $workers);
-        } catch (RuntimeException $e) {
-            fwrite(STDERR, $e->getMessage() . PHP_EOL);
-            proc_terminate($master);
-            proc_close($master);
-            $database->close();
-            $this->stopCacheServerIfOwned($ownsCacheServer);
-            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
-
-            return null;
-        }
-
-        proc_terminate($master);
-        proc_close($master);
-        $database->close();
-        $this->stopCacheServerIfOwned($ownsCacheServer);
-        $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
-
-        return $metrics;
     }
 
     /**
@@ -1459,72 +1509,71 @@ final class PlatformCli
         $workersConfig = $config['workers'];
 
         $database = Database::connect($databaseConfig);
-
-        $ownsDatabaseServer = false;
-        $ownsWorkerPool = false;
+        $shutdown = new ShutdownStack('order load comparison');
 
         try {
-            $ownsDatabaseServer = $this->ensureDatabaseServer($databaseConfig);
+            $shutdown->push(static fn (): null => $database->close(), 'database');
+
+            if ($this->ensureDatabaseServer($databaseConfig)) {
+                $shutdown->push(
+                    fn (): null => $this->stopDatabaseServerIfOwned(true, $databaseConfig),
+                    'database server',
+                );
+            }
+
             Migrator::migrate($database);
-            $ownsWorkerPool = $this->ensureWorkerPoolServer($workersConfig);
+            $this->ensureWorkerPoolServer($workersConfig);
+            $shutdown->push(fn (): null => $this->stopWorkerPool(), 'worker pool');
+
+            $orders = new OrderService(new OrderRepository($database));
+            $catalog = new CatalogRepository($database);
+            $runner = new ConcurrentTaskRunner(new WorkerPoolClient(
+                $workersConfig['socket'],
+                // A part that sleeps for its simulated dependency must not look
+                // like a task timeout.
+                max((float) $workersConfig['task_timeout'], $delayMs / 1000 + 5.0),
+            ));
+
+            try {
+                $order = $orders->createOrder('Ada Lovelace', '19.99');
+
+                $local = new OrderLoadBenchmark([
+                    'sequential' => new SequentialOrderLoader($orders, $catalog),
+                    'forked' => new ForkedOrderLoader($orders, $databaseConfig),
+                    'pooled' => new ConcurrentOrderLoader($orders, $runner),
+                ])->run($order->id, $rounds);
+
+                $waiting = new OrderLoadBenchmark([
+                    'sequential' => new SequentialOrderLoader($orders, $catalog, $delayMs),
+                    'forked' => new ForkedOrderLoader($orders, $databaseConfig, $delayMs),
+                    'pooled' => new ConcurrentOrderLoader($orders, $runner, $delayMs),
+                ])->run($order->id, $rounds);
+            } catch (RuntimeException | ConnectionFailedException $e) {
+                fwrite(STDERR, $e->getMessage() . PHP_EOL);
+
+                return 1;
+            }
+
+            printf("Order load comparison: %d rounds, order %s\n\n", $rounds, $order->id);
+            printf("  local reads only\n");
+            $this->printComparison($local);
+            printf("\n  with a %d ms simulated external dependency per part\n", $delayMs);
+            $this->printComparison($waiting);
+            printf(
+                "\nThree local rows are cheaper to read in one process than to hand to three;\n"
+                . "the fan-out starts paying once a part actually waits. forked pays a process\n"
+                . "and a connection per load, pooled pays them once - same overlap, different\n"
+                . "amortization.\n",
+            );
+
+            return 0;
         } catch (RuntimeException $e) {
             fwrite(STDERR, $e->getMessage() . PHP_EOL);
-            $database->close();
-            $this->stopWorkerPoolIfOwned($ownsWorkerPool);
-            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
 
             return 1;
+        } finally {
+            $shutdown->run();
         }
-
-        $orders = new OrderService(new OrderRepository($database));
-        $catalog = new CatalogRepository($database);
-        $runner = new ConcurrentTaskRunner(new WorkerPoolClient(
-            $workersConfig['socket'],
-            // A part that sleeps for its simulated dependency must not look
-            // like a task timeout.
-            max((float) $workersConfig['task_timeout'], $delayMs / 1000 + 5.0),
-        ));
-
-        try {
-            $order = $orders->createOrder('Ada Lovelace', '19.99');
-
-            $local = new OrderLoadBenchmark([
-                'sequential' => new SequentialOrderLoader($orders, $catalog),
-                'forked' => new ForkedOrderLoader($orders, $databaseConfig),
-                'pooled' => new ConcurrentOrderLoader($orders, $runner),
-            ])->run($order->id, $rounds);
-
-            $waiting = new OrderLoadBenchmark([
-                'sequential' => new SequentialOrderLoader($orders, $catalog, $delayMs),
-                'forked' => new ForkedOrderLoader($orders, $databaseConfig, $delayMs),
-                'pooled' => new ConcurrentOrderLoader($orders, $runner, $delayMs),
-            ])->run($order->id, $rounds);
-        } catch (RuntimeException | ConnectionFailedException $e) {
-            fwrite(STDERR, $e->getMessage() . PHP_EOL);
-            $database->close();
-            $this->stopWorkerPoolIfOwned($ownsWorkerPool);
-            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
-
-            return 1;
-        }
-
-        printf("Order load comparison: %d rounds, order %s\n\n", $rounds, $order->id);
-        printf("  local reads only\n");
-        $this->printComparison($local);
-        printf("\n  with a %d ms simulated external dependency per part\n", $delayMs);
-        $this->printComparison($waiting);
-        printf(
-            "\nThree local rows are cheaper to read in one process than to hand to three;\n"
-            . "the fan-out starts paying once a part actually waits. forked pays a process\n"
-            . "and a connection per load, pooled pays them once - same overlap, different\n"
-            . "amortization.\n",
-        );
-
-        $database->close();
-        $this->stopWorkerPoolIfOwned($ownsWorkerPool);
-        $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
-
-        return 0;
     }
 
     /**
@@ -1646,7 +1695,7 @@ final class PlatformCli
             return null;
         }
 
-        $socketPath = '/tmp/php-memdemo-' . uniqid('', true) . '.sock';
+        $socketPath = sys_get_temp_dir() . '/php-memdemo-' . uniqid('', true) . '.sock';
 
         $pool = proc_open(
             [PHP_BINARY, dirname(__DIR__, 2) . '/bin/worker.php'],
@@ -1748,15 +1797,25 @@ final class PlatformCli
         $config = $this->config();
         $databaseConfig = $config['database'];
 
-        $ownsDatabaseServer = false;
+        $shutdown = new ShutdownStack('idempotency demo');
 
         try {
-            $ownsDatabaseServer = $this->ensureDatabaseServer($databaseConfig);
+            // Registered before the connect that can fail, or the catch below
+            // returns 1 having just started a database server and left it
+            // running - the one leak this demo's setup path used to have.
+            if ($this->ensureDatabaseServer($databaseConfig)) {
+                $shutdown->push(
+                    fn (): null => $this->stopDatabaseServerIfOwned(true, $databaseConfig),
+                    'database server',
+                );
+            }
 
             $database = Database::connect($databaseConfig);
+            $shutdown->push(static fn (): null => $database->close(), 'database');
             Migrator::migrate($database);
         } catch (RuntimeException $e) {
             fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            $shutdown->run();
 
             return 1;
         }
@@ -1847,11 +1906,7 @@ final class PlatformCli
 
             return 0;
         } finally {
-            $database->close();
-
-            if ($ownsDatabaseServer) {
-                $this->stopDatabaseServerIfOwned(true, $databaseConfig);
-            }
+            $shutdown->run();
         }
     }
 
@@ -1915,7 +1970,7 @@ final class PlatformCli
             return 1;
         }
 
-        $socketPath = '/tmp/php-failuredemo-' . uniqid('', true) . '.sock';
+        $socketPath = sys_get_temp_dir() . '/php-failuredemo-' . uniqid('', true) . '.sock';
 
         $pool = proc_open(
             [PHP_BINARY, dirname(__DIR__, 2) . '/bin/worker.php'],
@@ -1982,20 +2037,26 @@ final class PlatformCli
         $databaseConfig = $config['database'];
         $cacheConfig = $config['cache'];
 
-        $ownsDatabaseServer = false;
-        $ownsCacheServer = false;
+        $shutdown = new ShutdownStack('failing job demo');
         $database = null;
 
         try {
-            $ownsDatabaseServer = $this->ensureDatabaseServer($databaseConfig);
+            if ($this->ensureDatabaseServer($databaseConfig)) {
+                $shutdown->push(
+                    fn (): null => $this->stopDatabaseServerIfOwned(true, $databaseConfig),
+                    'database server',
+                );
+            }
+
             $database = Database::connect($databaseConfig);
+            $shutdown->push(static fn (): null => $database->close(), 'database');
+
             Migrator::migrate($database);
-            $ownsCacheServer = $this->ensureCacheServer($cacheConfig);
+            $this->ensureCacheServer($cacheConfig);
+            $shutdown->push(fn (): null => $this->stopCacheServer(), 'cache server');
         } catch (RuntimeException $e) {
             fwrite(STDERR, $e->getMessage() . PHP_EOL);
-            $database?->close();
-            $this->stopCacheServerIfOwned($ownsCacheServer);
-            $this->stopDatabaseServerIfOwned($ownsDatabaseServer, $databaseConfig);
+            $shutdown->run();
 
             return 1;
         }
@@ -2081,13 +2142,11 @@ final class PlatformCli
 
             $exit = $state === 'FAILED' && (int) ($row['attempts'] ?? 0) === $job->getMaxAttempts() ? 0 : 1;
         } finally {
-            $database->close();
-
-            $this->stopCacheServerIfOwned($ownsCacheServer);
-
-            if ($ownsDatabaseServer) {
-                $this->stopDatabaseServerIfOwned(true, $databaseConfig);
-            }
+            // Releases exactly what the setup above registered - and the
+            // setup's own catch already ran the same idempotent stack, so a
+            // failure on either side of this method releases the same set
+            // once, not twice.
+            $shutdown->run();
         }
 
         return $exit;

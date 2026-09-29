@@ -37,6 +37,37 @@ the operation) and `db.operation_duration`, and records a `db.read`/`db.write`
 span. Without them, the class behaves exactly the same - the seams exist so
 `serve` can attach observability, not so the class depends on it.
 
+That report is one method (`run()` plus `report()`), not four. `read()` and
+`write()` each used to repeat it for the success and the failure case, and the
+duplication was a correctness hazard rather than a style one: the two copies
+for a given path are the ones that decide whether a span says `ok: false` and
+whether `db.errors` moves, and when they drift the result is a trace that
+contradicts the metrics. One path means an operation is reported the same way
+whichever of the two it took.
+
+## Migrations, and who is allowed to run them at the same time
+
+`Migrator` runs at start-up, which means two `serve` processes coming up
+together run it at the same time. The schema work is idempotent, but the seed
+data was not: it inserted fixed-key rows and treated a duplicate-key error as
+fatal. Two simultaneous starts on an empty data directory meant one of them
+crashed - measured before the fix, 5 of 6 concurrent processes died on
+`Duplicate value for unique index "PRIMARY" on "customers"`, in
+`Migrator::seed()`.
+
+`seed()` now inserts through `insertIfMissing()` and, if the statement still
+loses the race, ignores exactly that one outcome - a `ClientException` whose
+error code is a constraint violation and whose message names a duplicate
+unique value. Anything else still propagates. The distinction is the point: a
+duplicate is the expected loser of a race, whereas a genuine schema or
+connectivity error arrives under a different code and must not be mistaken for
+one, since swallowing it would leave a half-migrated platform that looks
+healthy. (The server's "column already exists" is the trap in the other
+direction - it arrives as `TABLE_NOT_FOUND`, so the message is the only
+signal there.)
+
+With the fix, all 6 of 6 concurrent starts complete.
+
 ## The slow-database seam
 
 `DATABASE_LATENCY_MS` (config `delay_ms`) makes every read and every write

@@ -88,10 +88,13 @@ final readonly class CacheService
      */
     public function getOrder(string $id): ?array
     {
+        // One report per outcome, counted once. The three miss reasons below -
+        // no cache tier, nothing stored, something stored that does not parse
+        // - each counted the miss themselves, so the counters' definition of
+        // a miss was three separate statements of it, and a fourth reason
+        // added later would have had to remember all three lines.
         if (!$this->enabled) {
-            $this->counters->misses++;
-            $this->metrics?->increment(MetricsRegistry::CACHE_MISSES);
-            $this->metrics?->increment(MetricsRegistry::CACHE_OPERATIONS);
+            $this->recordMiss();
 
             return null;
         }
@@ -99,9 +102,7 @@ final readonly class CacheService
         $json = $this->client->get(self::ORDER_KEY_PREFIX . $id);
 
         if ($json === null) {
-            $this->counters->misses++;
-            $this->metrics?->increment(MetricsRegistry::CACHE_MISSES);
-            $this->metrics?->increment(MetricsRegistry::CACHE_OPERATIONS);
+            $this->recordMiss();
 
             return null;
         }
@@ -109,9 +110,7 @@ final readonly class CacheService
         $order = json_decode($json, true);
 
         if (!is_array($order)) {
-            $this->counters->misses++;
-            $this->metrics?->increment(MetricsRegistry::CACHE_MISSES);
-            $this->metrics?->increment(MetricsRegistry::CACHE_OPERATIONS);
+            $this->recordMiss();
 
             return null;
         }
@@ -121,6 +120,17 @@ final readonly class CacheService
         $this->metrics?->increment(MetricsRegistry::CACHE_OPERATIONS);
 
         return $order;
+    }
+
+    /**
+     * A lookup that produced no payload: the local counter, the shared
+     * registry, and the fact that a lookup happened at all.
+     */
+    private function recordMiss(): void
+    {
+        $this->counters->misses++;
+        $this->metrics?->increment(MetricsRegistry::CACHE_MISSES);
+        $this->metrics?->increment(MetricsRegistry::CACHE_OPERATIONS);
     }
 
     /**

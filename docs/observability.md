@@ -58,6 +58,36 @@ the whole chain - the serve's spans plus every worker's - from one file.
 This is why the spans carry `meta.ok`: a failed query still records its span,
 so a trace shows the failure in place rather than a gap.
 
+`db.read` and `db.write` also report through one shared path
+(`Database::run()` / `Database::report()`). They used to carry that
+bookkeeping themselves, twice each - a success block and a failure block that
+re-throws - so the four copies could disagree: a span reporting `ok: false`
+next to metrics reporting a success is a report about an operation that never
+happened, and telling those two apart is exactly the job a trace exists for.
+
+## Bounded in memory, complete on disk
+
+`Trace` keeps the most recent spans in memory for the request-scoped
+inspection, and writes every span to the JSONL journal as it happens. The
+in-memory window is capped at `Trace::DEFAULT_MEMORY_SPANS` (1000, overridable
+via the constructor) - the oldest spans are dropped from the array once the
+window is full.
+
+The cap is a memory bound, not a data loss. The journal is append-only and
+written per span, so `trace <request_id>` still answers from the complete
+history, and a chain longer than 1000 spans - a large load test, a queue
+draining hundreds of jobs - is intact on disk even though the in-process
+window no longer holds it. The eviction drops the span that is farthest from
+the current request's chain first, which is what the window is for: answering
+"what just happened to this request" without an unbounded array in a
+long-running `serve`.
+
+`WorkerRegistry` is bounded the same way, for the same reason: it is held for
+the lifetime of a serve, so `resolvedAt` entries - the records of workers that
+have already finished - are pruned after a TTL (300 s by default) instead of
+accumulating one entry per completed job for as long as the process lives. The
+`resolvedCount` total is not pruned, because it is a counter and not a set.
+
 ## Why observability is opt-in at the seam
 
 The database and cache take optional metrics/trace. Without them they behave

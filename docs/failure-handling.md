@@ -38,6 +38,22 @@ A failing job dies `FAILED` (dead state) after its full budget, and
 `queue:job <id>` shows the whole attempt history - the evidence, not just the
 verdict.
 
+## A request that throws is a 500 and a log line
+
+A handler that throws is caught at the HTTP boundary and answered `500` with a
+generic body. The body is deliberately unhelpful: it says the request failed
+and nothing about why, because it is going to a client that cannot act on a
+stack trace.
+
+The log line next to it used to not exist. The catch reported the status and
+discarded the exception, so a handler bug in production produced a bare `500`
+in the access log and no other trace of itself anywhere - no message, no
+stack, not even which handler was involved. `Application` now takes an
+optional `Logger` and reports the throwable's message, class, file, line and
+trace, with the method, path and handler named. `serve` wires it to stderr;
+tests can pass a recording logger. The two halves are kept apart on purpose -
+the client gets the verdict, the operator gets the cause.
+
 ## Controlled reproduction
 
 Failure injection is a first-class, but gated, feature:

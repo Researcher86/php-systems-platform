@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Storage;
 
+use PhpMiniDatabase\Client\ClientException;
+use PhpMiniDatabase\Network\Protocol\ErrorCode;
 use PhpSystemsPlatform\Domain\OrderService;
 use RuntimeException;
 use Throwable;
@@ -107,9 +109,15 @@ final class Migrator
      * written before it is backfilled with the default sku.
      *
      * Adding a column that is already there is the normal case - every
-     * restart after the first - and the server says so precisely, which is
-     * the one failure this swallows. Anything else is a real problem and
-     * belongs to the caller.
+     * restart after the first - and this is the one failure to swallow.
+     *
+     * The match is on the message text, and deliberately not on the wire
+     * error code. The server reports "Table \"orders\" already has a column
+     * \"product\"." with code TABLE_NOT_FOUND - the same code a genuinely
+     * missing table arrives with - so matching the code would also swallow a
+     * real "table does not exist" and leave the platform running against no
+     * schema at all. The message is the only signal that distinguishes them.
+     * Anything else is a real problem and belongs to the caller.
      */
     private static function upgradeOrders(Database $database): void
     {
@@ -138,28 +146,83 @@ final class Migrator
     private static function seed(Database $database): void
     {
         foreach (self::CUSTOMERS as $name => [$tier, $since]) {
-            if ($database->read('SELECT name FROM customers WHERE name = ?', [$name]) === []) {
-                $database->write(
-                    'INSERT INTO customers (name, tier, since) VALUES (?, ?, ?)',
-                    [$name, $tier, $since],
-                );
-            }
+            self::insertIfMissing(
+                $database,
+                'SELECT name FROM customers WHERE name = ?',
+                [$name],
+                'INSERT INTO customers (name, tier, since) VALUES (?, ?, ?)',
+                [$name, $tier, $since],
+            );
         }
 
         foreach (self::PRODUCTS as $sku => [$title, $price, $available, $reserved]) {
-            if ($database->read('SELECT sku FROM products WHERE sku = ?', [$sku]) === []) {
-                $database->write(
-                    'INSERT INTO products (sku, title, price) VALUES (?, ?, ?)',
-                    [$sku, $title, $price],
-                );
-            }
+            self::insertIfMissing(
+                $database,
+                'SELECT sku FROM products WHERE sku = ?',
+                [$sku],
+                'INSERT INTO products (sku, title, price) VALUES (?, ?, ?)',
+                [$sku, $title, $price],
+            );
 
-            if ($database->read('SELECT sku FROM inventory WHERE sku = ?', [$sku]) === []) {
-                $database->write(
-                    'INSERT INTO inventory (sku, available, reserved) VALUES (?, ?, ?)',
-                    [$sku, $available, $reserved],
-                );
+            self::insertIfMissing(
+                $database,
+                'SELECT sku FROM inventory WHERE sku = ?',
+                [$sku],
+                'INSERT INTO inventory (sku, available, reserved) VALUES (?, ?, ?)',
+                [$sku, $available, $reserved],
+            );
+        }
+    }
+
+    /**
+     * Insert one reference row unless it is already there.
+     *
+     * The read and the insert are separate statements, so two processes
+     * starting at the same moment - a serve and a queue consumer, both of
+     * which migrate at startup - can both find the key missing and both
+     * insert it. Whoever lost that race gets a primary-key violation, and
+     * used to fail startup over a row that is present and correct. The
+     * duplicate is the outcome the seeding wanted, so it is treated as
+     * success; any other constraint failure still propagates.
+     *
+     * @param list<mixed> $lookupParameters
+     * @param list<mixed> $insertParameters
+     */
+    private static function insertIfMissing(
+        Database $database,
+        string $lookup,
+        array $lookupParameters,
+        string $insert,
+        array $insertParameters,
+    ): void {
+        if ($database->read($lookup, $lookupParameters) !== []) {
+            return;
+        }
+
+        try {
+            $database->write($insert, $insertParameters);
+        } catch (Throwable $e) {
+            if (!self::isDuplicateKey($e)) {
+                throw $e;
             }
         }
+    }
+
+    /**
+     * Whether this is "that unique index already holds the value" and not
+     * some other constraint failure.
+     *
+     * Both halves are required, and neither alone would do. The wire code
+     * CONSTRAINT_VIOLATION is too broad: a NOT NULL violation and a foreign
+     * key with no parent arrive with that same code, and treating either as
+     * "already seeded" would quietly leave reference data unwritten. The
+     * message alone is too loose across versions. Together they name exactly
+     * the case where another process won the insert.
+     */
+    private static function isDuplicateKey(Throwable $e): bool
+    {
+        return $e instanceof ClientException
+            && $e->errorCode === ErrorCode::CONSTRAINT_VIOLATION
+            && str_contains($e->getMessage(), 'Duplicate value for unique index');
     }
 }

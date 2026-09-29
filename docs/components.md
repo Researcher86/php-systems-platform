@@ -429,7 +429,7 @@ The wiring, platform-side:
   `WorkerTasks`, and `job.execute` to `WorkerJobs`. Like the cache, the pool
   has no daemon mode, so `PlatformCli::serve()` spawns it as a child when no
   pool answers a ping on the configured socket (`workerPoolAnswers()`), owns
-  it, and SIGTERMs it on shutdown (`stopWorkerPoolIfOwned()`) — graceful:
+  it, and SIGTERMs it on shutdown (`stopWorkerPool()`) — graceful:
   settle in-flight tasks, exit workers, remove the socket. `queue:consume`
   uses the same ensure/own/stop helpers when it runs standalone.
 - `Workers\WorkerTasks` — the hash tasks: `ping` and `hash_chunk`

@@ -58,7 +58,14 @@
         "phpunit/phpunit": "^11.5"
     },
     "scripts": {
-        "test": "phpunit",
+        "test": [
+            "@test:unit",
+            "@test:integration",
+            "@test:e2e"
+        ],
+        "test:unit": "phpunit --testsuite unit",
+        "test:integration": "phpunit --testsuite integration",
+        "test:e2e": "phpunit --testsuite e2e",
         "analyse": "phpstan analyse --memory-limit=1G",
         "format": "php-cs-fixer fix --diff",
         "format:check": "php-cs-fixer fix --diff --dry-run"

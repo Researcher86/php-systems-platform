@@ -27,9 +27,9 @@ get a document of their own.
 1. **A process stops only what it started.** The cache server is the sharpest
    example: it has no daemon mode, so it is a child of whoever started it.
    `serve` adopts an already-running cache and will not stop it on the way
-   out (`stopCacheServerIfOwned(false)` is a no-op). This is why a command
-   that must kill the cache mid-run - the failure experiments - starts the
-   cache server itself: it needs the handle.
+   out (`stopCacheServer()` is a no-op when there is no handle). This is why
+   a command that must kill the cache mid-run - the failure experiments -
+   starts the cache server itself: it needs the handle.
 
 2. **A pid file is authoritative; the port is ground truth.** The database
    server daemonizes, so `minidb.pid` says who owns it. But a stale pid file
@@ -55,10 +55,30 @@ get a document of their own.
 | the pool Master | its worker processes, on its own shutdown |
 | `OwnedProcess` (commands: `load`, `experiments`, demos) | every child it started - SIGTERM, wait for exit, kill if it ignores SIGTERM; a non-zero stop says it was killed, not that it stopped politely |
 
-`serve`'s shutdown is the model: `database->close()`, then stop the pool, the
-cache, the database - each gated on the same "did I start it" flag it set at
-startup, on every path (success, error, signal). No shared state is stopped
-by a process that does not own it.
+`serve`'s shutdown is the model, and it is `ShutdownStack`
+(`src/Support/ShutdownStack.php`): close the db pool, then stop the pool, the
+cache, the database - on every path (success, error, signal), because every
+path runs one stack rather than a sequence of hand-written `if ($owned)`
+statements. That indirection is the point. The old inline version gated each
+stop on its own ownership flag, and the bug it had was not any one flag being
+wrong: it was that a path which *threw* before reaching the stops skipped all
+of them. An occupied port did exactly that - `serve` printed
+`Could not start HTTP server`, returned, and left the worker pool, the cache
+server and the database daemon running. A flag cannot protect a path that never
+reaches the flag.
+
+The stack adds three properties the inline version had to get right by hand
+every time:
+
+- **LIFO.** Steps run newest first, so resources are released in the reverse
+  of the order they were acquired, and registering a new cleanup means
+  remembering one more `push`, not reordering a block of stops.
+- **Isolation.** A cleanup step that throws is reported to stderr and the
+  stack continues. A database that refuses to stop must not prevent the
+  worker pool from stopping.
+- **Idempotence.** `run()` drains the stack and returns the same result on
+  every later call, so a signal arriving mid-shutdown, or a `finally` running
+  after an explicit stop, cannot double-stop anything.
 
 ## The graceful-stop contract
 

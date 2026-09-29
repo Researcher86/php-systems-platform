@@ -23,6 +23,10 @@ is observed, and how it is reproduced. The "why" behind each row lives in
 | SIGTERM / SIGINT on consumer | graceful: no new pulls, finish in-flight, drain workers, scan journal for lost jobs | shutdown tail; exit 0 only if nothing was lost | `kill -TERM <consume-pid>` |
 | SIGTERM ignored           | `OwnedProcess` kills it and reports a non-zero stop - a kill is not a graceful stop | exit code != 0 | a stubborn child in `load`/`experiments` |
 | Cold start after a crash  | journal restores READY jobs; queue is not lost with a process | `queue:consume` restore line | kill the consumer, start it again |
+| HTTP port already taken  | start-up fails, exit 1, and **nothing the attempt started keeps running** - no orphan pool, cache or db | the three stop lines, then exit 1; `pgrep -f bin/worker.php` empty | a second `serve` on a bound port |
+| One cleanup step refuses  | the remaining steps still run; the refusal is reported to stderr | the `[shutdown] could not release ...` line plus the later ones | a pool that answers `refused` when asked to stop |
+| `CACHE_ENABLED=0`        | no cache server process at all, on either end of the platform | no `bin/cache.php` in `pgrep` | `CACHE_ENABLED=0` with a consumer running |
+| Two platforms migrate at once | both succeed; the loser's seed insert is ignored, not fatal | both processes reach "migrate ok" | two `serve` processes starting on an empty data dir |
 
 ## The two recovery axes
 

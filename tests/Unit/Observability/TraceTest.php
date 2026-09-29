@@ -143,4 +143,55 @@ final class TraceTest extends TestCase
         // A request id with no spans reads back as an empty chain.
         self::assertSame([], $trace->readLog('req-ffffffffffffffff'));
     }
+
+    /**
+     * The in-memory window is bounded, so a serve that runs for days cannot
+     * accumulate every span it ever recorded. The journal is what makes the
+     * eviction safe: the span dropped from memory is still in the file.
+     */
+    public function testKeepsOnlyTheMostRecentSpansInMemory(): void
+    {
+        $trace = new Trace(self::TRACE_LOG, maxSpans: 3);
+
+        $requestId = $trace->beginRequest('req-0203040506070809');
+
+        for ($i = 1; $i <= 5; $i++) {
+            $trace->record('db.read', 0.001, ['n' => $i]);
+        }
+
+        $trace->finishRequest();
+
+        $inMemory = $trace->spans();
+
+        self::assertCount(3, $inMemory);
+        self::assertSame([3, 4, 5], array_column($inMemory, 'n'));
+
+        // Nothing was lost from the durable record: all five are in the
+        // journal, which is the whole reason the memory copy may be bounded.
+        self::assertCount(5, $trace->readLog($requestId));
+    }
+
+    /**
+     * An absent live span and a live-but-empty answer are different, and a
+     * caller that cannot tell them apart will report a trace as empty when
+     * the truth is "that request has aged out of memory - read the journal".
+     */
+    public function testSpansForRequestSeparatesMissingFromPresent(): void
+    {
+        $trace = new Trace(self::TRACE_LOG, maxSpans: 1);
+
+        $trace->beginRequest('req-030405060708090a');
+        $trace->record('http.request', 0.01);
+        $trace->finishRequest();
+
+        // Aged out of the window, but present in the journal.
+        $trace->beginRequest('req-0405060708090a0b');
+        $trace->record('http.request', 0.01);
+        $trace->finishRequest();
+
+        self::assertNull($trace->spansForRequest('req-030405060708090a'));
+        self::assertCount(1, $trace->spansForRequest('req-0405060708090a0b'));
+        // A request this process never saw is also null, not an empty list.
+        self::assertNull($trace->spansForRequest('req-05060708090a0b0c'));
+    }
 }

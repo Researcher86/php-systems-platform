@@ -3,9 +3,31 @@
          bootstrap="vendor/autoload.php"
          colors="true"
          failOnWarning="true">
+    <!--
+        Three suites, because they are three different kinds of feedback and
+        they cost wildly different amounts to get.
+
+        The old single "unit" suite pointed at all of tests/, so `composer test`
+        was a 4-minute affair that could not fail fast, and "run the unit
+        tests" did not exist as a thing. Unit is 131 tests in under a second
+        and is what you run while editing; integration starts real servers and
+        speaks HTTP to them; E2E drives the CLI as a user would, for one test
+        per subsystem, and is the slowest of the three by an order of
+        magnitude.
+
+        Every suite still passes through bootstrap/vendor/autoload.php, so
+        selecting one with PHPUnit's testsuite option needs no other
+        ceremony.
+    -->
     <testsuites>
         <testsuite name="unit">
-            <directory>tests</directory>
+            <directory>tests/Unit</directory>
+        </testsuite>
+        <testsuite name="integration">
+            <directory>tests/Integration</directory>
+        </testsuite>
+        <testsuite name="e2e">
+            <directory>tests/E2E</directory>
         </testsuite>
     </testsuites>
     <source>

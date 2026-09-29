@@ -16,11 +16,16 @@ use PhpSystemsPlatform\Queue\QueueJournal;
  * observable from the outside without owning a queue process. Read-only by
  * construction - it only replays the journal - so it is safe to expose
  * wherever the HTTP server already is.
+ *
+ * The journal is injected rather than built from the path per request: it
+ * caches the replay against the file's size and mtime, and a fresh instance
+ * per request would throw that cache away and replay the whole journal every
+ * time - which is the cost this handler is on the hot path for.
  */
 final readonly class QueueStatusHandler
 {
     public function __construct(
-        private string $logPath,
+        private QueueJournal $journal,
     ) {
     }
 
@@ -30,7 +35,7 @@ final readonly class QueueStatusHandler
     public function __invoke(Request $request, array $params): Response
     {
         return Response::json([
-            'queue' => new QueueJournal($this->logPath)->snapshot(),
+            'queue' => $this->journal->snapshot(),
         ]);
     }
 }

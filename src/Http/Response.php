@@ -4,14 +4,13 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Http;
 
+use RuntimeException;
+
 /**
- * A response in the platform's own vocabulary.
- *
- * Like Request, this is the internal value object: controllers return one
- * and the application converts it into the component's HttpResponse at the
- * boundary. Content-Type and Content-Length are fixed by the factory that
- * builds the response, so handler code cannot produce a body without saying
- * what it is.
+ * A response in the platform's own vocabulary; the Application converts it
+ * into the component's HttpResponse. The factories set Content-Type and
+ * Content-Length, so a handler cannot produce a body without saying what
+ * it is.
  */
 final readonly class Response
 {
@@ -33,7 +32,7 @@ final readonly class Response
         $body = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
         if ($body === false) {
-            throw new \RuntimeException(sprintf('Cannot encode response body as JSON: %s', json_last_error_msg()));
+            throw new RuntimeException(sprintf('Cannot encode response body as JSON: %s', json_last_error_msg()));
         }
 
         return self::body($body, 'application/json; charset=utf-8', $status, $headers);
@@ -60,6 +59,7 @@ final readonly class Response
         return new self($status, $headers, '');
     }
 
+    /** A header's value by case-insensitive name, or null when absent. */
     public function header(string $name): ?string
     {
         foreach ($this->headers as $existing => $value) {
@@ -72,10 +72,6 @@ final readonly class Response
     }
 
     /**
-     * Declare the representation on every response, mirroring what the
-     * component's ResponseFactory does, so the wire bytes never depend on
-     * the encoder guessing.
-     *
      * @param array<string, string> $headers
      */
     private static function body(string $body, string $contentType, int $status, array $headers): self

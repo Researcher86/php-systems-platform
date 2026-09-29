@@ -286,12 +286,12 @@
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-mini-cache.git",
-                "reference": "1ae1af765667d54f1866b7aece11b2615a16b0f9"
+                "reference": "fa782d2c36727b33fa2538227b8d0c75a1ee9f2b"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-mini-cache/zipball/1ae1af765667d54f1866b7aece11b2615a16b0f9",
-                "reference": "1ae1af765667d54f1866b7aece11b2615a16b0f9",
+                "url": "https://api.github.com/repos/Researcher86/php-mini-cache/zipball/fa782d2c36727b33fa2538227b8d0c75a1ee9f2b",
+                "reference": "fa782d2c36727b33fa2538227b8d0c75a1ee9f2b",
                 "shasum": ""
             },
             "require": {
@@ -337,7 +337,7 @@
                 "source": "https://github.com/Researcher86/php-mini-cache/tree/master",
                 "issues": "https://github.com/Researcher86/php-mini-cache/issues"
             },
-            "time": "2026-09-24T11:18:57+00:00"
+            "time": "2026-09-29T13:37:46+00:00"
         },
         {
             "name": "tanat/php-mini-database",

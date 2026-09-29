@@ -7,10 +7,8 @@
  * visible in one place instead of being scattered across commands.
  */
 
-// Read as false-then-default rather than `getenv(...) ?: '1'`: the string
-// '0' is falsy in PHP, so the elvis form would turn CACHE_ENABLED=0 back
-// into 1 and the off switch would be the one value here that cannot be set
-// to false.
+// Not `getenv(...) ?: '1'`: '0' is falsy, so the elvis form would turn
+// CACHE_ENABLED=0 back into 1.
 $cacheEnabled = getenv('CACHE_ENABLED');
 $platformEnv = strtolower(trim((string) (getenv('PLATFORM_ENV') ?: 'dev')));
 $faultInjection = in_array($platformEnv, ['dev', 'development', 'demo', 'test'], true);
@@ -19,13 +17,10 @@ return [
     'http' => [
         'host' => '127.0.0.1',
         'port' => 8080,
-        // PLAN Step 18's HTTP request timeout, in two parts. request_timeout
-        // closes a connection idle this long - connected, nothing sent or
-        // received (see Server::closeIdleConnections()). header_timeout is
-        // narrower: a connection mid-header-block this long, the Slowloris
-        // guard (Server::closeSlowHeaderReads()) - a trickling client stays
-        // alive under the idle check because it IS sending bytes, just never
-        // enough to finish a header.
+        // request_timeout closes a connection idle this long (nothing sent
+        // or received). header_timeout is the Slowloris guard: a connection
+        // still mid-header-block this long is closed, since a trickling
+        // client is never idle but never finishes a header either.
         'request_timeout' => 5.0,
         'header_timeout' => 5.0,
     ],
@@ -34,20 +29,14 @@ return [
         'port' => 5433,
         'data_dir' => sys_get_temp_dir() . '/php-systems-platform/db',
         'timeout' => 2.0,
-        // The database operation timeout (PLAN Step 18): how long one query
-        // may take once a connection exists, separate from connecting to it
-        // in the first place (`timeout`, above). Matches the component's own
-        // ClientConfig defaults, so naming them here changes nothing about
-        // what already ran - it only makes the number visible.
+        // How long one query may take once connected (`timeout` above is
+        // the connect). Same values as the component's ClientConfig defaults,
+        // named here to make them visible.
         'read_timeout' => 30.0,
         'write_timeout' => 30.0,
-        // PLAN Step 30's slow-database experiment: how long every read and
-        // every write pretends to take, in milliseconds. Off by default and
-        // gated on the same notion of environment as failure injection - a
-        // delay is a fault, not a setting, so it is never honored anywhere a
-        // deployment could be serving. Only the experiment sets it, by name,
-        // so an env var that happens to be set cannot quietly follow a
-        // process into a real run.
+        // The slow-database experiment's artificial delay per read and
+        // write, in milliseconds. A delay is a fault, not a setting, so it is
+        // gated like failure injection and ignored outside dev/demo/test.
         'delay_ms' => $faultInjection ? (float) (getenv('DATABASE_LATENCY_MS') ?: 0.0) : 0.0,
     ],
     'cache' => [
@@ -55,15 +44,11 @@ return [
         'port' => 6380,
         'data_dir' => sys_get_temp_dir() . '/php-systems-platform/cache',
         'timeout' => 2.0,
-        // PLAN Step 29's "GET /orders/{id} without cache" needs a platform
-        // with no cache tier, not one whose cache is down: a refused or
-        // timed-out connection is itself a cost, and a benchmark that
-        // measured it would be measuring the failure, not the database.
-        // CACHE_ENABLED=0 therefore keeps the cache server from being started
-        // at all and answers every lookup with a miss. The off values are
-        // listed rather than cast: an environment variable is a string, and
-        // CACHE_ENABLED=false is something people write, but (bool) 'false'
-        // is true - the cast would read "off" as "on".
+        // CACHE_ENABLED=0 means no cache tier at all (no server started,
+        // every lookup a miss) rather than a cache that is down, whose
+        // refused connections would be a cost of their own in the "without
+        // cache" benchmark. Off values are listed, not cast: (bool) 'false'
+        // is true.
         'enabled' => !in_array(
             strtolower(trim($cacheEnabled === false ? '1' : $cacheEnabled)),
             ['0', 'false', 'no', 'off'],
@@ -72,63 +57,46 @@ return [
     ],
     'queue' => [
         'data_dir' => sys_get_temp_dir() . '/php-systems-platform/queue',
-        // The MAX_QUEUE_SIZE Step 17's backpressure policy checks - the one
-        // value here worth overriding without editing this file, since
-        // reproducing an overload means running `serve` with a small one.
+        // The backpressure limit; overridable so an overload can be
+        // reproduced by running `serve` with a small one.
         'max_size' => (int) (getenv('QUEUE_MAX_SIZE') ?: 500),
         'timeout' => 2.0,
         'max_attempts' => 3,
-        'retry_delay' => 0.1,
+        // Whole seconds: php-job-queue's RetryPolicy::nextDelay() returns an
+        // int, so a fractional value here would be truncated to 0 and every
+        // retry would fire on the next tick, spending max_attempts at once.
+        'retry_delay' => 1,
         'consumers' => 4,
     ],
     'workers' => [
         'data_dir' => sys_get_temp_dir() . '/php-systems-platform/worker',
         'count' => 4,
-        // Worker lifecycle timeouts (PLAN Step 18): how long a worker may
-        // sit STARTING without reporting ready, and how long one told to
-        // leave may sit STOPPING without actually exiting. Neither is about
-        // a task - a worker can fail its lifecycle with no task in sight.
+        // Worker lifecycle timeouts: how long a worker may sit STARTING
+        // without reporting ready, or STOPPING without exiting.
         'bootstrap_timeout' => 10.0,
         'departure_timeout' => 10.0,
-        // The worker operation timeout: how long WorkerPoolClient waits for
-        // one task's answer (php-worker-pool's own "request timeout" -
-        // named task_timeout here so it is never confused with the platform's
-        // HTTP request timeout above), fed to both ends of that wait -
-        // Master's requestTimeoutSeconds and every WorkerPoolClient's own.
+        // How long a WorkerPoolClient waits for one task's answer (the
+        // pool's "request timeout", renamed so it is not confused with the
+        // HTTP one); used by both the Master and every client.
         'task_timeout' => 5.0,
-        // The job execution timeout: how long a worker may hold ONE task
-        // before the pool kills and replaces it - the answer to a handler
-        // that never returns. Distinct from task_timeout (that one is about
-        // the CLIENT giving up on waiting; this one is about the POOL taking
-        // the slot back), and deliberately well above it - by the time this
-        // fires, the task is not late, it is never finishing.
+        // How long a worker may hold ONE task before the pool kills and
+        // replaces it. task_timeout is the client giving up; this is the pool
+        // taking the slot back, deliberately well above it.
         'execution_timeout' => 30.0,
         'socket' => '/tmp/php-worker-pool.sock',
     ],
     'jobs' => [
-        // PLAN Step 20's idempotency store: the append-only JSONL journal the
-        // queue-side IdempotencyGuard (PhpJobQueue\Idempotency\IdempotencyGuard)
-        // keeps its recorded operations in, read by every worker that starts
-        // and appended by one that settles. The same FileStorage contract as
-        // the queue journal itself - hence .log: a line per record, not a
-        // JSON document.
+        // Append-only JSONL journal of IdempotencyGuard's recorded
+        // operations (one line per record, hence .log).
         'idempotency_store' => sys_get_temp_dir() . '/php-systems-platform/idempotency.log',
-        // PLAN Step 24's trace journal: the append-only JSONL file every
-        // process (serve and each pool worker) appends its request/job spans
-        // to, read back by `php bin/platform.php trace <request_id>`. The
-        // same FileStorage contract as the queue journal - a line per span,
-        // not a JSON document.
+        // Append-only JSONL journal every process (serve and each pool
+        // worker) writes its spans to; read by `bin/platform.php trace <id>`.
         'trace_store' => sys_get_temp_dir() . '/php-systems-platform/trace.log',
     ],
-    // PLAN Step 22's failure injection, and the notion of an environment it
-    // is gated on: the `worker.crash` pool task, POST /debug/fail-worker,
-    // and the demo.failing job are only armed in development/demo modes -
-    // PLAN says "Failure injection should only be enabled in
-    // development/demo mode." PLATFORM_ENV is the one switch: anything
-    // other than a dev/demo/test environment (production, say) disarms all
-    // of it without code changes, so an HTTP route that kills a worker
-    // cannot exist next to a deployment that is actually serving. The same
-    // switch gates Step 30's database delay above.
+    // The worker.crash pool task, POST /debug/fail-worker and the
+    // demo.failing job are armed only when PLATFORM_ENV is dev/demo/test, so
+    // a route that kills a worker cannot exist in a real deployment. The
+    // same switch gates database.delay_ms.
     'failure_injection' => [
         'enabled' => $faultInjection,
     ],

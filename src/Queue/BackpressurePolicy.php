@@ -5,19 +5,15 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Queue;
 
 /**
- * PLAN Step 17: a configurable MAX_QUEUE_SIZE and one explicit policy for
- * what happens at it - reject. No block, no silent delay: a producer that
- * asks while the queue is full gets told so immediately, rather than
- * blocking an HTTP worker (there is only one) on a queue it cannot drain
- * itself, or accepting work its own journal already shows it cannot keep up
- * with.
+ * PLAN Step 17: a configurable MAX_QUEUE_SIZE and one explicit policy at it -
+ * reject. No blocking (the single HTTP worker cannot drain the queue itself)
+ * and no silent delay: a producer asking while the queue is full is told so
+ * immediately.
  *
- * `depth` is read straight off QueueJournal::snapshot() - the same
- * cross-process, durable count `GET /queue/status` answers with - rather
- * than an in-memory counter. The HTTP process's own Producer never pops
- * anything (queue:consume, a different process, does that), so an in-memory
- * count could only ever grow; the journal is the one place both sides of
- * the queue agree on how much work is actually outstanding.
+ * `depth` comes from the journal, the same cross-process count
+ * `GET /queue/status` reports. An in-memory counter would be wrong here: the
+ * HTTP process only ever pushes (queue:consume pops, in another process), so
+ * its own count could only grow.
  */
 final readonly class BackpressurePolicy
 {

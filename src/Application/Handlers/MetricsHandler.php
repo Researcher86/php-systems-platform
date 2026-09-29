@@ -9,15 +9,9 @@ use PhpSystemsPlatform\Http\Response;
 use PhpSystemsPlatform\Observability\MetricsReporter;
 
 /**
- * PLAN Step 23's HTTP side of observability: GET /metrics answers with the
- * platform's standard metric set as plain text, one `name value` per line.
- *
- * The single reader over the shared MetricsReporter, so exactly the same
- * snapshot the `metrics` CLI command prints is what a running serve exposes:
- * counters and gauges from the registry plus the queue/worker/memory numbers
- * pulled live. Plain text rather than a server-specific format because the
- * contract here is the metric names - values that read the same however they
- * are consumed.
+ * GET /metrics - the MetricsReporter snapshot (the same one the `metrics`
+ * CLI prints) as plain text, one `name value` per line. The metric names
+ * are the contract; floats are fixed at four decimals.
  */
 final readonly class MetricsHandler
 {

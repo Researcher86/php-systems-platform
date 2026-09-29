@@ -7,13 +7,9 @@ namespace PhpSystemsPlatform\Memory;
 use RuntimeException;
 
 /**
- * The measurement point for PLAN Steps 15 and 16: one snapshot joins PHP's
- * own allocator counters with the OS's view of this process's resident
- * pages; diff() turns two snapshots into what changed.
- *
- * A failed /proc read degrades the OS fields to null rather than throwing -
- * a snapshot still answers the PHP half on a non-Linux host instead of
- * refusing to measure anything at all.
+ * Takes MemorySnapshots (PHP allocator counters plus the kernel's view of
+ * resident pages) and diffs them. A failed /proc read leaves the OS fields
+ * null instead of throwing, so the PHP half still works off Linux.
  */
 final readonly class MemoryReporter
 {

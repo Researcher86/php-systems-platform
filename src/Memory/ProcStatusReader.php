@@ -7,16 +7,12 @@ namespace PhpSystemsPlatform\Memory;
 use RuntimeException;
 
 /**
- * Parses /proc/<pid>/status - a flat "Key:\tvalue" list that mixes
- * kB-backed memory fields (VmRSS, RssAnon, RssShmem, VmSize, ...) with plain
- * integers (Threads, Pid) and arbitrary strings (Name). A value ending in
- * " kB" is converted to bytes on the way in, so every caller works in one
- * unit instead of remembering which fields are pages, which are kB.
+ * Parses /proc/<pid>/status, a flat "Key:\tvalue" list mixing kB memory
+ * fields (VmRSS, RssAnon, ...), plain integers and strings. " kB" values are
+ * converted to bytes so callers work in one unit.
  *
- * The mechanism mirrors php-memory-lab's own ProcStatusReader - that project
- * cannot be a runtime dependency (PLAN Step 15 says so explicitly), so the
- * platform re-implements the one reader its fork demo needs rather than the
- * project's whole measurement stack.
+ * Mirrors php-memory-lab's reader, which PLAN Step 15 rules out as a runtime
+ * dependency.
  */
 final readonly class ProcStatusReader
 {

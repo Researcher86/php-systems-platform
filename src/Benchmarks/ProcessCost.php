@@ -5,29 +5,18 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Benchmarks;
 
 /**
- * What one process cost while it was under load - the CPU and memory half of
- * PLAN Step 29's Test A, read from the kernel rather than guessed at.
+ * One reading of a process's CPU and memory, from the kernel.
  *
- * CPU is the utime+stime pair out of /proc/<pid>/stat, which is where the
- * kernel accounts every tick a process was on a CPU. Memory is the peak
- * resident set the kernel already tracks (VmHWM), not a sample a benchmark
- * takes on a timer: a sampled peak can only ever be as high as the sampler
- * happened to look, and "the high-water mark the kernel recorded" is the
- * honest version of the same question.
- *
- * The numbers are a delta by design. A process that has been alive for a
- * while has already spent CPU on being started, so what a load phase costs is
- * the difference between two readings taken around it, and the runner takes
- * them itself.
+ * CPU is utime+stime from /proc/<pid>/stat; a phase's cost is the delta
+ * between two readings (cpuSince()), since the process spent CPU before the
+ * phase began. Peak memory is the kernel's own high-water mark (VmHWM) -
+ * over the process's lifetime, and exact, unlike a timer-sampled peak.
  */
 final readonly class ProcessCost
 {
     /**
-     * Linux reports process CPU in clock ticks, and CLK_TCK is 100 on every
-     * platform this project runs on (x86_64 and arm64 Linux, CI and the
-     * container alike). The consequence is stated rather than hidden: CPU
-     * seconds here have 10ms resolution, which is finer than a load phase
-     * takes to run and far finer than a phase's own numbers are quoted to.
+     * CLK_TCK on every Linux this project runs on (x86_64 and arm64), so CPU
+     * seconds have 10 ms resolution - ample for phases that take seconds.
      */
     public const int CLOCK_TICKS_PER_SECOND = 100;
 

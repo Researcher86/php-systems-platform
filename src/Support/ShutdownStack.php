@@ -8,33 +8,19 @@ use Closure;
 use Throwable;
 
 /**
- * The resources one command started, in the order it has to give them back.
+ * The resources one command started, released in reverse order on every
+ * path out of it.
  *
- * A long-running command here starts up to four things that outlive the PHP
- * call that started them: a daemonized database server (a pid file), a cache
- * server and a worker-pool Master (both direct children), and the client
- * connections to them. Getting them all back is the part that is easy to get
- * wrong by writing it out at every exit: a `return 1` in a constructor's
- * catch block that forgets one line leaks a process that outlives the command
- * and is then *adopted* by the next run, so it never gets cleaned up at all.
- * That is exactly what happened to the worker pool on two of serve()'s five
- * error paths.
+ * A command can start a daemonized database server, a cache server, a
+ * worker-pool Master and clients to them. Releasing them by hand at each exit
+ * is easy to get wrong, and a leaked server is then adopted by the next run
+ * and never cleaned up. So ownership is recorded once:
  *
- * So ownership is recorded once, here, instead of being re-asserted at every
- * exit:
- *
- *   push()  a step is pushed only once this process really holds the resource
- *           it releases, so "do I own it" is answered by whether there is a
- *           step at all - not by a boolean that a later edit can forget to
- *           consult
- *   run()   every step, newest first, on every path out of the command. One
- *           step that throws does not skip the rest: a cleanup that gives up
- *           halfway is the failure mode this class exists to remove
- *
- * Newest first is the natural order - a client connection is released before
- * the server it talks to, a pool before the cache its workers read through -
- * and it is the order the steps were pushed in, so the call site reads top to
- * bottom in the order things are acquired.
+ *   push()  only once this process really holds the resource, so "do I own
+ *           it" is simply whether a step exists
+ *   run()   every step, newest first (a client before its server, a pool
+ *           before the cache its workers use); a step that throws is
+ *           reported and does not skip the rest
  */
 final class ShutdownStack
 {
@@ -48,11 +34,7 @@ final class ShutdownStack
     ) {
     }
 
-    /**
-     * Register one release step. A name is not decoration: it is what a
-     * failing cleanup reports, so "the cache server did not stop" is a line
-     * an operator can act on instead of a silent finally that swallowed it.
-     */
+    /** Register one release step; $name is what a failing step reports. */
     public function push(Closure $step, string $name = ''): void
     {
         if ($this->ran) {
@@ -63,9 +45,8 @@ final class ShutdownStack
     }
 
     /**
-     * Release everything, newest first. Idempotent: a second call is a no-op,
-     * so a command that reaches the end of its body and then unwinds through
-     * an outer finally does not stop the same server twice.
+     * Release everything, newest first. Idempotent, so an explicit call
+     * followed by an outer finally does not stop the same server twice.
      */
     public function run(): void
     {

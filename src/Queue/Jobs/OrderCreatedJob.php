@@ -4,44 +4,29 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Queue\Jobs;
 
-use PhpMiniCache\Sdk\CacheClientException;
+use PhpSystemsPlatform\Domain\Order;
 use PhpSystemsPlatform\Queue\Job;
 use PhpSystemsPlatform\Queue\JobContext;
 use PhpSystemsPlatform\Queue\ValidatesPayload;
 use RuntimeException;
 
 /**
- * The first background job: "an order was created", dispatched by the write
- * path right after the authoritative row lands.
+ * "An order was created", dispatched by the write path right after the
+ * authoritative row lands: re-read the order from the database and warm the
+ * derived cache entry.
  *
- * It exists to make a stale write-visible effect eventual instead of
- * synchronous: it re-reads the order from the database - the source of truth -
- * and warms the derived cache entry. The synchronous populate-on-write in
- * OrderCreateHandler normally did that already, so the job is often an
- * idempotent no-op that simply refreshes the TTL; its real work shows when
- * the write path had to bypass the cache (it was down): once the cache is
- * reachable again, this job heals the gap.
+ * The synchronous populate-on-write in OrderCreateHandler usually did that
+ * already, so this is often an idempotent TTL refresh; its real work is
+ * healing the gap when the write path had to bypass a cache that was down.
  *
- * Two ways to fail, two different futures (PLAN Step 19). A payload without
- * an order_id can never work - retrying it asks the same unanswerable
- * question again - so ValidatesPayload marks it ineligible for retry
- * (JobRegistry::shouldRetry()): the one delivery it takes to notice is
- * spent, never the job's whole attempts budget. An order_id the database
- * does not know is different: in this
- * platform's write-before-publish design that should never actually happen
- * (the row exists before the job is even created), but it is not something
- * a payload check can rule out - answering it needs the database this job
- * already has open - so it stays a thrown RuntimeException on the normal
- * retry path, the honest place for a condition that is unreachable in
- * practice rather than provably permanent.
+ * Two failures, two futures (PLAN Step 19). A payload without order_id can
+ * never work, so ValidatesPayload makes JobRegistry::shouldRetry() refuse a
+ * retry. An unknown order_id should be unreachable (the row is written
+ * before the job is published) but a payload check cannot rule it out, so
+ * it stays a thrown RuntimeException on the normal retry path.
  *
- * It also carries the platform's first idempotency key (PLAN Step 20): the
- * write path dispatches it as `order.created:<order id>`, an operation key
- * rather than a delivery key. Its work - warming a cache entry - is cheap to
- * repeat, but a guard is still checked, both so the platform's every job
- * exercises the same seam and so a redelivery spends no read at all: a key
- * the context's IdempotencyGuard already knows skips straight out, before
- * the database is touched.
+ * The write path keys it `order.created:<order id>` (PLAN Step 20). The work
+ * is cheap to repeat, but a known key still skips the database read.
  */
 final readonly class OrderCreatedJob implements Job, ValidatesPayload
 {
@@ -56,11 +41,8 @@ final readonly class OrderCreatedJob implements Job, ValidatesPayload
 
     public function execute(JobContext $context): void
     {
-        // validate() already ruled this out for anything the dispatcher
-        // would ever retry (JobRegistry::shouldRetry()); called again here
-        // so a job executed directly (a test, or any future path that
-        // bypasses the queue) gets the same answer instead of a silently
-        // different one.
+        // Checked again here because nothing validates before dispatch: this
+        // is the failure shouldRetry() then declines to retry.
         $payload = $context->job->getPayload();
         $reason = self::validate($payload);
 
@@ -68,30 +50,20 @@ final readonly class OrderCreatedJob implements Job, ValidatesPayload
             throw new RuntimeException($reason);
         }
 
-        $orderId = (string) $payload['order_id'];
-
-        // Dedupe before work, exactly like order.process: a redelivery of an
-        // operation the guard has already recorded is already done.
-        $key = $context->job->getIdempotencyKey();
-
-        if ($key !== null && $context->idempotency !== null && $context->idempotency->isProcessed($key)) {
+        if ($context->alreadyProcessed()) {
             return;
         }
 
-        $order = $context->orders->getOrder($orderId);
+        $orderId = (string) $payload['order_id'];
+
+        // Guarded fill, not a plain set: an order.process worker may settle
+        // the order (and delete its key) while this one reads it.
+        $order = $context->cache->loadAndFillOrder($orderId, static fn (): ?Order => $context->orders->getOrder($orderId));
 
         if ($order === null) {
             throw new RuntimeException(sprintf('Order "%s" not found for order.created.', $orderId));
         }
 
-        try {
-            $context->cache->setOrder($order);
-        } catch (CacheClientException) {
-            $context->cache->counters()->bypasses++;
-        }
-
-        if ($key !== null && $context->idempotency !== null) {
-            $context->idempotency->markProcessed($key);
-        }
+        $context->markProcessed();
     }
 }

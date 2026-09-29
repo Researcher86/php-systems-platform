@@ -49,7 +49,7 @@ final readonly class WorkerFailureInjector
      */
     public function crashOneWorker(): array
     {
-        $before = $this->pids();
+        $before = $this->pids() ?? [];
         $started = microtime(true);
 
         $error = 'no_error';
@@ -73,7 +73,7 @@ final readonly class WorkerFailureInjector
             $error = 'request_timed_out';
         }
 
-        $detectedMs = $this->millisecondsSince($started);
+        $detectedMs = (microtime(true) - $started) * 1000;
 
         $removedMs = null;
         $replacedMs = null;
@@ -83,19 +83,25 @@ final readonly class WorkerFailureInjector
         $deadline = microtime(true) + self::REPLACEMENT_DEADLINE_SECONDS;
 
         while ($removedMs === null || $replacedMs === null) {
-            $after = $this->pids();
+            // A failed stats() read says nothing about the pool, so it must
+            // not be mistaken for an empty one - that would record "every
+            // worker removed" and blame an arbitrary pid for the crash.
+            $current = $this->pids();
+            $elapsedMs = (microtime(true) - $started) * 1000;
 
-            $nowSeconds = microtime(true);
+            if ($current !== null) {
+                $after = $current;
 
-            if ($removedMs === null && array_diff($before, $after) !== []) {
-                $removedMs = ($nowSeconds - $started) * 1000;
-            }
+                if ($removedMs === null && array_diff($before, $after) !== []) {
+                    $removedMs = $elapsedMs;
+                }
 
-            $newPids = array_values(array_diff($after, $before));
+                $newPids = array_values(array_diff($after, $before));
 
-            if ($replacedMs === null && $newPids !== []) {
-                $replacedMs = ($nowSeconds - $started) * 1000;
-                $replacementPid = $newPids[0];
+                if ($replacedMs === null && $newPids !== []) {
+                    $replacedMs = $elapsedMs;
+                    $replacementPid = $newPids[0];
+                }
             }
 
             if (microtime(true) >= $deadline) {
@@ -132,25 +138,21 @@ final readonly class WorkerFailureInjector
     }
 
     /**
-     * The pool's current worker pids, defensively - a pool a moment into
-     * replacing a worker is still a pool that answers stats.
+     * The pool's current worker pids, or null when the Master could not be
+     * asked right now - a pool a moment into replacing a worker may drop a
+     * connection or be too busy reaping to answer in time.
      *
-     * @return list<int>
+     * @return list<int>|null
      */
-    private function pids(): array
+    private function pids(): ?array
     {
         try {
             return array_map(
                 static fn (array $row): int => (int) $row['pid'],
                 $this->client->stats(),
             );
-        } catch (ConnectionClosedException | ConnectionFailedException | ServerErrorException) {
-            return [];
+        } catch (ConnectionClosedException | ConnectionFailedException | ServerErrorException | RequestTimedOutException) {
+            return null;
         }
-    }
-
-    private function millisecondsSince(float $started): float
-    {
-        return (microtime(true) - $started) * 1000;
     }
 }

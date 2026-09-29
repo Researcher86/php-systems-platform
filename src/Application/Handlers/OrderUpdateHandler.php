@@ -12,15 +12,13 @@ use PhpSystemsPlatform\Http\Request;
 use PhpSystemsPlatform\Http\Response;
 
 /**
- * PUT /orders/{id} - the synchronous update path: move an order to a new
- * status ("processing", "completed", "cancelled"). Invalid statuses are a
- * 400, missing orders a 404.
+ * PUT /orders/{id} - move an order to a new status. Unknown statuses are a
+ * 400, missing orders a 404. Any status may follow any other; there is no
+ * transition table.
  *
- * Cache consistency: invalidate-on-write. The row changed, so the cached copy
- * (if any) is stale and is deleted (cache.delete); the next read misses,
- * re-reads the authoritative row, and refills. The database stays the source
- * of truth; the cache is only ever derived state. If the cache cannot answer,
- * the write proceeds as a bypass, never a failure.
+ * Cache: invalidate-on-write. The cached copy is deleted rather than
+ * rewritten, so the next read refills from the authoritative row. An
+ * unreachable cache is a bypass, never a failed write.
  */
 final readonly class OrderUpdateHandler
 {

@@ -50,10 +50,9 @@ final class JobRegistry
     }
 
     /**
-     * PLAN Step 19's pre-flight check (see ValidatesPayload): a reason this
-     * payload can never succeed, or null if either the type opted out of a
-     * check or the payload passed it. An unregistered type has no opinion
-     * here - execute() is where that becomes the failure it is.
+     * A reason this payload can never succeed (see ValidatesPayload), or null
+     * if the type has no check or the payload passed it. An unregistered type
+     * has no opinion here - execute() is where it fails.
      *
      * @param array<string, mixed> $payload
      *
@@ -71,14 +70,9 @@ final class JobRegistry
     }
 
     /**
-     * The retry-eligibility hook JobDispatcher::handleFailure() consults
-     * before its own attempts-remaining check (PLAN Step 19, "do not retry
-     * every possible error"): a payload validate() has already ruled out
-     * can never succeed regardless of how many attempts are left, so this
-     * refuses eligibility for exactly the reason a pre-dispatch check would -
-     * just answered at the point the component now offers for it, after a
-     * real execution has actually failed, instead of guessed at pop() time
-     * against a queue decorator built solely to ask the question early.
+     * The retry-eligibility hook JobDispatcher consults after a failed
+     * attempt, before its attempts-remaining check: a payload validate()
+     * rules out can never succeed, however many attempts are left.
      *
      * @return Closure(QueueJob, Throwable): bool
      */

@@ -4,39 +4,31 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Cache;
 
+use Closure;
 use PhpMiniCache\Sdk\CacheClient;
 use PhpMiniCache\Sdk\CacheClientException;
 use PhpSystemsPlatform\Domain\Order;
 use PhpSystemsPlatform\Observability\MetricsRegistry;
+use Throwable;
 
 /**
- * The platform's facade over one shared php-mini-cache connection, plus the
- * read-path bookkeeping PLAN asks for.
+ * The platform's facade over one php-mini-cache connection, plus the
+ * read-path bookkeeping.
  *
- * The database is the source of truth; this cache is derived state. It only
- * ever stores an order's JSON, keyed by id, so a hit can skip the repository
- * and a miss can repopulate it from the authoritative row. Cache-client
- * failures surface as CacheClientException and are the handler's decision to
- * degrade from, never this service's.
+ * The cache is derived state: it only stores an order's JSON keyed by id,
+ * and the database stays the source of truth. Client failures surface as
+ * CacheClientException; degrading from them is the caller's decision.
  *
- * The service can also be switched off entirely (CACHE_ENABLED=0, see
- * config/platform.php): a platform with no cache tier at all. That is a
- * different thing from a cache that is down, and the difference is the point
- * - a disabled cache answers every lookup with a miss without a socket, a
- * timeout or a fallback, which is what makes "what does this read cost
- * without the cache" a measurement instead of an argument about how much a
- * failed connection costs.
+ * Disabled (CACHE_ENABLED=0) is not the same as down: a disabled cache
+ * answers every lookup with a miss without touching a socket, so "what does
+ * this read cost without a cache" is measured without timeout noise.
  */
 final readonly class CacheService
 {
-    /**
-     * The lifetime of an order entry. Long enough that the demo read hits
-     * the cache, short enough that a repaired-after-write-through entry (a
-     * future phase) would eventually age out on its own.
-     */
-    public const ORDER_TTL_SECONDS = 60;
+    /** Long enough for the demo's read to hit; a backstop for stale data. */
+    public const int ORDER_TTL_SECONDS = 60;
 
-    private const ORDER_KEY_PREFIX = 'order:';
+    private const string ORDER_KEY_PREFIX = 'order:';
 
     public function __construct(
         private CacheClient $client,
@@ -74,40 +66,20 @@ final readonly class CacheService
     }
 
     /**
-     * The cached payload for an order, or null on a miss. A hit counts once;
-     * a miss counts once too, so the two add up to every lookup made through
-     * this method. A stored value that no longer parses as an object counts
-     * as a miss: it is not authoritative, so it must not be served. A lookup
-     * made against a disabled cache counts as a miss as well - the lookup
-     * happened, and the answer was that there is nothing cached - which keeps
-     * hits + misses equal to lookups whatever the platform is configured to.
+     * The cached payload for an order, or null on a miss. Every lookup
+     * counts exactly once, as a hit or a miss - a disabled cache and an
+     * entry that no longer parses (not servable) are misses too - so
+     * hits + misses always equals lookups. An unreachable cache counts
+     * neither: it throws, and the caller records the bypass.
      *
      * @return array<string, mixed>|null
      *
-     * @throws CacheClientException the cache is unreachable - a bypass, not a payload
+     * @throws CacheClientException the cache is unreachable
      */
     public function getOrder(string $id): ?array
     {
-        // One report per outcome, counted once. The three miss reasons below -
-        // no cache tier, nothing stored, something stored that does not parse
-        // - each counted the miss themselves, so the counters' definition of
-        // a miss was three separate statements of it, and a fourth reason
-        // added later would have had to remember all three lines.
-        if (!$this->enabled) {
-            $this->recordMiss();
-
-            return null;
-        }
-
-        $json = $this->client->get(self::ORDER_KEY_PREFIX . $id);
-
-        if ($json === null) {
-            $this->recordMiss();
-
-            return null;
-        }
-
-        $order = json_decode($json, true);
+        $json = $this->enabled ? $this->client->get(self::ORDER_KEY_PREFIX . $id) : null;
+        $order = $json === null ? null : json_decode($json, true);
 
         if (!is_array($order)) {
             $this->recordMiss();
@@ -123,24 +95,9 @@ final readonly class CacheService
     }
 
     /**
-     * A lookup that produced no payload: the local counter, the shared
-     * registry, and the fact that a lookup happened at all.
-     */
-    private function recordMiss(): void
-    {
-        $this->counters->misses++;
-        $this->metrics?->increment(MetricsRegistry::CACHE_MISSES);
-        $this->metrics?->increment(MetricsRegistry::CACHE_OPERATIONS);
-    }
-
-    /**
-     * Refill an entry after a miss. The order's own public fields are the
-     * representation - the same bytes a direct database read would answer
-     * with - so a hit is indistinguishable from a repository read.
-     *
-     * A disabled cache is not written to and is not counted as written: the
-     * write never reached a server, and a counter that claimed otherwise
-     * would make /metrics describe a cache that does not exist.
+     * Store an order. Its public fields are the representation, so a hit
+     * answers with the same body a database-served read does (only X-Cache
+     * differs). A disabled cache is neither written nor counted as written.
      *
      * @throws CacheClientException the cache is unreachable - the caller
      *                              serves the database copy anyway
@@ -153,7 +110,7 @@ final readonly class CacheService
 
         $this->client->set(
             self::ORDER_KEY_PREFIX . $order->id,
-            (string) json_encode($order, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            $this->encode($order),
             self::ORDER_TTL_SECONDS,
         );
         $this->counters->sets++;
@@ -161,9 +118,65 @@ final readonly class CacheService
     }
 
     /**
-     * Remove an entry - the write-path counterpart to setOrder(), used by
-     * the invalidation phase when a row changes. Nothing to remove when the
-     * cache is disabled, for the same reason nothing is written to it.
+     * The cache-aside fill: load an order from the source of truth and cache
+     * it - unless the key was written in the meantime.
+     *
+     * A plain "read the row, then SET" loses a race to any writer: a reader
+     * loads the old row, a writer updates it and deletes the key, and the
+     * reader's SET then stores the old row until the TTL runs out. So the key
+     * is WATCHed before $load runs and filled with setIfUnchanged(): a DEL
+     * (or SET) by anyone in between - even of the key that is not there,
+     * which is the point - aborts the fill. The database copy is still
+     * returned; only the stale cache write is dropped.
+     *
+     * Degrades like every other cache call, but internally: an unreachable
+     * cache is counted as a bypass and $load's result returned regardless,
+     * so the caller only deals with the database.
+     *
+     * @param Closure(): ?Order $load
+     */
+    public function loadAndFillOrder(string $id, Closure $load): ?Order
+    {
+        if (!$this->enabled) {
+            return $load();
+        }
+
+        $key = self::ORDER_KEY_PREFIX . $id;
+
+        try {
+            $this->client->watch($key);
+        } catch (CacheClientException) {
+            $this->counters->bypasses++;
+
+            return $load();
+        }
+
+        try {
+            $order = $load();
+        } catch (Throwable $e) {
+            $this->unwatchQuietly();
+
+            throw $e;
+        }
+
+        try {
+            if ($order === null) {
+                $this->client->unwatch();
+            } elseif ($this->client->setIfUnchanged($key, $this->encode($order), self::ORDER_TTL_SECONDS)) {
+                $this->counters->sets++;
+                $this->metrics?->increment(MetricsRegistry::CACHE_OPERATIONS);
+            } else {
+                $this->counters->abandonedFills++;
+            }
+        } catch (CacheClientException) {
+            $this->counters->bypasses++;
+        }
+
+        return $order;
+    }
+
+    /**
+     * Invalidate an entry after its row changed. A no-op when disabled.
      *
      * @throws CacheClientException the cache is unreachable
      */
@@ -181,5 +194,26 @@ final readonly class CacheService
     public function close(): void
     {
         $this->client->close();
+    }
+
+    private function encode(Order $order): string
+    {
+        return (string) json_encode($order, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    }
+
+    /** A watch left behind would only abort a later fill; losing it is harmless. */
+    private function unwatchQuietly(): void
+    {
+        try {
+            $this->client->unwatch();
+        } catch (CacheClientException) {
+        }
+    }
+
+    private function recordMiss(): void
+    {
+        $this->counters->misses++;
+        $this->metrics?->increment(MetricsRegistry::CACHE_MISSES);
+        $this->metrics?->increment(MetricsRegistry::CACHE_OPERATIONS);
     }
 }

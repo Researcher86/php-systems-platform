@@ -38,7 +38,7 @@ final class WorkerJobs
      *                                     built with)
      */
     public function __construct(
-        private array $config,
+        private readonly array $config,
         private readonly ?Trace $trace = null,
     ) {
     }
@@ -60,7 +60,7 @@ final class WorkerJobs
     {
         try {
             $job = Job::fromArray((array) ($params['job'] ?? []));
-            $this->executor()->__invoke($job);
+            ($this->executor())($job);
 
             return Response::of(['ok' => true]);
         } catch (Throwable $e) {

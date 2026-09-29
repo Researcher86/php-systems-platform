@@ -1449,10 +1449,9 @@ One job exists only for these tests. `demo.slow` takes the number of seconds
 it is given and then succeeds, which is what makes "which worker is holding
 this job right now" and "what happens to work in flight when this process is
 SIGTERMed" answerable instead of a race against a scheduler. Its duration is
-bounded to `(0, 30]` seconds, because a job that outlives the pool's task
-timeout fails in a way that has nothing to do with the question being asked,
-and one that outlives the pool's execution timeout gets its worker killed
-underneath it.
+bounded to `(0, 4]` seconds - under the pool's 5s task timeout - because a
+job that outlives that timeout fails at the forwarder on every attempt, in a
+way that has nothing to do with the question being asked.
 
 The crash scenario sends the platform's own
 `POST /debug/fail-worker` and reads the pool's report of what it did; the

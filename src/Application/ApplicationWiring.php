@@ -17,19 +17,13 @@ use PhpSystemsPlatform\Workers\WorkerFailureInjector;
 /**
  * Everything the platform's Application is built out of, in one named object.
  *
- * This exists because the alternative was ten positional parameters on the
- * composition root's application() call, two of which were adjacent strings
- * (the queue journal path and the worker status path). Swapping them compiles,
- * passes a level-6 PHPStan run and a clean format check, and silently points
- * GET /queue/status at the worker snapshot file. Named arguments fixed the
- * call site; this fixes the signature, so the mistake is unrepresentable
- * instead of merely discouraged.
+ * Replaces a long positional parameter list that had two adjacent strings
+ * (queue journal path, worker status path): swapping them type-checked and
+ * silently pointed GET /queue/status at the worker snapshot file.
  *
- * The nullables keep their meaning from the original parameters: a null
- * producer is a synchronous write path with no queue, a null runner is a
- * platform with no pool behind GET /parallel, and a null metrics reporter or
- * trace is a serve that was not asked to observe itself. A caller holding
- * fewer pieces gets the earlier behavior back rather than a crash.
+ * Every nullable means "that part is not wired": no producer is a
+ * synchronous write path, no runner is a GET /parallel that answers 503, no
+ * metrics reporter or trace is a serve that does not observe itself.
  */
 final readonly class ApplicationWiring
 {
@@ -38,7 +32,11 @@ final readonly class ApplicationWiring
         public CacheService $cache,
         public ?Producer $producer = null,
         public ?ConcurrentTaskRunner $runner = null,
-        public string $queueLogPath = '',
+        // One shared instance for backpressure, GET /queue/status and the
+        // metrics reporter: QueueJournal caches its replay against the
+        // file's size and mtime, so sharing it means one replay per change,
+        // not one per reader. Null: no backpressure and no status route.
+        public ?QueueJournal $queueJournal = null,
         public string $workersStatusPath = '',
         public ?int $maxQueueSize = null,
         public ?WorkerFailureInjector $failureInjector = null,
@@ -46,20 +44,5 @@ final readonly class ApplicationWiring
         public ?Trace $trace = null,
         public ?Logger $logger = null,
     ) {
-    }
-
-    /**
-     * The one journal this Application reads the queue through, built once.
-     *
-     * Both the backpressure policy on POST /orders and the counters on
-     * GET /queue/status need the same replay, and QueueJournal caches it
-     * against the file's size and mtime - so the two share one instance and
-     * a request that both enqueues and then reports costs one replay, not
-     * two. A caller with no journal path gets null and the backpressure
-     * policy stays off, exactly as an empty $queueLogPath used to mean.
-     */
-    public function queueJournal(): ?QueueJournal
-    {
-        return $this->queueLogPath === '' ? null : new QueueJournal($this->queueLogPath);
     }
 }

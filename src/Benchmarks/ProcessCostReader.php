@@ -8,16 +8,8 @@ use PhpSystemsPlatform\Memory\ProcStatusReader;
 use RuntimeException;
 
 /**
- * Reads one process's cost out of /proc - the CPU and memory behind PLAN
- * Step 29's Test A.
- *
- * Two files, because the kernel keeps the two numbers in two shapes.
- * /proc/<pid>/status is a flat key/value list and the platform already has a
- * reader for it (Memory\ProcStatusReader), which is where VmRSS and the
- * kernel's own peak, VmHWM, come from. /proc/<pid>/stat is a single line with
- * the process name wedged into the second field, so it is parsed here - after
- * the last closing parenthesis, which is the only reliable way past a name
- * that may itself contain spaces or parentheses.
+ * Reads a ProcessCost out of /proc: VmRSS and VmHWM from /proc/<pid>/status
+ * (via Memory\ProcStatusReader), utime and stime from /proc/<pid>/stat.
  */
 final class ProcessCostReader
 {
@@ -27,9 +19,8 @@ final class ProcessCostReader
     }
 
     /**
-     * @throws RuntimeException the process is gone, or this is not a Linux
-     *                          host - both of which a load test should say
-     *                          out loud rather than report a zero cost
+     * @throws RuntimeException the process is gone or this is not Linux -
+     *                          better than silently reporting a zero cost
      */
     public function read(int $pid): ProcessCost
     {
@@ -53,9 +44,9 @@ final class ProcessCostReader
             throw new RuntimeException(sprintf('Could not read "/proc/%d/stat".', $pid));
         }
 
-        // Fields 1 and 2 are the pid and the command in parentheses; the
-        // fields after them are state, ppid, ... and utime is the 14th field of
-        // the line, which is the 12th token after that parenthesis.
+        // Field 2 is the command in parentheses and may itself contain spaces
+        // or parentheses, so parsing starts after the LAST ')'. utime and
+        // stime are fields 14 and 15, i.e. tokens 11 and 12 after it.
         $closing = strrpos($line, ')');
 
         if ($closing === false) {

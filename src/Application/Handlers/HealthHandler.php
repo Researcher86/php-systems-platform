@@ -8,11 +8,8 @@ use PhpSystemsPlatform\Http\Request;
 use PhpSystemsPlatform\Http\Response;
 
 /**
- * GET /health - the liveness probe.
- *
- * Invokable so the router can register it and call it like any handler
- * closure; kept a class so the shape of a handler (Request plus route
- * parameters in, Response out) has one canonical example to copy.
+ * GET /health - the liveness probe, and the canonical handler shape:
+ * Request plus route parameters in, Response out.
  */
 final class HealthHandler
 {

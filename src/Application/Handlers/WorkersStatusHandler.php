@@ -8,13 +8,9 @@ use PhpSystemsPlatform\Http\Request;
 use PhpSystemsPlatform\Http\Response;
 
 /**
- * The platform's HTTP view of the queue consumer's worker lifecycle.
- *
- * GET /workers answers the same snapshot `workers:status` prints: each
- * forwarder's id, pid, state, current job and the completed/failed counters
- * the consumer attributes from the journal. The consumer writes the file on
- * its own schedule, so this endpoint is read-only by construction and never
- * has to own a worker process to answer.
+ * GET /workers - the queue consumer's worker snapshot, the same one
+ * `workers:status` prints. The consumer writes the file on its own
+ * schedule; this endpoint only reads it.
  */
 final readonly class WorkersStatusHandler
 {
@@ -28,11 +24,15 @@ final readonly class WorkersStatusHandler
      */
     public function __invoke(Request $request, array $params): Response
     {
-        if (!is_file($this->statusPath)) {
+        // The file can vanish between the check and the read; a failed read
+        // then means "not running" rather than a PHP warning.
+        $json = is_file($this->statusPath) ? @file_get_contents($this->statusPath) : false;
+
+        if ($json === false) {
             return Response::json(['running' => false, 'workers' => []]);
         }
 
-        $decoded = json_decode((string) file_get_contents($this->statusPath), true);
+        $decoded = json_decode($json, true);
 
         return Response::json([
             'running' => true,

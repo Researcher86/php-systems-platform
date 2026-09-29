@@ -17,7 +17,10 @@ use PhpJobQueue\Worker\WorkerPool;
 use PhpMiniDatabase\Client\ClientConfig;
 use PhpSystemsPlatform\Application\Handlers\OrderCreateHandler;
 use PhpSystemsPlatform\Cache\CacheService;
+use PhpSystemsPlatform\Domain\OrderLoader;
 use PhpSystemsPlatform\Domain\OrderService;
+use PhpSystemsPlatform\Domain\OrderSnapshot;
+use PhpSystemsPlatform\Domain\OrderStatus;
 use PhpSystemsPlatform\Domain\SequentialOrderLoader;
 use PhpSystemsPlatform\Http\Request;
 use PhpSystemsPlatform\Http\RequestMethod;
@@ -240,6 +243,40 @@ final class ServeIntegrationTest extends TestCase
         self::assertSame($setsBefore + 1, self::$cache->counters()->sets);
     }
 
+    /**
+     * The cache-aside race, staged deterministically: while the reader loads
+     * the row, a writer (another connection, as a worker would be) updates
+     * it and deletes the key - which is not even there. The reader still
+     * answers with what it read, but must not cache it: the next read has to
+     * miss and see the new row instead of the stale one for the TTL.
+     */
+    public function testAFillRacingAWriterIsAbandonedInsteadOfCachingTheOldRow(): void
+    {
+        $order = $this->postOrder('Race Reader', 4);
+        $id = (string) $order['id'];
+        self::$cache->deleteOrder($id);
+
+        $writer = CacheService::fromConfig(['host' => self::HOST, 'port' => self::CACHE_PORT, 'timeout' => 2.0]);
+        $abandonedBefore = self::$cache->counters()->abandonedFills;
+
+        try {
+            $read = self::$cache->loadAndFillOrder($id, static function () use ($id, $writer) {
+                $stale = self::orders()->getOrder($id);
+                self::orders()->updateOrderStatus($id, OrderStatus::COMPLETED);
+                $writer->deleteOrder($id);
+
+                return $stale;
+            });
+        } finally {
+            $writer->close();
+        }
+
+        self::assertNotNull($read);
+        self::assertSame('created', $read->status->value);
+        self::assertNull(self::$cache->getOrder($id), 'the stale row must not be cached');
+        self::assertSame($abandonedBefore + 1, self::$cache->counters()->abandonedFills);
+    }
+
     public function testOrderCreatedJobCountsABypassWhenTheCacheCannotAnswer(): void
     {
         $order = $this->postOrder('Katherine Johnson', 11);
@@ -405,6 +442,51 @@ final class ServeIntegrationTest extends TestCase
 
         $rows = self::$database->read('SELECT status FROM orders WHERE id = ?', [$order['id']]);
         self::assertSame('cancelled', $rows[0]['status']);
+    }
+
+    /**
+     * The snapshot is read before the stock is taken, so another worker can
+     * take the last unit in between. The conditional decrement is the real
+     * answer: an order whose unit is gone is cancelled, never completed
+     * without a unit taken off the shelf.
+     */
+    public function testOrderProcessJobCancelsWhenTheLastUnitWasTakenAfterTheSnapshot(): void
+    {
+        $order = $this->postOrder('Last Unit', 3);
+        $sku = (string) $order['product'];
+        $staleSnapshot = self::loader()->load($order['id']);
+        self::assertNotNull($staleSnapshot?->stock);
+        self::assertGreaterThan(0, $staleSnapshot->stock->available);
+
+        $available = $staleSnapshot->stock->available;
+        self::$database->write('UPDATE inventory SET available = 0 WHERE sku = ?', [$sku]);
+
+        try {
+            $loader = new class ($staleSnapshot) implements OrderLoader {
+                public function __construct(private OrderSnapshot $snapshot)
+                {
+                }
+
+                public function load(string $id): OrderSnapshot
+                {
+                    return $this->snapshot;
+                }
+            };
+            $job = $this->dispatchJob(OrderProcessJob::TYPE, ['order_id' => $order['id']]);
+
+            new OrderProcessJob()->execute(new JobContext(
+                $job,
+                self::orders(),
+                self::$cache,
+                $loader,
+                inventory: new InventoryRepository(self::$database),
+            ));
+
+            $rows = self::$database->read('SELECT status FROM orders WHERE id = ?', [$order['id']]);
+            self::assertSame('cancelled', $rows[0]['status']);
+        } finally {
+            self::$database->write('UPDATE inventory SET available = ? WHERE sku = ?', [$available, $sku]);
+        }
     }
 
     public function testOrderProcessJobFailsWhenTheOrderIsMissing(): void

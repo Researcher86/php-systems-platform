@@ -7,20 +7,13 @@ namespace PhpSystemsPlatform\Storage\Repositories;
 use PhpSystemsPlatform\Storage\Database;
 
 /**
- * The write-side of the inventory table - the counterpart of CatalogRepository,
- * which only ever reads it.
+ * The write side of the inventory table; CatalogRepository owns the reads.
  *
- * Reading stays on CatalogRepository, because completing the Platform Step 20
- * demonstration changes what "reference data" means: the catalog is seeded by
- * the migration and read-only for the concurrency loaders, but settling a
- * completed order takes a unit off the shelf. That write is the platform's
- * example of a side effect that MUST NOT run twice - if a queue redelivers an
- * already-settled order.process and the job settles blindly, the same order
- * ships two units' worth of stock.
- *
- * The decrement is guarded in SQL (a row that is already at zero is refused
- * rather than driven negative) so the danger the idempotency guard addresses
- * stays the double-apply, not an assertion about stock the loaders cannot see.
+ * Settling a completed order takes a unit off the shelf - the platform's
+ * example of a side effect that MUST NOT run twice: a redelivered
+ * order.process that settled blindly would ship two units for one order.
+ * The queue-side idempotency guard prevents the double-apply; the SQL guard
+ * (available > 0) only keeps the count from going negative.
  */
 final readonly class InventoryRepository
 {

@@ -11,14 +11,11 @@ use PhpSystemsPlatform\Storage\Database;
 
 /**
  * The reference data an order is enriched with: the customer behind the
- * name, the product behind the sku, and the stock level of that sku.
+ * name, the product behind the sku, and that sku's stock level.
  *
- * One repository rather than three, because the three tables are read the
- * same way and never written by the platform - they are seeded by the
- * migration and only ever looked up by key. Each finder is exactly one
- * round trip, which is what makes them the independent units the
- * concurrency phase either runs one after another (SequentialOrderLoader)
- * or side by side on worker processes (ConcurrentOrderLoader).
+ * Each finder is exactly one round trip - the independent units the order
+ * loaders run one after another (SequentialOrderLoader) or side by side on
+ * worker processes (ConcurrentOrderLoader).
  */
 final readonly class CatalogRepository
 {

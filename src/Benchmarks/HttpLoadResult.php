@@ -5,30 +5,20 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Benchmarks;
 
 /**
- * What one load phase measured - PLAN Step 29's Test A, B and C evidence.
+ * What one load phase measured (PLAN Step 29's Tests A, B and C).
  *
- * The numbers are kept apart on purpose. Wall time and requests give the
- * rate; every per-request time is kept (not just an average) because a load
- * test that reports one mean is a load test that cannot show a tail, and the
- * tail is where a platform under load gives itself away. The status codes and
- * the read path's own X-Cache marker are tallied rather than assumed: a phase
- * that silently answered 500s at a beautiful RPS is not a measurement, and
- * the tally is what tells the two apart.
+ * Every per-request time is kept, not just a mean, so the tail is visible.
+ * Status codes and X-Cache markers are tallied rather than assumed, so a
+ * phase that answered 500s at a great RPS cannot pass for a good one.
  */
 final readonly class HttpLoadResult
 {
     public const float MILLISECONDS = 1000.0;
 
     /**
-     * @param list<float>                $latencyMs every per-request time,
-     *                                             ascending; the raw samples
-     *                                             stay available so any
-     *                                             percentile can be recomputed
-     *                                             from them
-     * @param array<int, int>             $statusCodes how many answers carried
-     *                                               each status
-     * @param array<string, int>          $cacheTally  how many answers carried
-     *                                               each X-Cache value
+     * @param list<float>        $latencyMs   every per-request time, ascending
+     * @param array<int, int>    $statusCodes answers per status code
+     * @param array<string, int> $cacheTally  answers per X-Cache value
      */
     public function __construct(
         public string $label,
@@ -91,9 +81,8 @@ final readonly class HttpLoadResult
     /**
      * The $percentile-th percentile of the samples, nearest-rank.
      *
-     * Nearest-rank rather than interpolated: with a few hundred samples an
-     * interpolated percentile reports a number no request actually took, and
-     * this project's benchmarks are read by people deciding what to fix.
+     * Nearest-rank rather than interpolated, so the answer is always a time
+     * some request actually took.
      */
     public function percentileLatencyMs(float $percentile): float
     {

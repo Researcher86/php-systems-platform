@@ -90,7 +90,7 @@ final readonly class WorkerMemoryBenchmark
      */
     private static function avg(array $values): ?int
     {
-        $present = array_values(array_filter($values, static fn (?int $v): bool => $v !== null));
+        $present = self::present($values);
 
         return $present === [] ? null : intdiv(array_sum($present), count($present));
     }
@@ -101,11 +101,21 @@ final readonly class WorkerMemoryBenchmark
      */
     private static function extreme(array $values, \Closure $reduce): ?int
     {
-        $present = array_values(array_filter($values, static fn (?int $v): bool => $v !== null));
+        $present = self::present($values);
 
         // min()/max() take the array itself, not a spread - a spread of one
         // element calls min(int), which min() rejects outright.
         return $present === [] ? null : $reduce($present);
+    }
+
+    /**
+     * @param list<?int> $values
+     *
+     * @return list<int>
+     */
+    private static function present(array $values): array
+    {
+        return array_values(array_filter($values, static fn (?int $v): bool => $v !== null));
     }
 
     /**

@@ -9,17 +9,12 @@ use PhpSystemsPlatform\Http\Response;
 use PhpSystemsPlatform\Workers\WorkerFailureInjector;
 
 /**
- * PLAN Step 22's HTTP side of the controlled failure mode: POST
- * /debug/fail-worker crashes one pool worker and answers with the evidence
- * of each phase - the worker died, the pool detected it, the dead pid was
- * removed, and a replacement was started.
+ * POST /debug/fail-worker - crash one pool worker and answer with the
+ * evidence of each phase: died, detected, removed, replaced.
  *
- * The route exists only in development/demo environments: the Application
- * registers it exactly when serve() hands it an injector, and serve() builds
- * one only when config failure_injection.enabled is true. A production
- * serve has no such route at all (404), and a handler invoked without an
- * injector - defensive, for a test or a future direct route - answers 503
- * with failure_injection_disabled.
+ * The route is registered only when serve() builds an injector, i.e. only
+ * with failure_injection.enabled (dev/demo); a production serve answers 404.
+ * Invoked without an injector anyway, the handler answers 503.
  */
 final readonly class FailWorkerHandler
 {

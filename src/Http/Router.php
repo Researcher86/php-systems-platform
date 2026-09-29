@@ -7,15 +7,10 @@ namespace PhpSystemsPlatform\Http;
 use Closure;
 
 /**
- * Maps a request to the handler that answers it.
- *
- * The platform's own router, deliberately type-shaped like the component's:
- * routes are (method, path) pairs, a path is exact ("/health") or a pattern
- * with {name} placeholders ("/orders/{id}"), and exact routes win over
- * patterns. The handler receives the request and the extracted parameters,
- * so routing stays a pure lookup - no body parsing, no middleware, no error
- * translation. The application boundary owns those, and turns the two miss
- * exceptions into 404 and 405 responses there.
+ * Maps a (method, path) pair to its handler. A path is exact ("/health") or
+ * a pattern with {name} placeholders ("/orders/{id}"); exact routes win,
+ * patterns are tried in registration order. Routing is a pure lookup - the
+ * Application boundary turns the two miss exceptions into 404 and 405.
  */
 final class Router
 {
@@ -38,21 +33,6 @@ final class Router
     public function put(string $path, Closure $handler): void
     {
         $this->add(RequestMethod::PUT, $path, $handler);
-    }
-
-    public function patch(string $path, Closure $handler): void
-    {
-        $this->add(RequestMethod::PATCH, $path, $handler);
-    }
-
-    public function delete(string $path, Closure $handler): void
-    {
-        $this->add(RequestMethod::DELETE, $path, $handler);
-    }
-
-    public function options(string $path, Closure $handler): void
-    {
-        $this->add(RequestMethod::OPTIONS, $path, $handler);
     }
 
     public function add(RequestMethod $method, string $path, Closure $handler): void
@@ -92,6 +72,8 @@ final class Router
             return ($route->handler)($request, $params);
         }
 
+        // No route under this method: a 405 if another method serves the
+        // path, a 404 otherwise.
         $allowed = $this->allowedMethodsFor($path);
 
         if ($allowed !== []) {
@@ -116,9 +98,6 @@ final class Router
         return $total;
     }
 
-    /**
-     * Whether some route serves $path under $method, exact or pattern.
-     */
     private function serves(string $token, string $path): bool
     {
         return isset($this->exact[$token][$path]) || $this->matchPattern($token, $path) !== null;
@@ -133,17 +112,10 @@ final class Router
     private function matchPattern(string $token, string $path): ?array
     {
         foreach ($this->patterns[$token] ?? [] as $route) {
-            $matches = [];
-            preg_match($route->regex, $path, $matches);
-
-            if ($matches === []) {
-                continue;
+            if (preg_match($route->regex, $path, $matches) === 1) {
+                // Keep only the named groups; preg also returns numeric ones.
+                return [$route, array_filter($matches, 'is_string', ARRAY_FILTER_USE_KEY)];
             }
-
-            return [
-                $route,
-                array_filter($matches, 'is_string', ARRAY_FILTER_USE_KEY),
-            ];
         }
 
         return null;

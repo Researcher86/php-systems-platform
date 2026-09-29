@@ -9,21 +9,14 @@ use PhpMiniCache\Server\ServerConfig;
 require __DIR__ . '/../vendor/autoload.php';
 
 /*
- * The platform's face to the php-mini-cache server process.
+ * Entry point for the php-mini-cache server. The component's own
+ * bin/server.php loads the component's vendor/autoload.php, which does not
+ * exist once it is installed as a dependency, so this boots the platform's
+ * autoloader instead and runs the same server with the same CACHE_HOST /
+ * CACHE_PORT defaults. It runs in the foreground, owned by `serve`.
  *
- * Same story as bin/minidb: the component's own bin/server.php requires
- * __DIR__.'/../vendor/autoload.php', which resolves to the component's own
- * vendor directory and breaks once it is consumed as a Composer dependency.
- * This entry boots the platform's autoloader and runs the component's server
- * with the same defaults - CACHE_HOST / CACHE_PORT - the component's script
- * would have used. Unlike the database, the cache has no daemon mode: this
- * is a foreground process owned by "php bin/platform serve", which spawns
- * it, waits for its port, and terminates it on shutdown. Everything the cache
- * does is the component's; this file only points at it.
- *
- * A CACHE_SNAPSHOT path enables persistence: the server loads it on boot,
- * writes a periodic snapshot, and saves a final one on SIGTERM, so a planned
- * restart keeps the entries written since the last snapshot.
+ * CACHE_SNAPSHOT enables persistence: loaded on boot, saved every 30s and
+ * once more on SIGTERM.
  */
 
 $host = getenv('CACHE_HOST') ?: '127.0.0.1';

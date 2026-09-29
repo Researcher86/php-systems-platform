@@ -5,18 +5,11 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Benchmarks;
 
 /**
- * What a load run measured, in one value object - PLAN Step 29.
- *
- * The report is deliberately a payload plus a renderer rather than a tree of
- * typed objects: the numbers are the point, and the two things that want
- * them - a human reading a table and Step 31 writing docs/benchmarks.md -
- * should not each need their own accessor chain to get at them. toArray() is
- * the machine shape (the one docs/benchmarks.md quotes) and toText() is the
- * table, rendered from that same array so the two can never disagree.
- *
- * The environment is part of the result, not a footnote: a throughput number
- * without the machine it came from is not a measurement, it is a rumour, and
- * the plan asks for exactly that (Environment, Configuration, Workload).
+ * What a load run measured (PLAN Step 29): a payload plus two renderings.
+ * toArray()/toJson() is the machine shape docs/benchmarks.md quotes; toText()
+ * is the human table, built from the same data so the two cannot disagree.
+ * The environment is part of the result because a throughput number without
+ * the machine it came from means little.
  */
 final readonly class LoadTestReport
 {
@@ -114,11 +107,9 @@ final readonly class LoadTestReport
         $out .= "\nTest E - worker scaling (same workload, pool resized)\n";
         $out .= sprintf("  %-8s %9s %9s %9s %9s %12s\n", 'workers', 'jobs/s', 'avg ms', 'p95 ms', 'vs 1', 'utilization');
 
-        // "vs 1" means against one worker, so the baseline is the one-worker
-        // row - found by its worker count rather than assumed to be the first
-        // one, which is only true while the rows happen to arrive in
-        // ascending order. With no one-worker row, the smallest pool in the
-        // table is the honest denominator and the column says so.
+        // "vs 1" is against the one-worker row, looked up by worker count
+        // rather than position. Without one, the smallest pool is the
+        // baseline and a note says so.
         $baselineRow = null;
 
         foreach ($this->scaling as $row) {
@@ -153,11 +144,7 @@ final readonly class LoadTestReport
         return $out;
     }
 
-    /**
-     * What each read-path phase actually did to the cache, which is the part
-     * of those rows a reader cannot take on trust: the platform's own X-Cache
-     * markers, counted.
-     */
+    /** Each phase's X-Cache markers, counted: evidence of what the cache did. */
     private function httpNotes(): string
     {
         $out = "\n  read path, by the platform's own X-Cache marker:\n";

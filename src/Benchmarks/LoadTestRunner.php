@@ -11,12 +11,9 @@ use PhpSystemsPlatform\Support\OwnedProcess;
 use RuntimeException;
 
 /**
- * PLAN Step 29, run end to end: the load tests as one command that owns a
- * platform for its duration, takes the five measurements the plan asks for,
- * and stops everything it started.
- *
- * The five tests are five different questions about the same endpoint, which
- * is why one run answers all of them from a single corpus of orders:
+ * PLAN Step 29's load tests as one command that owns a platform for its
+ * duration and stops everything it started. One corpus of orders is behind
+ * every read phase:
  *
  *   A  GET /health       what the server itself costs with no work behind it
  *   C1 GET /orders/{id}  every order read for the first time: every request a
@@ -41,19 +38,19 @@ use RuntimeException;
  * of a second thing that had to be arranged.
  *
  * Test B restarts the platform, because the cache tier is decided when serve
- * starts and not per request. Both serves are stopped by SIGTERM like any
- * other process; a run that fails on the way keeps its child logs, since the
- * serve's own output is the only place a start-up failure explains itself.
+ * starts and not per request. A serve that fails to start puts its own output
+ * in the exception; a run that fails later keeps its child logs in the temp
+ * log directory.
  */
 final class LoadTestRunner
 {
-    public const float SERVE_START_DEADLINE_SECONDS = 25.0;
-
     public const float SERVE_STOP_DEADLINE_SECONDS = 20.0;
 
     public const int MAX_REQUESTS = 20000;
 
     private const float PORT_PROBE_TIMEOUT_SECONDS = 0.3;
+
+    private ?OwnedProcess $serve = null;
 
     /**
      * @param Closure(int, int): (array<string, mixed>|null) $queueBenchmark
@@ -80,18 +77,19 @@ final class LoadTestRunner
         $config = require dirname(__DIR__, 2) . '/config/platform.php';
         $http = (array) $config['http'];
         $database = (array) $config['database'];
+        $host = (string) $http['host'];
         $port = (int) $http['port'];
-        $baseUrl = sprintf('http://%s:%d', $http['host'], $port);
+        $baseUrl = sprintf('http://%s:%d', $host, $port);
 
-        $this->refuseIfPlatformAlreadyRunning($port);
-        $this->stopStaleDatabaseServer($database);
+        $this->refuseIfPlatformAlreadyRunning($host, $port);
+        OwnedProcess::stopStaleDatabaseServer((string) $database['host'], (int) $database['port'], (string) $database['data_dir'], self::SERVE_STOP_DEADLINE_SECONDS);
         OwnedProcess::removeTree(dirname((string) $database['data_dir']));
 
         $logDir = sys_get_temp_dir() . '/php-systems-platform-load-' . uniqid('', true);
         OwnedProcess::mkdir($logDir);
 
         try {
-            $this->startServe($logDir, 'serve', $port, []);
+            $this->startServe($logDir, 'serve', $host, $port, []);
             $corpus = $this->seedCorpus($database);
             $paths = array_map(static fn (string $id): string => '/orders/' . $id, $corpus);
 
@@ -103,19 +101,16 @@ final class LoadTestRunner
 
             $this->stopServe();
 
-            $this->startServe($logDir, 'serve-nocache', $port, ['CACHE_ENABLED' => '0']);
+            $this->startServe($logDir, 'serve-nocache', $host, $port, ['CACHE_ENABLED' => '0']);
             $phases[] = $this->phase('B', 'GET /orders/{id} (CACHE_ENABLED=0)', $paths, count($paths), $baseUrl);
             $this->stopServe();
 
             $scaling = [];
             $queue = [];
 
-            // Test D and Test E are asked for separately and overlap by one
-            // run: D is the platform's own configuration, E walks the pool
-            // sizes. Measuring the shared size twice would put two sets of
-            // slightly different numbers for the same configuration in one
-            // report, so the unique sizes are measured once and D is the row
-            // for the configured size.
+            // D (the configured pool size) is also one of E's sizes. Each size
+            // is measured once, so the report never shows two different
+            // numbers for the same configuration; D is E's row for that size.
             $counts = array_values(array_unique([$this->baselineWorkers, ...$this->workerCounts]));
             sort($counts);
 
@@ -197,9 +192,8 @@ final class LoadTestRunner
         $now = gmdate('Y-m-d\TH:i:s\Z');
 
         try {
-            // The serve has already migrated a fresh data directory, but the
-            // schema is cheap to assert and this way the runner does not
-            // depend on having been run after some other process did it.
+            // Serve has already migrated; repeating it is cheap and keeps
+            // this independent of that ordering.
             Migrator::migrate($db);
 
             for ($i = 0; $i < $this->requests; $i++) {
@@ -259,9 +253,9 @@ final class LoadTestRunner
         }
     }
 
-    private function refuseIfPlatformAlreadyRunning(int $port): void
+    private function refuseIfPlatformAlreadyRunning(string $host, int $port): void
     {
-        if (OwnedProcess::portAnswers('127.0.0.1', $port, self::PORT_PROBE_TIMEOUT_SECONDS)) {
+        if (OwnedProcess::portAnswers($host, $port, self::PORT_PROBE_TIMEOUT_SECONDS)) {
             throw new RuntimeException(sprintf(
                 'The platform is already answering on port %d. Stop the running serve before loading it.',
                 $port,
@@ -270,57 +264,26 @@ final class LoadTestRunner
     }
 
     /**
-     * A serve that was killed can leave the database server it started behind.
-     * Its pid file is the only unambiguous owner, and the data directory is
-     * about to be wiped for a fresh platform.
-     *
-     * @param array<string, mixed> $database
+     * @param array<string, string> $env overrides on top of this process's
+     *                                   environment
      */
-    private function stopStaleDatabaseServer(array $database): void
-    {
-        if (!OwnedProcess::portAnswers('127.0.0.1', (int) $database['port'], 0.5)) {
-            return;
-        }
-
-        $pidFile = (string) $database['data_dir'] . '/minidb.pid';
-        $pid = is_file($pidFile) ? (int) trim((string) file_get_contents($pidFile)) : 0;
-
-        if ($pid > 0) {
-            posix_kill($pid, SIGTERM);
-            OwnedProcess::waitFor(
-                static fn (): bool => !posix_kill($pid, 0),
-                self::SERVE_STOP_DEADLINE_SECONDS,
-                'the stale database server to stop',
-            );
-        }
-    }
-
-    /**
-     * @param array<string, string> $env
-     */
-    private function startServe(string $logDir, string $name, int $port, array $env): void
+    private function startServe(string $logDir, string $name, string $host, int $port, array $env): void
     {
         $this->serve = OwnedProcess::startAndWaitForPort(
             [PHP_BINARY, dirname(__DIR__, 2) . '/bin/platform.php', 'serve'],
             $name,
             $logDir,
-            '127.0.0.1',
+            $host,
             $port,
+            // OwnedProcess treats a non-empty env as the whole environment.
             $env === [] ? [] : array_merge(getenv(), $env),
         );
     }
 
-    /**
-     * Stop the serve this run started, by SIGTERM, and wait for it: the exit
-     * is what tells a graceful stop from a kill, and a load run that leaves a
-     * serve behind has taken the port the next run needs.
-     */
+    /** SIGTERM and wait: a serve left behind would hold the next run's port. */
     private function stopServe(): void
     {
         $this->serve?->stop();
         $this->serve = null;
     }
-
-    /** @var OwnedProcess|null */
-    private ?OwnedProcess $serve = null;
 }

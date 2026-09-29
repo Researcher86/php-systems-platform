@@ -5,11 +5,13 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Cache;
 
 /**
- * The counters PLAN wants recorded next to the read path: hits and misses
- * at the lookup, sets when a miss is refilled, deletes on invalidation, and
- * bypasses when the cache itself is unreachable and the request is served
- * straight from the database. Mutable on purpose - the only state the
- * otherwise-immutable CacheService holds.
+ * Per-process cache bookkeeping: hits and misses per lookup, sets, deletes,
+ * bypasses (the cache was unreachable and the database answered), and
+ * abandoned fills (a cache-aside fill dropped because a writer touched the
+ * key while the row was being read - see CacheService::loadAndFillOrder()).
+ * Bypasses are counted by the callers, which own the degrade decision,
+ * except inside loadAndFillOrder(), which degrades on their behalf.
+ * Mutable on purpose - the only state the readonly CacheService holds.
  */
 final class CacheCounters
 {
@@ -19,6 +21,7 @@ final class CacheCounters
         public int $sets = 0,
         public int $deletes = 0,
         public int $bypasses = 0,
+        public int $abandonedFills = 0,
     ) {
     }
 }

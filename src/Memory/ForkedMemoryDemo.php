@@ -9,20 +9,16 @@ use Throwable;
 
 /**
  * PLAN Step 15: fork a child over an array the parent already allocated, and
- * measure copy-on-write directly instead of asserting it.
- *
- * The fork/IPC mechanics are the same idiom as Workers\ForkedOrderLoader
- * (PLAN Step 14) - a socketpair() opened before the fork, each process
- * closing the end it does not own, pcntl_waitpid() reaping the child - but
- * this class exists to measure a process's own memory rather than to
- * parallelize database reads, and it forks exactly one child rather than one
- * per independent part.
+ * measure copy-on-write instead of asserting it. The fork/IPC idiom is the
+ * one Workers\ForkedOrderLoader uses: a socket pair opened before the fork,
+ * each side closing the end it does not own, pcntl_waitpid() reaping the
+ * child.
  *
  * The story is in three snapshots. Right after fork() the child's pages are
  * still the parent's: nothing has been copied, so its RSS lands close to the
- * parent's. Only once the child WRITES to the array does the kernel copy the
- * pages that write touches - the child's private memory (RssAnon) grows,
- * and that growth is copy-on-write made visible.
+ * parent's. Only once the child WRITES to the array does its private memory
+ * (RssAnon) grow - copy-on-write made visible (runChild() notes exactly
+ * which copy that is).
  */
 final readonly class ForkedMemoryDemo
 {
@@ -86,10 +82,14 @@ final readonly class ForkedMemoryDemo
     }
 
     /**
-     * The child half of the fork: snapshot immediately (before it writes
-     * anything), mutate every other element of the inherited array to force
-     * the kernel to copy the pages that touches, snapshot again, report
+     * The child half of the fork: snapshot before writing anything, write
+     * to every other element of the inherited array, snapshot again, report
      * both, and exit without ever returning into the caller's code.
+     *
+     * $shared arrives by value while run() still holds it, so the first
+     * write makes PHP separate (duplicate) the whole array: the growth
+     * measured is that fresh private copy, not only the kernel's
+     * page-by-page COW of the inherited one.
      *
      * @param list<int> $shared
      * @param resource  $socket

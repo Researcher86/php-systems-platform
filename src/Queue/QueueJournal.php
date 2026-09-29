@@ -11,42 +11,32 @@ use PhpJobQueue\Persistence\FileStorage;
  * The platform's read-side view of the queue, straight off the append-only
  * journal.
  *
- * Both `queue:status` and `GET /queue/status` read the same durable file a
- * producer writes and a consumer rewrites, never an in-memory counter: the
- * journal is the observable truth of the queue, shared by however many
- * processes are alive. Restoring it is just replaying the last word written
- * about every job (FileStorage::load()); counting the states in that replay
- * is what this class turns into the metrics PLAN.md Step 9 names - depth of
- * work that still needs a worker, and how much of the traffic has been
- * published, completed, failed and retried.
+ * `queue:status` and `GET /queue/status` read the durable file a producer
+ * writes and a consumer rewrites, never an in-memory counter: the journal is
+ * the queue's observable truth across every live process. Replaying it
+ * (FileStorage::load(), last write per job wins) and counting the states is
+ * what yields the PLAN Step 9 metrics.
  *
- * That replay used to run once per reader per request: POST /orders asked the
- * backpressure policy for the depth, which replayed the whole journal, and
- * the journal's cost is linear in the number of rows ever written, so a queue
- * that had served a day's traffic charged every new order for a day of
- * history. The replay is therefore cached against the journal's own size and
- * modification time - sound precisely because FileStorage only ever appends
- * (FILE_APPEND), so an unchanged size means no new state was recorded.
- *
- * The cache removes the *repeated* replay, not the growth: the file still
- * grows with every state change, and bounding that is a compaction step in
- * the storage component, which says of itself that a real system would pair
- * the log with periodic snapshots and this one does not.
+ * A replay is linear in every row ever written, and backpressure asks for
+ * the depth on every order write, so the replay is cached against the file's
+ * size and mtime - sound because FileStorage only appends, so an unchanged
+ * stat means nothing new was recorded. The file itself still grows without
+ * bound; bounding it would be a compaction step the storage component does
+ * not have.
  */
 final class QueueJournal
 {
-    /** @var array<string, array<string, mixed>>|null */
-    private ?array $cachedRows = null;
+    /** stat-derived key the cached replay belongs to */
+    private ?string $cachedStat = null;
 
-    /** @var array{depth: int, published: int, completed: int, failed: int, retried: int}|null */
-    private ?array $cachedSnapshot = null;
+    /** @var array<string, array<string, mixed>> */
+    private array $cachedRows = [];
 
-    private int $cachedSize = -1;
-
-    private int $cachedMtime = -1;
+    /** @var array{depth: int, published: int, completed: int, failed: int, retried: int} */
+    private array $cachedSnapshot = ['depth' => 0, 'published' => 0, 'completed' => 0, 'failed' => 0, 'retried' => 0];
 
     public function __construct(
-        private string $logPath,
+        private readonly string $logPath,
     ) {
     }
 
@@ -56,72 +46,54 @@ final class QueueJournal
     }
 
     /**
-     * The journal replay of every job's last known state, keyed by job id.
-     *
-     * Cached against the file's size and mtime, both of which are stat() -
-     * O(1) - so a reader that asks repeatedly within one tick pays once, and
-     * any append from any process is visible on the next call.
+     * Every job's last known state, keyed by job id.
      *
      * @return array<string, array<string, mixed>>
      */
     public function rows(): array
     {
-        return $this->refresh()['rows'];
+        $this->refresh();
+
+        return $this->cachedRows;
     }
 
     /**
-     * The counters in the vocabulary PLAN.md Step 9 attaches to queue
-     * metrics. `depth` counts every job that is still someone's work, in
-     * whatever flight stage (CREATED/DELAYED/READY/PROCESSING), while
-     * `published` counts every job that ever entered the queue - so
-     * published = completed + failed + depth, once everything settles.
-     * `retried` counts jobs that needed more than one delivery.
-     *
-     * Cached with the replay, not just derived from it: counting is a walk
-     * over every row the journal has ever accumulated, and this is on the
-     * hot path of every order write (backpressure) and every status read, so
-     * a cache that only saved the file read would still charge each request
-     * a full walk of the queue's history.
+     * `depth` counts every job that is still someone's work (CREATED/DELAYED/
+     * READY/PROCESSING) and `published` every job that ever entered the
+     * queue, so published = completed + failed + depth. `retried` counts jobs
+     * that needed more than one delivery. Cached with the replay, because the
+     * count is itself a walk over the whole history.
      *
      * @return array{depth: int, published: int, completed: int, failed: int, retried: int}
      */
     public function snapshot(): array
     {
-        return $this->refresh()['snapshot'];
+        $this->refresh();
+
+        return $this->cachedSnapshot;
     }
 
     /**
-     * Re-read the journal, but only if the file moved under us.
-     *
-     * One place decides freshness, so rows() and snapshot() can never
-     * disagree about it - two independent stat comparisons would be two
-     * chances to answer the same question differently.
-     *
-     * @return array{rows: array<string, array<string, mixed>>, snapshot: array{depth: int, published: int, completed: int, failed: int, retried: int}}
+     * Re-read the journal only if the file changed - one freshness check
+     * shared by rows() and snapshot(), so the two can never disagree.
      */
-    private function refresh(): array
+    private function refresh(): void
     {
+        // PHP's stat cache is per process and only cleared by this process's
+        // own writes; the consumer appends from another process, so without
+        // this a serve that writes nothing (e.g. while answering 503s) would
+        // see an unchanged journal forever.
+        clearstatcache(true, $this->logPath);
         $stat = @stat($this->logPath);
-        $size = $stat === false ? -1 : $stat['size'];
-        $mtime = $stat === false ? -1 : $stat['mtime'];
+        $key = $stat === false ? 'missing' : $stat['size'] . ':' . $stat['mtime'];
 
-        if (
-            $this->cachedRows !== null
-            && $this->cachedSnapshot !== null
-            && $size === $this->cachedSize
-            && $mtime === $this->cachedMtime
-        ) {
-            return ['rows' => $this->cachedRows, 'snapshot' => $this->cachedSnapshot];
+        if ($key === $this->cachedStat) {
+            return;
         }
 
-        $rows = new FileStorage($this->logPath)->load();
-
-        $this->cachedRows = $rows;
-        $this->cachedSnapshot = $this->count($rows);
-        $this->cachedSize = $size;
-        $this->cachedMtime = $mtime;
-
-        return ['rows' => $rows, 'snapshot' => $this->cachedSnapshot];
+        $this->cachedRows = new FileStorage($this->logPath)->load();
+        $this->cachedSnapshot = self::count($this->cachedRows);
+        $this->cachedStat = $key;
     }
 
     /**
@@ -129,40 +101,23 @@ final class QueueJournal
      *
      * @return array{depth: int, published: int, completed: int, failed: int, retried: int}
      */
-    private function count(array $rows): array
+    private static function count(array $rows): array
     {
-        $depth = 0;
-        $published = 0;
-        $completed = 0;
-        $failed = 0;
-        $retried = 0;
+        $counts = ['depth' => 0, 'published' => count($rows), 'completed' => 0, 'failed' => 0, 'retried' => 0];
 
         foreach ($rows as $data) {
-            $published++;
-
-            switch (JobState::fromName((string) $data['state'])) {
-                case JobState::COMPLETED:
-                    $completed++;
-                    break;
-                case JobState::FAILED:
-                    $failed++;
-                    break;
-                default:
-                    $depth++;
-                    break;
-            }
+            $bucket = match (JobState::fromName((string) $data['state'])) {
+                JobState::COMPLETED => 'completed',
+                JobState::FAILED => 'failed',
+                default => 'depth',
+            };
+            $counts[$bucket]++;
 
             if ((int) ($data['attempts'] ?? 0) > 1) {
-                $retried++;
+                $counts['retried']++;
             }
         }
 
-        return [
-            'depth' => $depth,
-            'published' => $published,
-            'completed' => $completed,
-            'failed' => $failed,
-            'retried' => $retried,
-        ];
+        return $counts;
     }
 }

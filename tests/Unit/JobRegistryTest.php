@@ -29,9 +29,8 @@ use RuntimeException;
  * platform behavior. The registered-type execution path is exercised end to
  * end in ServeIntegrationTest; here the failure half - an unregistered type
  * must surface as a failed attempt, never a silent skip - is the contract
- * under test, alongside validate()/shouldRetry() (PLAN Step 19's "do not
- * retry every possible error" - moved here from the now-removed
- * ValidatingQueue once JobDispatcher grew its own shouldRetry hook).
+ * under test, alongside validate()/shouldRetry(): a payload that can never
+ * succeed is failed without spending the job's remaining attempts.
  */
 final class JobRegistryTest extends TestCase
 {

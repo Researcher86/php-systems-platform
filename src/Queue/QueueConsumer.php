@@ -7,8 +7,6 @@ namespace PhpSystemsPlatform\Queue;
 use Closure;
 use PhpJobQueue\Dispatcher\JobDispatcher;
 use PhpJobQueue\Job\Job;
-use PhpJobQueue\Job\JobState;
-use PhpJobQueue\Persistence\FileStorage;
 use PhpJobQueue\Queue\Queue as ComponentQueue;
 use PhpJobQueue\Support\Clock;
 use PhpJobQueue\Support\SystemClock;
@@ -20,84 +18,88 @@ use PhpSystemsPlatform\Workers\WorkerRegistry;
  * The component's QueueRuntime runs one process that owns the queue and
  * dispatches from it; the platform splits that across processes - serve
  * owns the producer, queue:consume owns the consumer, and the append-only
- * journal is the only shared state. A consumer therefore cannot just
- * restore once and run: jobs published by another process while it lives
- * must still be picked up. This loop keeps the component's tick shape
- * (dispatch pending, apply every answer, requeue expired) but re-reads the
- * journal on a short interval and pushes any row it has not seen before,
- * so a producer and a consumer run side by side and the consumer drains
- * what the producer publishes.
+ * journal is the only shared state. So the consumer cannot restore once and
+ * run: it keeps QueueRuntime's tick shape (dispatch pending, apply every
+ * answer, requeue expired) but also tails the journal on a short interval
+ * and admits any job another process published since.
  *
  * The shutdown contract is QueueRuntime's too: SIGTERM and SIGINT only set
  * a flag, the loop notices it on its next pass, and workers get the
- * configured grace period on the loop's own thread. One-shot, like the
- * runtime: a consumer that has stopped stays stopped.
+ * configured grace period on the loop's own thread. One-shot: a consumer
+ * that has stopped stays stopped.
  */
 final class QueueConsumer
 {
-    private const float DEFAULT_MAX_WAIT = 0.05;
-    private const float DEFAULT_RESYNC_INTERVAL = 0.1;
-    private const float DEFAULT_SHUTDOWN_GRACE = 10.0;
+    private const array SIGNALS = [SIGTERM, SIGINT];
 
-    /** @var array<string, true> every job id this process has already admitted */
-    private array $known = [];
+    /**
+     * Ids of the non-terminal jobs this process has admitted. The journal
+     * tail also returns this consumer's own writes about them (PROCESSING,
+     * a retry's READY/DELAYED), and re-admitting those would deliver the
+     * same job twice; an id is dropped once its row turns terminal, so the
+     * set stays bounded by the live jobs rather than the whole history.
+     *
+     * @var array<string, true>
+     */
+    private array $known;
 
-    private bool $running = false;
+    private readonly JournalTail $tail;
 
     private bool $stopping = false;
 
     /**
      * @param array<string, true> $knownIds the job ids already admitted to
-     *                                      $queue by restoreFromStorage();
-     *                                      the loop re-syncs everything else
+     *                                      $queue by restoreFromStorage()
      */
     public function __construct(
-        private JobDispatcher $dispatcher,
-        private ComponentQueue $queue,
-        private string $logPath,
-        private Clock $clock = new SystemClock(),
-        private float $maxWait = self::DEFAULT_MAX_WAIT,
-        private float $resyncInterval = self::DEFAULT_RESYNC_INTERVAL,
-        private float $shutdownGrace = self::DEFAULT_SHUTDOWN_GRACE,
-        private ?WorkerRegistry $registry = null,
+        private readonly JobDispatcher $dispatcher,
+        private readonly ComponentQueue $queue,
+        string $logPath,
+        private readonly Clock $clock = new SystemClock(),
+        private readonly float $maxWait = 0.05,
+        private readonly float $resyncInterval = 0.1,
+        private readonly float $shutdownGrace = 10.0,
+        private readonly ?WorkerRegistry $registry = null,
         array $knownIds = [],
     ) {
         $this->known = $knownIds;
+        $this->tail = new JournalTail($logPath);
     }
 
     public function run(): void
     {
-        $this->running = true;
+        pcntl_async_signals(true);
+        $previous = [];
 
-        $this->installSignalHandlers();
+        foreach (self::SIGNALS as $signal) {
+            $previous[$signal] = pcntl_signal_get_handler($signal);
+            pcntl_signal($signal, $this->stop(...));
+        }
 
         try {
             $this->runWhile(static fn (): bool => true);
         } finally {
-            $this->restoreSignalHandlers();
-            $this->running = false;
+            foreach ($previous as $signal => $handler) {
+                pcntl_signal($signal, $handler);
+            }
         }
     }
 
     /**
-     * Run the loop until $done stops returning true (or stop() is called) -
-     * the long-running shape for a benchmark, which decides on its own when
-     * the work is finished instead of waiting for a signal. The loop is the
-     * same as run()'s: re-sync the journal, tick, repeat; start() forks the
-     * workers (idempotent), and shutdown happens here on the way out.
+     * Run the loop while $keepRunning returns true and stop() has not been
+     * called - the shape for a benchmark, which decides on its own when the
+     * work is finished. The workers are shut down on the way out, even when
+     * starting them failed halfway.
      *
-     * @param Closure(): bool $done returns true while the loop should keep going
+     * @param Closure(): bool $keepRunning
      */
-    public function runWhile(Closure $done): void
+    public function runWhile(Closure $keepRunning): void
     {
-        $this->running = true;
-
-        $this->dispatcher->start();
-
-        $nextResync = $this->clock->now() + $this->resyncInterval;
-
         try {
-            while (!$this->stopping && $done()) {
+            $this->dispatcher->start();
+            $nextResync = $this->clock->now() + $this->resyncInterval;
+
+            while (!$this->stopping && $keepRunning()) {
                 if ($this->clock->now() >= $nextResync) {
                     $this->resync();
                     $nextResync = $this->clock->now() + $this->resyncInterval;
@@ -106,43 +108,29 @@ final class QueueConsumer
                 $this->tick();
             }
         } finally {
-            $this->running = false;
             $this->dispatcher->shutdown($this->shutdownGrace);
         }
     }
 
     /**
-     * Asks the loop to stop. Idempotent, safe from a signal handler, and
-     * does nothing itself - the shutdown runs in run(), on the loop's own
-     * thread of control.
+     * Asks the loop to stop. Idempotent and safe from a signal handler: the
+     * shutdown itself runs in runWhile(), on the loop's own thread.
      */
     public function stop(): void
     {
         $this->stopping = true;
     }
 
-    public function isRunning(): bool
-    {
-        return $this->running;
-    }
-
-    public function isStopping(): bool
-    {
-        return $this->stopping;
-    }
-
     /**
-     * One pass of the loop: the same shape as QueueRuntime::tick(), built
-     * only on the dispatcher's public surface. Public because a benchmark
-     * drives the loop itself (see runWhile()).
+     * One pass: QueueRuntime::tick(), built on the dispatcher's public surface.
      */
-    public function tick(): int
+    private function tick(): void
     {
-        $dispatched = $this->dispatcher->dispatchPending();
+        $this->dispatcher->dispatchPending();
 
-        // Between the dispatch and the collect the workers are BUSY with a
-        // known current job, so this is the only instant that captures every
-        // dispatched job - see WorkerRegistry::capture().
+        // Between the dispatch and the collect every dispatched job is still
+        // held by a BUSY worker, so this is the one instant that sees them
+        // all - see WorkerRegistry::capture().
         $this->registry?->capture();
 
         $wait = $this->waitTime();
@@ -151,50 +139,47 @@ final class QueueConsumer
             $this->dispatcher->collect($wait);
         } else {
             $this->dispatcher->collect();
-            $this->sleep($wait);
+
+            if ($wait > 0.0) {
+                usleep((int) ($wait * 1_000_000));
+            }
         }
 
         $this->dispatcher->requeueExpired();
 
         $this->registry?->settle();
         $this->registry?->maybeWrite();
-
-        return $dispatched;
     }
 
     /**
-     * Pull every journal row this process has not seen yet. Terminal rows
-     * are remembered but not pushed - a job finished while we were away is
-     * not someone's work anymore - while a non-terminal row, published by
-     * another process after we started, goes into the queue and is
-     * dispatched on a later tick. Delayed jobs keep their remaining wait.
+     * Admit every job another process published since the last pass. A job
+     * first seen already terminal finished while we were away and is not
+     * work; a DELAYED one keeps its own availableAt (the queue ignores the
+     * push delay for anything but a CREATED job).
      */
     private function resync(): void
     {
-        foreach (new FileStorage($this->logPath)->load() as $id => $data) {
+        foreach ($this->tail->read() as $id => $data) {
+            $job = Job::fromArray($data);
+
+            if ($job->getState()->isTerminal()) {
+                unset($this->known[$id]);
+
+                continue;
+            }
+
             if (isset($this->known[$id])) {
                 continue;
             }
 
-            $job = Job::fromArray($data);
             $this->known[$id] = true;
-
-            if ($job->getState()->isTerminal()) {
-                continue;
-            }
-
-            $delay = $job->getState() === JobState::DELAYED
-                ? max(0, (int) ceil(($job->getAvailableAt() ?? $this->clock->now()) - $this->clock->now()))
-                : 0;
-
-            $this->queue->push($job, $delay);
+            $this->queue->push($job);
         }
     }
 
     /**
-     * How long this tick may wait: until the next deadline the consumer
-     * owns, capped at $maxWait so signals stay responsive and a journal
-     * resync is never far away.
+     * Until the next deadline the dispatcher owns, capped at $maxWait so
+     * signals stay responsive and a resync is never far away.
      */
     private function waitTime(): float
     {
@@ -205,28 +190,5 @@ final class QueueConsumer
         }
 
         return max(0.0, min($this->maxWait, $deadline - $this->clock->now()));
-    }
-
-    private function sleep(float $seconds): void
-    {
-        if ($seconds > 0.0) {
-            usleep((int) ($seconds * 1_000_000));
-        }
-    }
-
-    private function installSignalHandlers(): void
-    {
-        pcntl_async_signals(true);
-
-        foreach ([SIGTERM, SIGINT] as $signal) {
-            pcntl_signal($signal, $this->stop(...));
-        }
-    }
-
-    private function restoreSignalHandlers(): void
-    {
-        foreach ([SIGTERM, SIGINT] as $signal) {
-            pcntl_signal($signal, SIG_DFL);
-        }
     }
 }

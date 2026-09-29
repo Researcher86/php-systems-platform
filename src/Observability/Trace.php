@@ -7,40 +7,24 @@ namespace PhpSystemsPlatform\Observability;
 use JsonException;
 
 /**
- * PLAN Step 24's small educational tracing system - a single request_id
- * carried through one HTTP request into the database calls it makes, the
- * queue job its write publishes (in the job's payload) and, on the worker,
- * the job's own execution. Explicitly not a full OpenTelemetry clone.
+ * A small educational tracer (explicitly not an OpenTelemetry clone): one
+ * request_id carried from an HTTP request into its database calls, the job
+ * its write publishes (in the payload) and that job's execution on a worker.
  *
  * A Trace is two things:
  *
- *  - a context: which request is running right now, activeRequestId().
- *    serve() begins one for every HTTP request it answers; a queue worker
- *    begins one for every job whose payload carries a request_id (the
- *    publish side put it there). Anything recorded while a request is
- *    active is correlated to that request.
- *  - a span journal: one entry per recorded operation - http.request,
- *    db.read / db.write, job.execute - each carrying the request_id it
- *    happened under, plus the span's own fields: job_id, worker_pid and
- *    attempt when the span IS a job execution, or the method/path/status
- *    of the HTTP answer.
+ *  - a context: the request running right now, activeRequestId(). The
+ *    Application opens one per HTTP request; a queue worker re-opens one
+ *    for each job whose payload carries a request_id.
+ *  - a span journal: one entry per operation (http.request, db.read,
+ *    db.write, job.execute) with the request_id it ran under plus its own
+ *    fields - job_id/worker_pid/attempt for a job, method/path/status for
+ *    an HTTP answer. Each retry is its own job.execute span.
  *
- * The four questions PLAN Step 24's final demo has to answer fall out of
- * those fields: a job's payload names the HTTP request that created it
- * (job.execute's request_id), the span names the process that ran it
- * (worker_pid), the duration spans time it, and each retry is its own
- * additional job.execute span under the same job_id.
- *
- * Spans are kept in memory for the process that recorded them and, when a
- * log path is given, appended to an append-only JSONL journal - the same
- * contract as the queue journal itself. That is what lets a worker's spans
- * outlive the worker and lets the `trace` CLI command read the whole chain
- * back. Without a journal the Trace is memory-only, which is exactly what
- * the unit tests use.
- *
- * Every seam is strictly opt-in (Application, Database, JobExecutor all
- * take the Trace as a nullable constructor argument): a service or command
- * that predates tracing runs precisely as it always did.
+ * Spans stay in a bounded in-memory window and, with a log path, are also
+ * appended to a JSONL journal, which is what lets a worker's spans outlive
+ * the worker and the `trace` CLI read a whole chain back. Every seam takes
+ * the Trace as nullable: without one, nothing is traced.
  */
 final class Trace
 {
@@ -53,13 +37,9 @@ final class Trace
     private const string INBOUND_PATTERN = '/^[A-Za-z0-9._-]{8,128}$/';
 
     /**
-     * How many spans to keep in memory when the caller does not say. The
-     * journal is the durable record and this is the hot cache in front of it,
-     * so the oldest span is the one worth dropping - it is still readable
-     * through readLog() from the file. A serve that runs for days used to
-     * hold every span it ever recorded here, which is a slow leak that only
-     * shows up as an unexplained ceiling on a long enough run; the journal it
-     * was duplicating grows on disk either way, by design.
+     * The in-memory window. The journal is the durable record, so the oldest
+     * span is the one to drop - readLog() still finds it - and a serve that
+     * runs for days does not grow without bound.
      */
     private const int DEFAULT_MEMORY_SPANS = 1000;
 
@@ -99,9 +79,8 @@ final class Trace
     }
 
     /**
-     * Record one span for the active request. Without one nothing is
-     * recorded at all - a span that cannot answer "which request?" is noise
-     * a trace should not keep, and the boundary code stays one line.
+     * Record one span for the active request. Outside a request nothing is
+     * recorded - a span that cannot answer "which request?" is noise.
      *
      * @param array<string, mixed> $extra span fields besides the common
      *                                    request_id/started_at/duration trio
@@ -125,10 +104,10 @@ final class Trace
         $this->spans[] = $span;
 
         if (count($this->spans) > $this->maxSpans) {
-            // Drop from the front, once, rather than trimming to size on
-            // every record: the overshoot is at most one span, and a
-            // continuous serve then does one array_slice per maxSpans
-            // records instead of per record.
+            // Once full, every record drops the oldest span, so the window
+            // is exactly the newest maxSpans. array_shift() reindexes the
+            // buffer each time - O(maxSpans), microseconds at the default
+            // size, and simpler than a ring buffer.
             array_shift($this->spans);
         }
 
@@ -158,12 +137,10 @@ final class Trace
     }
 
     /**
-     * Spans still in memory for one request, or null when the request has no
-     * live spans in this process at all. Null and "empty" are different
-     * answers and the difference matters: an empty list for a request this
-     * process never touched would be indistinguishable from a request whose
-     * spans have aged out of the memory window, and a caller would report a
-     * trace as empty when the real answer is "ask the journal".
+     * Spans still in memory for one request, or null when there are none -
+     * null rather than [] because "never seen here" and "aged out of the
+     * window" look the same from memory, and the answer to both is "ask the
+     * journal", not "the trace is empty".
      *
      * @return list<array<string, mixed>>|null
      */
@@ -199,7 +176,7 @@ final class Trace
                 continue;
             }
 
-            if (($span['request_id'] ?? null) === $requestId) {
+            if (is_array($span) && ($span['request_id'] ?? null) === $requestId) {
                 $traces[] = $span;
             }
         }

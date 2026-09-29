@@ -10,16 +10,13 @@ use PhpSystemsPlatform\Workers\ConcurrentTaskRunner;
 use PhpWorkerPool\Protocol\Request as WorkerRequest;
 
 /**
- * The example the worker phase is about: a CPU-bound task split into parts
- * and run side by side on several worker processes.
+ * GET /parallel?work=200000&split=4 - a CPU-bound task (hash iterations)
+ * split into chunks that run side by side on the worker pool.
  *
- * GET /parallel?work=200000&split=4  - fold 200k hash iterations, split into
- * four chunks, one per worker. The handler halves the work, fans the chunks
- * out to the pool in parallel (each chunk is a separate request, already in
- * flight before any of them is awaited), then aggregates the results by
- * their slot. A chunk that times out or is rejected degrades into a missing
- * slot - the pool's allWithin() bargain - and is reported as such instead of
- * failing the whole request.
+ * All chunks are in flight before any is awaited; results are aggregated by
+ * slot. A chunk that times out or is rejected becomes a missing slot and is
+ * reported under "degraded" (206) instead of failing the whole request; only
+ * when no chunk completes is the answer a 503.
  */
 final readonly class ParallelHandler
 {
@@ -52,6 +49,7 @@ final readonly class ParallelHandler
         $requests = [];
 
         for ($index = 0; $index < $split; $index++) {
+            // The last chunk takes the remainder of the integer division.
             $iterations = $index === $split - 1 ? $work - $base * ($split - 1) : $base;
 
             $requests[] = new WorkerRequest('hash_chunk', [
@@ -97,16 +95,13 @@ final readonly class ParallelHandler
         ], $degraded === [] ? 200 : 206);
     }
 
+    /**
+     * A non-negative decimal query value, or the default for anything else
+     * (absent, signed, non-numeric, an array). Out-of-range values are left
+     * for the caller to reject.
+     */
     private function intOrDefault(mixed $value, int $default): int
     {
-        if (is_string($value) && ctype_digit($value)) {
-            return (int) $value;
-        }
-
-        if (is_int($value)) {
-            return $value;
-        }
-
-        return $default;
+        return is_string($value) && ctype_digit($value) ? (int) $value : $default;
     }
 }

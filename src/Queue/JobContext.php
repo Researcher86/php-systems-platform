@@ -12,17 +12,13 @@ use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Storage\Repositories\InventoryRepository;
 
 /**
- * Everything a running platform Job is allowed to reach: the queue's own
- * carrier it came from (type, payload, attempt count, idempotency key) and
- * the platform services the current phase's jobs are built on. A job reads
- * its input off the carrier's payload and its truth off the services here -
- * never the other way around.
+ * Everything a running platform Job may reach: the queue carrier it came
+ * from (type, payload, attempts, idempotency key) and the platform services.
+ * A job reads its input off the payload and its truth off the services.
  *
- * Step 20's additions are both seamed the way the rest of the context is: an
- * optional `idempotency` guard (null when the executor has no idempotency
- * store wired, so a job still runs exactly as it always did) and an optional
- * `inventory` write-side (null where nothing is allowed to write stock, so
- * contexts that predate the settle keep their exact behavior).
+ * `idempotency` is null when no idempotency store is wired and `inventory`
+ * is null where nothing may write stock; a job must behave sensibly without
+ * either.
  */
 final readonly class JobContext
 {
@@ -34,5 +30,31 @@ final readonly class JobContext
         public ?IdempotencyGuard $idempotency = null,
         public ?InventoryRepository $inventory = null,
     ) {
+    }
+
+    /**
+     * Whether the guard has already recorded this job's operation - a
+     * redelivery to skip before any read or write. False without a key or a
+     * guard.
+     */
+    public function alreadyProcessed(): bool
+    {
+        $key = $this->job->getIdempotencyKey();
+
+        return $key !== null && $this->idempotency?->isProcessed($key) === true;
+    }
+
+    /**
+     * Record this job's operation as done. Call it only after every side
+     * effect: a crash between the effects and this record is the guard's
+     * documented residual double-apply window.
+     */
+    public function markProcessed(): void
+    {
+        $key = $this->job->getIdempotencyKey();
+
+        if ($key !== null) {
+            $this->idempotency?->markProcessed($key);
+        }
     }
 }

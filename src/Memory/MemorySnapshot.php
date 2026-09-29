@@ -5,15 +5,8 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Memory;
 
 /**
- * One measurement of one process, at one moment, from both sides: what the
- * PHP engine itself thinks it holds, and what the kernel actually backs with
- * pages.
- *
- * The two never agree, and that gap is the point of Step 15's demo: a forked
- * child's `rss` starts equal to its parent's (shared pages, nothing copied
- * yet) and only grows once the child writes - `sharedMemory` (RssShmem) and
- * `privateMemory` (RssAnon) are what separate "still shared" from "just
- * copied on write".
+ * One process at one moment, from both sides: what the PHP engine thinks it
+ * holds, and what the kernel backs with pages (null without /proc).
  */
 final readonly class MemorySnapshot
 {

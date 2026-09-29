@@ -11,14 +11,13 @@ use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
 use Ramsey\Uuid\Uuid;
 
 /**
- * The whole synchronous order lifecycle, on top of the repository: validates
- * the domain invariants (what a customer and an amount are), generates the
- * UUID v7 id, books the timestamps, and lets the handler stay a thin HTTP
- * translation layer. Writing an order is strictly: persist the authoritative
- * row first, then offer the fact up to the queue through the producer seam.
- * The seam is optional - the database stays the source of truth for anything
- * that is handed a service without a producer (tests, a future read-only
- * command) - and the handlers never know a queue exists.
+ * The synchronous order lifecycle on top of the repository: validates the
+ * domain invariants, generates the UUID v7 id and books the timestamps, so
+ * handlers stay a thin HTTP translation layer.
+ *
+ * A write persists the authoritative row FIRST and only then dispatches the
+ * job, so a job never names an order the database does not have. Without a
+ * producer the write is a plain persist; handlers never know a queue exists.
  */
 final readonly class OrderService
 {
@@ -36,27 +35,22 @@ final readonly class OrderService
     }
 
     /**
-     * @param string|null $requestId the PLAN Step 24 request_id of the HTTP
-     *                               request this write answers, echoed into
-     *                               the job payload so the worker can
-     *                               re-open that request's trace scope; null
-     *                               when the caller is not a request at all
-     *                               (a test, a command), whose job simply
-     *                               carries no request_id
+     * @param string|null $requestId the trace request_id of the HTTP request
+     *                               this write answers, copied into the job
+     *                               payload so the worker can re-open that
+     *                               scope; null outside a traced request
+     *
+     * @throws InvalidArgumentException on an invalid customer, amount or product
      */
     public function createOrder(string $customer, mixed $amount, ?string $product = null, ?string $requestId = null): Order
     {
-        $customer = $this->normalizeCustomer($customer);
-        $amount = $this->normalizeAmount($amount);
-        $product = $this->normalizeProduct($product);
-
         $now = $this->now();
 
         $order = new Order(
             id: Uuid::uuid7()->toString(),
-            customer: $customer,
-            amount: $amount,
-            product: $product,
+            customer: $this->normalizeCustomer($customer),
+            amount: $this->normalizeAmount($amount),
+            product: $this->normalizeProduct($product),
             status: OrderStatus::CREATED,
             createdAt: $now,
             updatedAt: $now,
@@ -66,13 +60,9 @@ final readonly class OrderService
             throw new \RuntimeException('Could not persist the order.');
         }
 
-        // The background job is keyed by the OPERATION it represents, not by
-        // a delivery: `order.created:<order id>` means "this order was
-        // created", so whichever of this order's deliveries arrives, the
-        // queue-side IdempotencyGuard (PLAN Step 20) answers the same way -
-        // and a service without a producer never sees a key at all. The
-        // job's payload carries the request_id it originated from (PLAN
-        // Step 24), faithfully and only when the write route knew one.
+        // The idempotency key names the OPERATION ("this order was
+        // created"), not a delivery, so every redelivery of this job is
+        // recognized by the queue-side IdempotencyGuard.
         $payload = ['order_id' => $order->id];
 
         if ($requestId !== null) {
@@ -102,11 +92,6 @@ final readonly class OrderService
         return $this->orders->find($id);
     }
 
-    public function deleteOrder(string $id): bool
-    {
-        return $this->orders->delete($id);
-    }
-
     private function normalizeCustomer(string $customer): string
     {
         $customer = trim($customer);
@@ -123,10 +108,9 @@ final readonly class OrderService
     }
 
     /**
-     * A sku is a catalog key, not free text: it is the identity three later
-     * loads are made with, so an unusable one must be refused at the edge
-     * rather than become three empty reads. An absent sku is not an error -
-     * it is the default product.
+     * A sku is a catalog key, not free text: it keys three later loads, so an
+     * unusable one is refused here rather than becoming three empty reads.
+     * An absent sku is the default product.
      */
     private function normalizeProduct(?string $product): string
     {
@@ -148,18 +132,13 @@ final readonly class OrderService
      * fixed-scale "12.34" shape DECIMAL(10,2) stores, rejecting anything
      * outside its integer-digit capacity.
      *
-     * The sign is normalized, not just validated. A leading `-` is refused -
-     * an order is not a credit - but a leading `+` used to survive all the way
-     * into storage as "+5.00", because only `-` was checked. That made "+5"
-     * and "5" two different stored amounts: they compared unequal, they
-     * hashed to two different idempotency keys, and nothing in the domain
-     * would have complained, because each was a valid decimal on its own.
+     * Normalization is what makes equal amounts store equal: "+5", "005" and
+     * 5 all become "5.00". Extra fraction digits are cut: a number is
+     * rounded by sprintf(), a string is truncated.
      */
     private function normalizeAmount(mixed $value): string
     {
-        if (is_int($value)) {
-            $value = sprintf('%.2F', $value);
-        } elseif (is_float($value)) {
+        if (is_int($value) || is_float($value)) {
             $value = sprintf('%.2F', $value);
         }
 
@@ -171,11 +150,9 @@ final readonly class OrderService
             throw new InvalidArgumentException('amount must not be negative.');
         }
 
-        // "+" means the same as no sign at all, so it is dropped rather than
-        // stored. ltrim() would also eat leading zeros, which the integer
-        // capacity check below counts, so only the sign is taken off here.
         $parts = explode('.', ltrim($value, '+'));
-        $integer = ltrim($parts[0], '0') === '' ? '0' : ltrim($parts[0], '0');
+        // Leading zeros are dropped before the capacity check counts digits.
+        $integer = ltrim($parts[0], '0') ?: '0';
 
         if (strlen($integer) > 8) {
             throw new InvalidArgumentException('amount must not exceed 99999999.99.');

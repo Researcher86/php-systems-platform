@@ -26,15 +26,13 @@ use Throwable;
 /**
  * The single boundary between the component HTTP server and the platform.
  *
- * Implements the component's RequestHandler so the server can hand us its
- * HttpRequest directly. Inside, the request is converted into the platform's
- * own Request value, routed through the platform Router, and the resulting
- * Response is converted back into the component's HttpResponse. This happens
- * exactly once, here: controllers and the router never see the component
- * types, and the component never sees the platform's.
+ * The component's HttpRequest is converted into the platform's Request,
+ * routed, and the platform Response converted back - exactly once, here, so
+ * handlers and the router never see component types and vice versa.
  *
- * Route misses and handler failures are translated into their HTTP answers
- * at the same boundary, so one bad request never stops the server.
+ * Route misses and handler failures become their HTTP answers at the same
+ * boundary, so one bad request never stops the server. Metrics and tracing
+ * are optional: without a registry or a Trace none of that bookkeeping runs.
  */
 final readonly class Application implements RequestHandler
 {
@@ -48,34 +46,28 @@ final readonly class Application implements RequestHandler
 
     public function handle(HttpRequest $request): HttpResponse
     {
-        // PLAN Step 24: every HTTP request gets a request_id, kept when the
-        // client carried one (X-Request-ID) so a chain can span the whole
-        // system, generated otherwise. The scope stays open for everything
-        // this request does - database calls, the queue write path - and
-        // the id is echoed on the answer so the caller can follow its chain
-        // into the queue. Without a Trace none of this runs.
+        // The request scope stays open for everything this request does (db
+        // calls, the job it publishes). A well-formed inbound X-Request-ID is
+        // kept so a client can carry one chain across the whole system.
         $requestId = $this->trace?->beginRequest($request->header('x-request-id'));
         $startedAt = microtime(true);
         $response = $this->respond($request);
+        $elapsed = microtime(true) - $startedAt;
 
-        // PLAN Step 23: the HTTP boundary reports into the shared registry -
-        // one count per request, one count per non-2xx answer, and the
-        // request's whole duration (route dispatch and response building).
-        // Without a registry none of this runs; observability is serve()'s
-        // wiring decision.
         if ($this->metrics !== null) {
             $this->metrics->increment(MetricsRegistry::HTTP_REQUESTS);
 
+            // 4xx and 5xx both count as errors; 3xx does not.
             if ($response->status->value >= 400) {
                 $this->metrics->increment(MetricsRegistry::HTTP_ERRORS);
             }
 
-            $this->metrics->observe(MetricsRegistry::HTTP_REQUEST_DURATION, microtime(true) - $startedAt);
+            $this->metrics->observe(MetricsRegistry::HTTP_REQUEST_DURATION, $elapsed);
         }
 
         if ($this->trace !== null) {
             $response->headers->set('X-Request-ID', (string) $requestId);
-            $this->trace->record('http.request', microtime(true) - $startedAt, [
+            $this->trace->record('http.request', $elapsed, [
                 'meta' => [
                     'method' => $request->method->value,
                     'path' => $request->path(),
@@ -88,16 +80,9 @@ final readonly class Application implements RequestHandler
         return $response;
     }
 
-    /**
-     * A handler that throws becomes a 500 here, which is the right answer to
-     * give the client - but the Throwable itself is what an operator needs,
-     * and dropping it made a broken handler indistinguishable from a handler
-     * that was never called. The stack trace goes to STDERR, never into the
-     * response body: an exception message is the one thing on this path that
-     * routinely holds a connection string or a file path.
-     */
     private function respond(HttpRequest $request): HttpResponse
     {
+        // The two method enums carry the same cases, so from() cannot fail.
         $internal = new Request(
             method: RequestMethod::from($request->method->value),
             path: $request->path(),
@@ -123,9 +108,9 @@ final readonly class Application implements RequestHandler
     }
 
     /**
-     * One line on STDERR naming the request and the failure, then the
-     * throwable's own trace - which is the part that says which of the
-     * platform's handlers actually broke.
+     * The client gets a bare 500; the operator gets the throwable on STDERR.
+     * Never the other way round: an exception message is the one thing on
+     * this path that routinely holds a connection string or a file path.
      */
     private function reportHandlerFailure(HttpRequest $request, Throwable $e): void
     {
@@ -159,9 +144,8 @@ final readonly class Application implements RequestHandler
     }
 
     /**
-     * The same shape the component's ErrorHandlerMiddleware produces: the
-     * body is the status' own reason phrase, so "404" and "Not Found" cannot
-     * drift apart.
+     * The same shape as the component's ErrorHandlerMiddleware: the body is
+     * the status' own reason phrase, so "404" and "Not Found" cannot drift.
      */
     private function error(HttpStatusCode $status, Headers $headers = new Headers()): HttpResponse
     {

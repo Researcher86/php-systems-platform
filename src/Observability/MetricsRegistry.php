@@ -7,9 +7,9 @@ namespace PhpSystemsPlatform\Observability;
 use InvalidArgumentException;
 
 /**
- * PLAN Step 23's common event/metrics model: one place every component
- * reports its events into, keyed by the standard metric names the README
- * documents, and one snapshot() that turns them into numbers.
+ * The shared in-process metrics model: components report into it under the
+ * standard names the README documents, and snapshot() turns them into
+ * numbers.
  *
  * Three kinds of metric share the registry:
  *
@@ -22,12 +22,10 @@ use InvalidArgumentException;
  *                            which is the only rendering a single name like
  *                            http.request_duration can carry
  *
- * The names are constants rather than literals at the call sites so the
- * vocabulary of the platform is readable in one place and a typo is a
- * fatal error instead of a counter that silently stays at zero. The names
- * are the contract: components record into this registry, live sources
- * (queue depth, pool workers, memory) are pulled at snapshot time by
- * MetricsReporter, and everything reports under the same strings.
+ * The names are constants so a typo is a fatal error instead of a counter
+ * that silently stays at zero. A metric appears in snapshot() only once
+ * something recorded it; MetricsReporter fills in the rest of the standard
+ * set.
  */
 final class MetricsRegistry
 {
@@ -118,11 +116,7 @@ final class MetricsRegistry
             return $this->gauges[$name];
         }
 
-        $sample = $this->durations[$name] ?? null;
-
-        // round() (not the raw division) so a sum of binary floats like
-        // 0.1 + 0.3 does not leak 0.30000000000000004 into a dump.
-        return $sample === null ? 0 : round($sample['total'] / $sample['count'], 6);
+        return isset($this->durations[$name]) ? $this->average($name) : 0;
     }
 
     /**
@@ -134,22 +128,29 @@ final class MetricsRegistry
      */
     public function snapshot(): array
     {
-        $snapshot = [];
-
-        foreach ($this->counters as $name => $value) {
-            $snapshot[$name] = $value;
-        }
+        $snapshot = $this->counters;
 
         foreach ($this->gauges as $name => $value) {
             $snapshot[$name] = $value;
         }
 
-        foreach ($this->durations as $name => $sample) {
-            $snapshot[$name] = round($sample['total'] / $sample['count'], 6);
+        foreach (array_keys($this->durations) as $name) {
+            $snapshot[$name] = $this->average($name);
         }
 
         ksort($snapshot);
 
         return $snapshot;
+    }
+
+    /**
+     * Rounded so a sum of binary floats like 0.1 + 0.3 does not leak
+     * 0.30000000000000004 into a dump.
+     */
+    private function average(string $name): float
+    {
+        $sample = $this->durations[$name];
+
+        return round($sample['total'] / $sample['count'], 6);
     }
 }

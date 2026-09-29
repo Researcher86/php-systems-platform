@@ -6,12 +6,8 @@ namespace PhpSystemsPlatform\Domain;
 
 /**
  * A customer as the reference catalog knows them - the row an order's
- * `customer` name points at.
- *
- * Reference data, not order data: the platform seeds it once and only ever
- * reads it, which is exactly what makes it one of the independent loads the
- * concurrency phase fans out. An order whose customer was never seeded is
- * not an error - the snapshot simply carries no customer.
+ * `customer` name points at. Seeded reference data; an order whose customer
+ * was never seeded is not an error, its snapshot simply carries none.
  */
 final readonly class Customer
 {
@@ -23,9 +19,8 @@ final readonly class Customer
     }
 
     /**
-     * Hydrate from one database row - or from the same row after it has
-     * travelled through a worker as JSON, which is why this lives on the
-     * type instead of inside the repository.
+     * Hydrate from a database row - or the same row after a round trip
+     * through a worker as JSON, which is why this lives on the type.
      *
      * @param array<string, mixed> $row
      */

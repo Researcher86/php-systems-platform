@@ -131,6 +131,37 @@ final class QueueJournalTest extends TestCase
     }
 
     /**
+     * PHP's stat cache is per process and only this process's own writes
+     * clear it. serve reads the journal the consumer appends to from
+     * another process, so an append made elsewhere must still be seen -
+     * otherwise a serve answering 503s (which write nothing) would keep
+     * seeing a full queue after the consumer drained it.
+     */
+    public function testAnAppendFromAnotherProcessIsVisibleToTheNextSnapshot(): void
+    {
+        $storage = new FileStorage($this->logPath);
+        $journal = new QueueJournal($this->logPath);
+
+        $storage->store('job-1', $this->row('READY', 0));
+        self::assertSame(1, $journal->snapshot()['depth']);
+
+        $pid = pcntl_fork();
+        self::assertNotSame(-1, $pid, 'fork failed');
+
+        if ($pid === 0) {
+            $storage->store('job-1', $this->row('COMPLETED', 1));
+            exit(0);
+        }
+
+        pcntl_waitpid($pid, $status);
+        self::assertSame(0, pcntl_wexitstatus($status));
+
+        $after = $journal->snapshot();
+        self::assertSame(0, $after['depth']);
+        self::assertSame(1, $after['completed']);
+    }
+
+    /**
      * The shape FileStorage::store() writes for one job: the component's
      * Job::toArray() payload under 'data'.
      *

@@ -12,55 +12,31 @@ use PhpSystemsPlatform\Queue\ValidatesPayload;
 use RuntimeException;
 
 /**
- * The background work an order actually needs (PLAN Step 13): load the whole
- * picture - order, customer, product, stock level - and settle the order
- * from it.
+ * Settle an order (PLAN Step 13/20): load the whole picture - order,
+ * customer, product, stock - then complete the order if stock covers it,
+ * taking one unit off the shelf, or cancel it. Either way the cached copy is
+ * dropped, the same invalidate-on-write rule as the HTTP update path.
  *
- * It is the platform's example of a job whose cost is I/O rather than CPU,
- * which is why the loading is a seam: the job asks an OrderLoader for a
- * snapshot and does not care whether the reads happened one after another or
- * side by side on worker processes. The context hands it the sequential one,
- * deliberately - this job already runs inside a pool worker, and a worker
- * that fans work back into its own pool competes with the jobs waiting
- * behind it. The fan-out belongs where the caller is not itself a worker;
- * `orders:compare` is that caller.
+ * Loading goes through the OrderLoader seam. The context hands it the
+ * sequential loader on purpose: this job already occupies a pool worker, and
+ * fanning its reads back into that pool would compete with the jobs queued
+ * behind it (`orders:compare` is where the fan-out is measured).
  *
- * The outcome is a status: stock the catalog can cover completes the order,
- * anything else cancels it. Either way the cached copy is now stale and is
- * dropped, the same invalidate-on-write rule the HTTP update path follows.
- * Step 20 adds what completing really means: settling the order takes one
- * unit of the sku off the shelf (InventoryRepository::decrementAvailable()).
- * THAT write is the reason idempotency exists here - the very next section.
+ * ## Idempotency (PLAN Step 20)
  *
- * ## Why this job needs an idempotency guard (PLAN Step 20)
+ * Delivery is at-least-once: a worker that dies after settling but before
+ * its ACK leaves the job PROCESSING, and recovery hands it out again. A
+ * second settle would take a second unit off the shelf, so a job whose
+ * idempotency key the guard already knows is skipped before any read. The
+ * key names the OPERATION (`order.process:<order id>`), not the delivery.
+ * The check, the effects and the record are separate steps, so a crash
+ * between the effects and the record still double-applies - the residual
+ * window IdempotencyGuard documents.
  *
- * The queue promises at-least-once delivery: a worker that dies after the
- * settle but before its ACK leaves the job PROCESSING, and a restart returns
- * a PROCESSING job to READY so the whole operation is handed to a worker
- * again. A second settle is a second unit taken off the shelf - the same
- * double-apply the component's ChargePaymentJob warns about, on this
- * platform's own side effect. The guard closes the gap for redelivery: a job
- * carrying an idempotency key that the guard already knows has done its work
- * is skipped before any read or write happens, order snapshot included.
- *
- * The key must name the OPERATION, not the delivery - "settle order X", not
- * a job id that changes when the job is recreated. queue:publish takes the
- * key as its third argument, and the demo/integration path publishes
- * `order.process:<order id>`, exactly the shape the component demands. See
- * PhpJobQueue\Idempotency\IdempotencyGuard for the boundaries this does and
- * does not close: the check, the effects and the record are three separate
- * steps, so a crash between them still double-applies - that residual window
- * is what the guard's docblock calls out, and why it exists to be seen.
- *
- * A missing order_id can never work (PLAN Step 19) - ValidatesPayload marks
- * it ineligible for retry (JobRegistry::shouldRetry()), so the one delivery
- * it takes to notice is spent, never the job's whole attempts budget.
- * "Order not found" is
- * different: this job, unlike order.created, has no write that guarantees
- * the row exists first (it can be dispatched by hand, an operator's typo
- * and all), so it is a real, reachable failure mode - and answering it needs
- * a database read a payload check cannot do. It stays on the normal retry
- * path.
+ * A missing order_id can never work, so ValidatesPayload makes
+ * JobRegistry::shouldRetry() refuse a retry. "Order not found" is reachable
+ * here (the job can be published by hand, typo and all) and needs a read to
+ * answer, so it stays on the normal retry path.
  */
 final readonly class OrderProcessJob implements Job, ValidatesPayload
 {
@@ -82,15 +58,11 @@ final readonly class OrderProcessJob implements Job, ValidatesPayload
             throw new RuntimeException($reason);
         }
 
-        $orderId = (string) $payload['order_id'];
-        $key = $context->job->getIdempotencyKey();
-
-        // A redelivery of an operation the guard has already recorded is
-        // skipped before the loader runs: nothing needs reading and nothing
-        // needs writing a second time.
-        if ($key !== null && $context->idempotency !== null && $context->idempotency->isProcessed($key)) {
+        if ($context->alreadyProcessed()) {
             return;
         }
+
+        $orderId = (string) $payload['order_id'];
 
         if ($context->loader === null) {
             throw new RuntimeException('order.process needs an order loader in its context.');
@@ -102,20 +74,18 @@ final readonly class OrderProcessJob implements Job, ValidatesPayload
             throw new RuntimeException(sprintf('Order "%s" not found for order.process.', $orderId));
         }
 
-        $status = $snapshot->stock !== null && $snapshot->stock->available > 0
-            ? OrderStatus::COMPLETED
-            : OrderStatus::CANCELLED;
+        $inStock = $snapshot->stock !== null && $snapshot->stock->available > 0;
 
-        $context->orders->updateOrderStatus($orderId, $status);
-
-        // Completing is settling: take the unit off the shelf. Optional by
-        // design - a context without an inventory write side (the tests and
-        // commands predating Step 20) keeps settling off. A COMPLETED status
-        // already proves the snapshot had stock, so only the write side needs
-        // checking here.
-        if ($status === OrderStatus::COMPLETED && $context->inventory !== null) {
-            $context->inventory->decrementAvailable($snapshot->stock->sku);
+        // Take the unit BEFORE writing the status. The snapshot is only a
+        // hint - another worker may take the last unit between our read and
+        // this write - so the conditional UPDATE decides, and an order that
+        // lost the race is cancelled rather than completed unsold. Without an
+        // inventory write side the snapshot is trusted and nothing is taken.
+        if ($inStock && $context->inventory !== null) {
+            $inStock = $context->inventory->decrementAvailable($snapshot->stock->sku);
         }
+
+        $context->orders->updateOrderStatus($orderId, $inStock ? OrderStatus::COMPLETED : OrderStatus::CANCELLED);
 
         try {
             $context->cache->deleteOrder($orderId);
@@ -123,11 +93,6 @@ final readonly class OrderProcessJob implements Job, ValidatesPayload
             $context->cache->counters()->bypasses++;
         }
 
-        // Recorded last, after every side effect: this line is what a crash
-        // between the effects and here would miss, and the guard's docblock
-        // is the honest account of what that residual gap means.
-        if ($key !== null && $context->idempotency !== null) {
-            $context->idempotency->markProcessed($key);
-        }
+        $context->markProcessed();
     }
 }

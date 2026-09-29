@@ -10,23 +10,17 @@ use stdClass;
 
 /**
  * Drives $requests HTTP requests at a fixed concurrency and keeps every
- * per-request time - PLAN Step 29's Test A, B and C.
+ * per-request time - PLAN Step 29's Tests A, B and C.
  *
- * The concurrency is real, not a loop: one easy handle per in-flight slot,
- * all of them driven by one curl_multi handle, so the client and the
- * single-process event-loop server are holding $concurrency connections open
- * at the same time. That is also why each slot keeps its own easy handle for
- * the whole phase instead of taking a fresh one per request - curl keeps an
- * easy handle's connection cache across curl_reset(), so a slot that has
- * connected once stays connected, and what gets measured is the server's
- * throughput rather than the cost of a TCP handshake per request.
+ * The concurrency is real: one easy handle per in-flight slot, all driven by
+ * one curl_multi handle, so $concurrency connections are open at once. Each
+ * slot keeps its easy handle for the whole phase because curl keeps the
+ * handle's connection cache across curl_reset(): a slot connects once, and
+ * what gets measured is the server rather than a TCP handshake per request.
  *
- * Everything a phase reports is read from the answers themselves: the status
- * code, the read path's own X-Cache marker, curl's per-request timing. A
- * request that never completed still counts - it is in the request count, it
- * is a failed request, and it contributes no latency sample, which is what
- * keeps a phase with dropped connections from reporting the speed of the
- * ones that happened to survive.
+ * A request that never completed still counts as a request and as a failure
+ * but contributes no latency sample, so dropped connections cannot make a
+ * phase look faster than it was.
  */
 final class HttpLoadTest
 {
@@ -41,22 +35,10 @@ final class HttpLoadTest
     ) {
     }
 
-    public function concurrency(): int
-    {
-        return $this->concurrency;
-    }
-
     /**
      * Run $requests requests over $paths, in order, cycling the list when it
-     * is shorter than the request count.
-     *
-     * The path list is a parameter rather than a fixed string because a load
-     * phase is defined by its workload: one repeated path measures a hot
-     * entry point, a list of one path per order measures a working set the
-     * cache has never seen. Cycling is what makes the first of those out of
-     * the second, and it is stated here because a benchmark whose requests
-     * silently repeat is a benchmark measuring something other than what its
-     * name says.
+     * is shorter than the request count: one path repeated measures a hot
+     * entry point, one path per order a working set the cache has not seen.
      *
      * @param list<string>       $paths
      * @param array<string, string> $headers extra request header lines
@@ -144,18 +126,14 @@ final class HttpLoadTest
                     $completed++;
                 }
 
-                unset($active);
-
                 if ($busy !== []) {
                     $this->waitForActivity($multi);
                 }
             }
         } finally {
-            // Since PHP 8.0 a CurlHandle is an object, freed by the garbage
-            // collector: curl_close() has had no effect for five major
-            // versions and is deprecated as of 8.5. The handles do still have
-            // to leave the multi handle before this scope ends, or the multi
-            // handle would keep them alive.
+            // No curl_close(): it is a no-op since 8.0 and deprecated in 8.5.
+            // The handles must still leave the multi handle, which would
+            // otherwise keep them alive.
             foreach ($handles as $handle) {
                 curl_multi_remove_handle($multi, $handle);
             }
@@ -190,9 +168,7 @@ final class HttpLoadTest
             CURLOPT_CONNECTTIMEOUT => (int) ceil(self::DEFAULT_CONNECT_TIMEOUT_SECONDS),
             CURLOPT_CUSTOMREQUEST => $method,
             CURLOPT_HTTPHEADER => $this->headerLines($headers),
-            // The read path is the only thing whose answers are counted by
-            // header here, so the header block is captured to read X-Cache and
-            // otherwise ignored.
+            // Captured only to read X-Cache from it.
             CURLOPT_HEADERFUNCTION => static function ($ignored, string $header) use ($capture): int {
                 $capture->headers .= $header;
 
@@ -233,15 +209,10 @@ final class HttpLoadTest
         return '(none)';
     }
 
-    /**
-     * Let the multi handle make progress, instead of spinning on
-     * curl_multi_exec() until the CPU scheduler takes notice.
-     */
+    /** Block until a transfer has activity, instead of spinning on curl_multi_exec(). */
     private function waitForActivity(\CurlMultiHandle $multi): void
     {
-        // curl_multi_select() answers -1 when it has nothing to wait on.
-        // A short sleep stands in for the wait it could not do, which costs
-        // an idle benchmark process a little CPU and the measurement nothing.
+        // -1 means select had nothing to wait on; a short sleep stands in.
         if (curl_multi_select($multi, 0.05) === -1) {
             usleep(1_000);
         }

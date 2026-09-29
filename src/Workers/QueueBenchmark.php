@@ -34,12 +34,14 @@ use RuntimeException;
  * parallelism multiplier.
  *
  * Latency is per-job end to end: from the moment the job was appended to the
- * journal until the journal records it COMPLETED, read by polling the same
- * durable file the consumer rewrites. Worker utilization is the registry's
- * time-weighted busy share of the pool's workers over the wall time.
+ * journal until the registry sees its COMPLETED row there. Worker utilization
+ * is the registry's time-weighted busy share of the pool's workers over the
+ * wall time.
  */
 final class QueueBenchmark
 {
+    private ?WorkerRegistry $registry = null;
+
     public function __construct(
         private string $logPath,
         private string $socketPath,
@@ -64,10 +66,9 @@ final class QueueBenchmark
         $completedAt = [];
 
         $consumer->runWhile(function () use (&$completedAt, $publishedAt, $deadline): bool {
-            // Completion is credited by the registry the moment an answer
-            // lands - no journal polling, and no resampling noise on top of
-            // the real queue latency. The loop keeps going until every job
-            // has reached a terminal state, completed or failed.
+            // The registry credits a completion the tick its answer lands;
+            // copy it out before its TTL could prune it. The loop runs until
+            // every job is terminal, completed or failed.
             foreach (array_keys($publishedAt) as $id) {
                 if (!isset($completedAt[$id])) {
                     $resolvedAt = $this->registry?->resolvedAt($id);
@@ -96,14 +97,14 @@ final class QueueBenchmark
         $latencies = [];
 
         foreach ($publishedAt as $id => $at) {
-            $latencies[] = ($completedAt[$id] ?? $at) - $at;
+            $latencies[] = $completedAt[$id] - $at;
         }
 
         sort($latencies);
         $count = count($latencies);
         $avg = array_sum($latencies) / $count;
         $p95 = $latencies[(int) floor(0.95 * ($count - 1))];
-        $utilization = min(1.0, $this->busySeconds() / max(1e-9, $workers * $wall));
+        $utilization = min(1.0, ($this->registry?->busySeconds() ?? 0.0) / max(1e-9, $workers * $wall));
 
         return [
             'jobs' => $jobs,
@@ -152,14 +153,7 @@ final class QueueBenchmark
      */
     private function consumer(array $jobIds): QueueConsumer
     {
-        $knownIds = [];
-
-        foreach ($jobIds as $id) {
-            $knownIds[$id] = true;
-        }
-
         $queue = InMemoryQueue::restoreFromStorage(new FileStorage($this->logPath), $this->clock);
-        $journal = $this->journal();
 
         $workerManager = null;
         $pool = new WorkerPool(
@@ -173,7 +167,7 @@ final class QueueBenchmark
             },
         );
 
-        $this->registry = new WorkerRegistry($pool, $journal);
+        $this->registry = new WorkerRegistry($pool, new QueueJournal($this->logPath));
         $dispatcher = new JobDispatcher(
             queue: $queue,
             workerPool: $pool,
@@ -192,19 +186,7 @@ final class QueueBenchmark
             maxWait: 0.01,
             shutdownGrace: 10.0,
             registry: $this->registry,
-            knownIds: $knownIds,
+            knownIds: array_fill_keys($jobIds, true),
         );
     }
-
-    private function journal(): QueueJournal
-    {
-        return new QueueJournal($this->logPath);
-    }
-
-    private function busySeconds(): float
-    {
-        return $this->registry?->busySeconds() ?? 0.0;
-    }
-
-    private ?WorkerRegistry $registry = null;
 }

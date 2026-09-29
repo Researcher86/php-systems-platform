@@ -16,7 +16,7 @@ use PhpSystemsPlatform\Storage\Database;
  */
 final readonly class OrderRepository
 {
-    private const COLUMNS = 'id, customer, amount, product, status, created_at, updated_at';
+    private const string COLUMNS = 'id, customer, amount, product, status, created_at, updated_at';
 
     public function __construct(
         private Database $database,
@@ -25,7 +25,7 @@ final readonly class OrderRepository
 
     public function create(Order $order): bool
     {
-        $affected = $this->database->write(
+        return $this->database->write(
             'INSERT INTO orders (' . self::COLUMNS . ') VALUES (?, ?, ?, ?, ?, ?, ?)',
             [
                 $order->id,
@@ -36,52 +36,26 @@ final readonly class OrderRepository
                 $order->createdAt,
                 $order->updatedAt,
             ],
-        );
-
-        return $affected === 1;
+        ) === 1;
     }
 
     public function find(string $id): ?Order
     {
         $rows = $this->database->read('SELECT ' . self::COLUMNS . ' FROM orders WHERE id = ?', [$id]);
 
-        if ($rows === []) {
-            return null;
-        }
-
-        return $this->hydrate($rows[0]);
+        return $rows === [] ? null : $this->hydrate($rows[0]);
     }
 
-    /** Newest first, so a list is naturally a chronological reverse.
-     *
-     * @return list<Order>
+    /**
+     * False when no such order exists. The mini database counts matched rows,
+     * so rewriting the current status still reports 1.
      */
-    public function all(): array
-    {
-        $orders = [];
-
-        foreach ($this->database->read('SELECT ' . self::COLUMNS . ' FROM orders ORDER BY created_at DESC') as $row) {
-            $orders[] = $this->hydrate($row);
-        }
-
-        return $orders;
-    }
-
     public function updateStatus(string $id, OrderStatus $status, string $updatedAt): bool
     {
-        $affected = $this->database->write(
+        return $this->database->write(
             'UPDATE orders SET status = ?, updated_at = ? WHERE id = ?',
             [$status->value, $updatedAt, $id],
-        );
-
-        return $affected === 1;
-    }
-
-    public function delete(string $id): bool
-    {
-        $affected = $this->database->write('DELETE FROM orders WHERE id = ?', [$id]);
-
-        return $affected === 1;
+        ) === 1;
     }
 
     /**

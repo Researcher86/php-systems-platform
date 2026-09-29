@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Experiments;
 
+use Closure;
 use PhpJobQueue\Metrics\MetricsCollector;
 use PhpJobQueue\Persistence\FileStorage;
 use PhpJobQueue\Producer\JobFactory;
@@ -22,23 +23,21 @@ use RuntimeException;
  * PLAN Step 30's five failure/overload experiments, run against a platform
  * this command owns and stops:
  *
- *   1. slow workers - a pool that is the bottleneck lets the queue grow
- *   2. worker crash - the pool manager detects it and replaces the worker
- *   3. cache down   - every read bypasses to the database, still 200
- *   4. slow database- request latency tracks the configured database delay
- *   5. queue full   - the producer is told to retry, not left to block
+ *   1. slow workers  - a pool that is the bottleneck lets the queue grow
+ *   2. worker crash  - the pool manager detects it and replaces the worker
+ *   3. cache down    - every read bypasses to the database, still 200
+ *   4. slow database - request latency tracks the configured database delay
+ *   5. queue full    - the producer is told to retry, not left to block
  *
- * Each experiment restarts the platform with the small piece of configuration
- * it needs (a fixed pool, a latency, a small queue), so the five are each
- * reproducible on their own and the whole command is one pass over the two
- * failure axes the PLAN names. Everything the experiments observe is what the
- * platform already reports - /metrics, /queue/status, /workers, and the
- * X-Cache header - rather than a second, experiment-only instrumentation.
+ * Each experiment restarts the platform with just the configuration it needs
+ * (a fixed pool, a latency, a small queue), so each is reproducible on its
+ * own. Everything observed is what the platform already reports - /metrics,
+ * /queue/status, the pool's stats and the X-Cache header - rather than
+ * experiment-only instrumentation.
  *
- * The command owns its platform exactly like the load run does: it refuses to
- * start on a port already being served, wipes the platform's data directory,
- * starts a serve it holds a handle to, and stops it - and every process the
- * serve started for it - before returning, on every path.
+ * Like the load run, the command refuses to start on a port already being
+ * served, wipes the platform's data directories, and stops everything it
+ * started before returning, on every path.
  */
 final class FailureExperiments
 {
@@ -57,7 +56,7 @@ final class FailureExperiments
 
     private readonly string $queueLog;
 
-    private HttpProbe $http;
+    private readonly HttpProbe $http;
 
     private string $logDir = '';
 
@@ -79,20 +78,28 @@ final class FailureExperiments
 
     public function run(): int
     {
-        $this->refuseIfPlatformAlreadyRunning();
-
-        $this->logDir = sys_get_temp_dir() . '/php-systems-platform-experiments-' . uniqid('', true);
-        OwnedProcess::mkdir($this->logDir);
-
         try {
+            $this->refuseIfPlatformAlreadyRunning();
+
+            $this->logDir = sys_get_temp_dir() . '/php-systems-platform-experiments-' . uniqid('', true);
+            OwnedProcess::mkdir($this->logDir);
+
             $this->experimentSlowWorkers();
             $this->experimentWorkerCrash();
             $this->experimentCacheDown();
             $this->experimentSlowDatabase();
             $this->experimentQueueFull();
+        } catch (RuntimeException $e) {
+            // A failed experiment is reported, not a PHP fatal (exit 255).
+            fwrite(STDERR, sprintf('experiments: %s%s', $e->getMessage(), PHP_EOL));
+
+            return 1;
         } finally {
             $this->stopServe();
-            OwnedProcess::removeTree($this->logDir);
+
+            if ($this->logDir !== '') {
+                OwnedProcess::removeTree($this->logDir);
+            }
         }
 
         return 0;
@@ -111,19 +118,16 @@ final class FailureExperiments
 
         $history = [];
         $peak = 0;
-        $deadline = microtime(true) + self::DRAIN_DEADLINE_SECONDS;
 
-        while (microtime(true) < $deadline) {
+        // A zero only counts as "drained" after a few samples, so a reading
+        // taken before the backlog shows up cannot end the watch early.
+        $this->poll(function () use (&$history, &$peak): bool {
             $depth = $this->queueDepth();
             $history[] = $depth;
             $peak = max($peak, $depth);
 
-            if ($depth === 0 && count($history) > 2) {
-                break;
-            }
-
-            usleep((int) (self::PROBE_INTERVAL_SECONDS * 1_000_000));
-        }
+            return $depth === 0 && count($history) > 2;
+        }, self::DRAIN_DEADLINE_SECONDS);
 
         $this->row('published', '8 x demo.slow (1.0s each)');
         $this->row('pool', '2 fixed workers');
@@ -152,21 +156,18 @@ final class FailureExperiments
         $response = $this->http->request('POST', '/debug/fail-worker');
         $this->row('POST /debug/fail-worker', sprintf('HTTP %d', $response['status']));
 
+        // The crash and the replacement can land in different polls, so each
+        // pid is remembered from the first poll that shows it.
         $replacement = null;
         $crashedPid = null;
-        $deadline = microtime(true) + self::RECOVERY_DEADLINE_SECONDS;
 
-        while (microtime(true) < $deadline) {
+        $this->poll(function () use ($before, &$crashedPid, &$replacement): bool {
             $current = $this->workerPids();
             $crashedPid ??= array_values(array_diff($before, $current))[0] ?? null;
             $replacement ??= array_values(array_diff($current, $before))[0] ?? null;
 
-            if ($crashedPid !== null && $replacement !== null) {
-                break;
-            }
-
-            usleep((int) (self::PROBE_INTERVAL_SECONDS * 1_000_000));
-        }
+            return $crashedPid !== null && $replacement !== null;
+        }, self::RECOVERY_DEADLINE_SECONDS);
 
         $this->row('crashed pid', $crashedPid === null ? 'not observed' : (string) $crashedPid);
         $this->row('replacement pid', $replacement === null ? 'not observed' : (string) $replacement);
@@ -179,11 +180,9 @@ final class FailureExperiments
 
     private function experimentCacheDown(): void
     {
-        // The cache server is a child of whoever started it, and serve only
-        // stops a cache it owns. For the experiment to kill the cache mid-run
-        // it must own the cache server: start the cache first, let serve adopt
-        // the already-running one, then kill the cache this experiment started
-        // and watch the reads fall back to the database.
+        // To kill the cache mid-run this command must own it: start it first,
+        // let serve adopt the running one (serve only stops a cache it
+        // started), then stop it and watch reads fall back to the database.
         $cache = (array) $this->config['cache'];
         $cacheHost = (string) $cache['host'];
         $cachePort = (int) $cache['port'];
@@ -207,13 +206,8 @@ final class FailureExperiments
 
             $this->heading('3. Cache down: every read bypasses to the database');
 
-            $create = $this->http->request('POST', '/orders', (string) json_encode([
-                'customer' => 'cache-down@example.com',
-                'amount' => 700,
-            ]));
-
-            $id = $this->orderIdFrom($create);
-            $this->row('seeded order', (string) $id);
+            $id = $this->orderIdFrom($this->postOrder('cache-down@example.com', 700));
+            $this->row('seeded order', $id);
 
             $hit = $this->http->request('GET', '/orders/' . $id);
             $this->row('GET while cache up', sprintf(
@@ -222,19 +216,19 @@ final class FailureExperiments
                 $hit['headers']['x-cache'] ?? '?',
             ));
 
-            $dbBefore = (float) ($this->metrics()['db.operations'] ?? 0.0);
+            $dbBefore = (int) ($this->http->metrics()['db.operations'] ?? 0.0);
 
             $cacheServer->stop();
 
             $after = $this->http->request('GET', '/orders/' . $id);
-            $dbAfter = (float) ($this->metrics()['db.operations'] ?? 0.0);
+            $dbAfter = (int) ($this->http->metrics()['db.operations'] ?? 0.0);
 
             $this->row('GET after cache death', sprintf(
                 'HTTP %d, X-Cache: %s',
                 $after['status'],
                 $after['headers']['x-cache'] ?? '?',
             ));
-            $this->row('db.operations delta', sprintf('%d', (int) $dbAfter - (int) $dbBefore));
+            $this->row('db.operations delta', (string) ($dbAfter - $dbBefore));
             $this->row('observed', ($after['headers']['x-cache'] ?? '') === 'miss' && $after['status'] === 200
                 ? 'a dead cache is a miss, not a failure: reads fall through to the database'
                 : sprintf('read after cache death answered HTTP %d', $after['status']));
@@ -247,10 +241,8 @@ final class FailureExperiments
 
     private function experimentSlowDatabase(): void
     {
-        // The database delay only shows in a read that reaches the database,
-        // so this serve runs without a cache tier (CACHE_ENABLED=0): every
-        // read is a miss and pays the configured delay, and the metric
-        // reports what the caller actually waited.
+        // Without a cache tier every read reaches the database and pays the
+        // configured delay.
         $this->startServe([
             'DATABASE_LATENCY_MS' => '300',
             'CACHE_ENABLED' => '0',
@@ -259,10 +251,7 @@ final class FailureExperiments
         $this->heading('4. A slow database: request latency tracks the database');
 
         $startedAt = microtime(true);
-        $create = $this->http->request('POST', '/orders', (string) json_encode([
-            'customer' => 'slow-db@example.com',
-            'amount' => 500,
-        ]));
+        $create = $this->postOrder('slow-db@example.com', 500);
         $createMs = round((microtime(true) - $startedAt) * 1000, 1);
 
         $id = $this->orderIdFrom($create);
@@ -271,7 +260,7 @@ final class FailureExperiments
         $read = $this->http->request('GET', '/orders/' . $id);
         $readMs = round((microtime(true) - $startedAt) * 1000, 1);
 
-        $durationMs = round((float) ($this->metrics()['db.operation_duration'] ?? 0.0) * 1000, 1);
+        $durationMs = round((float) ($this->http->metrics()['db.operation_duration'] ?? 0.0) * 1000, 1);
 
         $this->row('cache tier', 'off (CACHE_ENABLED=0)');
         $this->row('configured db delay', '300 ms');
@@ -299,21 +288,10 @@ final class FailureExperiments
         // then probe the producer at and under the limit.
         $this->publishSlowJobs(8, 1.0);
 
-        $deadline = microtime(true) + self::RECOVERY_DEADLINE_SECONDS;
-
-        while (microtime(true) < $deadline) {
-            if ($this->queueDepth() >= 5) {
-                break;
-            }
-
-            usleep((int) (self::PROBE_INTERVAL_SECONDS * 1_000_000));
-        }
+        $this->poll(fn (): bool => $this->queueDepth() >= 5, self::RECOVERY_DEADLINE_SECONDS);
 
         $this->row('queue max size', '5');
-        $probe = $this->http->request('POST', '/orders', (string) json_encode([
-            'customer' => 'full-queue@example.com',
-            'amount' => 900,
-        ]));
+        $probe = $this->postOrder('full-queue@example.com', 900);
 
         $fullBody = json_decode($probe['body'], true);
         $this->row('POST while full', sprintf(
@@ -325,20 +303,9 @@ final class FailureExperiments
 
         // Once the single worker has drained below the limit the same producer
         // call is accepted again - backpressure is a signal, not a wall.
-        $accepted = null;
-        $deadline = microtime(true) + self::DRAIN_DEADLINE_SECONDS;
-
-        while (microtime(true) < $deadline) {
-            if ($this->queueDepth() < 5) {
-                $accepted = $this->http->request('POST', '/orders', (string) json_encode([
-                    'customer' => 'full-queue-after@example.com',
-                    'amount' => 900,
-                ]));
-                break;
-            }
-
-            usleep((int) (self::PROBE_INTERVAL_SECONDS * 1_000_000));
-        }
+        $accepted = $this->poll(fn (): bool => $this->queueDepth() < 5, self::DRAIN_DEADLINE_SECONDS)
+            ? $this->postOrder('full-queue-after@example.com', 900)
+            : null;
 
         $this->row('POST below capacity', $accepted === null
             ? 'did not drain in time'
@@ -351,9 +318,10 @@ final class FailureExperiments
     }
 
     /**
-     * @param array<string, string> $overrides the whole serve environment;
-     *                                         a variable not named here is
-     *                                         absent, not inherited
+     * @param array<string, string> $overrides the whole serve environment
+     *                                         (plus the defaults below); a
+     *                                         variable not named is absent,
+     *                                         not inherited
      */
     private function startServe(array $overrides, bool $preserveCache = false): void
     {
@@ -363,12 +331,17 @@ final class FailureExperiments
             OwnedProcess::removeTree((string) $this->config['cache']['data_dir']);
         }
 
-        $this->stopStaleDatabaseServer();
+        OwnedProcess::stopStaleDatabaseServer($this->host, (int) $this->config['database']['port'], (string) $this->config['database']['data_dir']);
         OwnedProcess::removeTree((string) $this->config['database']['data_dir']);
         OwnedProcess::removeTree((string) $this->config['queue']['data_dir']);
         OwnedProcess::removeTree((string) $this->config['workers']['data_dir']);
 
         $env = $overrides + [
+            // Every data dir in config/platform.php is under
+            // sys_get_temp_dir(), i.e. TMPDIR. Without it (macOS sets it to
+            // /var/folders/...) the children would use /tmp while this
+            // process clears and polls the TMPDIR paths.
+            'TMPDIR' => sys_get_temp_dir(),
             'PLATFORM_ENV' => 'demo',
             'CACHE_ENABLED' => '1',
             'QUEUE_MAX_SIZE' => '500',
@@ -383,33 +356,28 @@ final class FailureExperiments
             $env,
         );
 
-        // serve starts the pool but nothing consumes the queue: the consumer
-        // is a separate process (the demo runs them side by side). Publish a
-        // job into an unconsumed queue and it just sits there, which would
-        // break experiments 1 and 5 that need workers to drain it, so every
-        // experiment owns a consumer alongside its serve. The consumer adopts
-        // the already-running pool and its first loop writes the worker status
-        // file - that file existing is the "consumer is up" signal, because a
-        // process that has not finished one loop has not consumed anything.
-        $this->consume = OwnedProcess::start(
+        // serve starts the pool but does not consume the queue, and
+        // experiments 1 and 5 need the queue drained, so every serve gets a
+        // consumer alongside it. The consumer's first loop writes the worker
+        // status file, which makes that file the "consumer is up" signal.
+        $consumer = OwnedProcess::start(
             [PHP_BINARY, dirname(__DIR__, 2) . '/bin/platform.php', 'queue:consume'],
             'consume',
             $this->logDir,
             $env,
         );
+        $this->consume = $consumer;
 
         $statusFile = (string) $this->config['workers']['data_dir'] . '/workers.status.json';
-        $ready = OwnedProcess::waitForQuietly(
-            static fn (): bool => is_file($statusFile),
-            10.0,
-        );
 
-        if (!$ready) {
+        if (!OwnedProcess::waitForQuietly(static fn (): bool => is_file($statusFile), 10.0)) {
+            // stopServe() drops the handle, so the local keeps the output
+            // reachable for the message.
             $this->stopServe();
 
             throw new RuntimeException(sprintf(
                 'The queue consumer did not come up in time. Output: %s',
-                $this->consume?->output() ?? '',
+                $consumer->output(),
             ));
         }
     }
@@ -422,7 +390,6 @@ final class FailureExperiments
         $this->serve = null;
     }
 
-    /** @param int $count negative/zero is a programming error, not an experiment */
     private function publishSlowJobs(int $count, float $seconds): void
     {
         $clock = new SystemClock();
@@ -447,14 +414,8 @@ final class FailureExperiments
     /** @return list<int> pids of every worker the pool considers alive */
     private function workerPids(): array
     {
-        $socket = (string) ($this->config['workers']['socket'] ?? '');
-
-        if ($socket === '') {
-            return [];
-        }
-
         try {
-            $stats = new WorkerPoolClient($socket, 3.0)->stats();
+            $stats = new WorkerPoolClient((string) $this->config['workers']['socket'], 3.0)->stats();
         } catch (ConnectionFailedException | ConnectionClosedException | ServerErrorException) {
             return [];
         }
@@ -472,26 +433,23 @@ final class FailureExperiments
         return $pids;
     }
 
-    /** @return array<string, float> */
-    private function metrics(): array
+    /**
+     * @return array{status: int, body: string, headers: array<string, string>}
+     */
+    private function postOrder(string $customer, int $amount): array
     {
-        $response = $this->http->request('GET', '/metrics');
+        return $this->http->request('POST', '/orders', (string) json_encode(['customer' => $customer, 'amount' => $amount]));
+    }
 
-        if ($response['status'] !== 200) {
-            throw new RuntimeException(sprintf('GET /metrics answered %d.', $response['status']));
-        }
-
-        $metrics = [];
-
-        foreach (explode("\n", $response['body']) as $line) {
-            if (preg_match('/^(\S+)\s+(\S+)$/', trim($line), $matches) !== 1) {
-                continue;
-            }
-
-            $metrics[$matches[1]] = is_numeric($matches[2]) ? (float) $matches[2] : 0.0;
-        }
-
-        return $metrics;
+    /**
+     * Probe every PROBE_INTERVAL_SECONDS until $probe holds or the deadline
+     * passes.
+     *
+     * @param Closure(): bool $probe
+     */
+    private function poll(Closure $probe, float $deadlineSeconds): bool
+    {
+        return OwnedProcess::waitForQuietly($probe, $deadlineSeconds, self::PROBE_INTERVAL_SECONDS);
     }
 
     /**
@@ -519,25 +477,6 @@ final class FailureExperiments
                 'The platform is already answering on port %d. Stop the running serve before running the experiments.',
                 $this->port,
             ));
-        }
-    }
-
-    private function stopStaleDatabaseServer(): void
-    {
-        if (!OwnedProcess::portAnswers($this->host, (int) $this->config['database']['port'], 0.3)) {
-            return;
-        }
-
-        $pidFile = (string) $this->config['database']['data_dir'] . '/minidb.pid';
-        $pid = is_file($pidFile) ? (int) trim((string) file_get_contents($pidFile)) : 0;
-
-        if ($pid > 0) {
-            posix_kill($pid, SIGTERM);
-            OwnedProcess::waitFor(
-                static fn (): bool => !posix_kill($pid, 0),
-                20.0,
-                'the stale database server to stop',
-            );
         }
     }
 

@@ -125,14 +125,22 @@ final readonly class ForkedOrderLoader implements OrderLoader
             $children[$part] = [$pid, $parentEnd];
         }
 
-        $rows = [];
+        // Every child is read and reaped before any answer is judged: throwing
+        // on the first bad one would leave the later ones' sockets open and
+        // the processes themselves unreaped (zombies until this one exits).
+        $answers = [];
 
         foreach ($children as $part => [$pid, $parentEnd]) {
             $answer = (string) stream_get_contents($parentEnd);
             fclose($parentEnd);
             pcntl_waitpid($pid, $status);
+            $answers[$part] = [$answer, pcntl_wifexited($status) && pcntl_wexitstatus($status) === 0];
+        }
 
-            if (!pcntl_wifexited($status) || pcntl_wexitstatus($status) !== 0) {
+        $rows = [];
+
+        foreach ($answers as $part => [$answer, $succeeded]) {
+            if (!$succeeded) {
                 throw new RuntimeException(sprintf('The "%s" read did not complete: %s', $part, $answer));
             }
 

@@ -9,8 +9,8 @@ use PhpSystemsPlatform\Queue\QueueJournal;
 use PhpWorkerPool\Sdk\WorkerPoolClient;
 
 /**
- * PLAN Step 23's one reader for the whole platform: the standard metric set
- * as one snapshot, mixing what components push into the shared MetricsRegistry
+ * The platform's one metrics reader: the standard metric set as one
+ * snapshot, mixing what components push into the shared MetricsRegistry
  * with what only makes sense pulled fresh at read time.
  *
  *   registry            http.*, cache.*, db.* - accumulated in-process by
@@ -23,14 +23,28 @@ use PhpWorkerPool\Sdk\WorkerPoolClient;
  *                       workers a moment holds
  *   memory              process.rss - this process, right now
  *
- * Every source is optional: a snapshot answers with only the sources it has.
- * The pool client is the fragile one (a connecting client, a pool that died),
- * so its stats are taken best-effort - a pool that will not answer simply
- * leaves the workers.* lines out of the snapshot instead of failing the
- * whole read.
+ * The registry-owned names are always present (0 until first recorded), so
+ * a fresh serve already answers with the full contract and a delta between
+ * two reads never starts from a missing key. The other sources are
+ * optional and appear only when wired; the pool is read best-effort - a pool
+ * that will not answer leaves the workers.* lines out instead of failing
+ * the whole read.
  */
 final readonly class MetricsReporter
 {
+    /** The registry-owned standard metrics and their zero value. */
+    private const array REGISTRY_DEFAULTS = [
+        MetricsRegistry::HTTP_REQUESTS => 0,
+        MetricsRegistry::HTTP_ERRORS => 0,
+        MetricsRegistry::HTTP_REQUEST_DURATION => 0.0,
+        MetricsRegistry::CACHE_HITS => 0,
+        MetricsRegistry::CACHE_MISSES => 0,
+        MetricsRegistry::CACHE_OPERATIONS => 0,
+        MetricsRegistry::DB_OPERATIONS => 0,
+        MetricsRegistry::DB_ERRORS => 0,
+        MetricsRegistry::DB_OPERATION_DURATION => 0.0,
+    ];
+
     public function __construct(
         private MetricsRegistry $registry,
         private ?QueueJournal $queueJournal = null,
@@ -45,24 +59,18 @@ final readonly class MetricsReporter
     }
 
     /**
-     * The full standard snapshot, name → value, sorted. Counters and gauges
-     * carry their recorded values; durations carry their running average in
-     * seconds; queue/worker/memory numbers are read from their live sources
-     * at call time.
+     * The full standard snapshot, name → value, sorted.
      *
      * @return array<string, int|float>
      */
     public function snapshot(): array
     {
-        $snapshot = $this->registry->snapshot();
-
-        foreach ($this->queueSnapshot() as $name => $value) {
-            $snapshot[$name] = $value;
-        }
-
-        foreach ($this->poolSnapshot() as $name => $value) {
-            $snapshot[$name] = $value;
-        }
+        $snapshot = array_replace(
+            self::REGISTRY_DEFAULTS,
+            $this->registry->snapshot(),
+            $this->queueSnapshot(),
+            $this->poolSnapshot(),
+        );
 
         if ($this->memory !== null) {
             $snapshot[MetricsRegistry::PROCESS_RSS] = $this->memory->snapshot()->rss ?? 0;
@@ -129,6 +137,7 @@ final readonly class MetricsReporter
                 $idle++;
             }
 
+            // A worker that never ran a task has no time to average in.
             if ($worker['handledRequests'] > 0) {
                 $handledRequests += $worker['handledRequests'];
                 $taskSeconds += (float) $worker['workingSeconds'];

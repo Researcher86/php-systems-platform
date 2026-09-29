@@ -8,25 +8,18 @@ use Closure;
 use RuntimeException;
 
 /**
- * A child process this process started, and the two questions every caller
- * has about it: is it still running, and did it stop when it was asked to.
- *
- * PLAN Step 29's load run and Step 30's failure experiments both need to own
- * a platform for the length of a run - a serve, a worker pool, a cache server
- * - and both need to be able to say afterwards that what they started is gone.
- * That is the same lifecycle written once here rather than once per command:
+ * A child process this process started, plus the small toolkit the commands
+ * that own a whole platform (demo, load test, failure experiments) share:
+ * port and condition polling, stale database cleanup, temp-tree handling.
  *
  *   start()  proc_open with stdout and stderr appended to named log files, so
- *            a child's own output survives a failure that killed its parent
- *   stop()   SIGTERM, then wait for the exit, then the exit code - a process
- *            that had to be killed is reported as such rather than as one that
- *            stopped politely, because that difference is the whole claim
- *            Step 28's graceful-shutdown scenario and Step 30's crash
- *            experiment exist to make
+ *            a child's output survives a failure that killed its parent
+ *   stop()   SIGTERM, wait, then the exit code - a child that had to be
+ *            SIGKILLed is reported non-zero, never as a polite stop, because
+ *            the graceful-shutdown checks built on this rely on the difference
  *
- * There is no daemon mode and no pid file anywhere in this project: a child
- * belongs to the process that started it, and the handle returned here is
- * what proves it.
+ * There is no daemon mode and no pid file: a child belongs to the process
+ * that started it, and the handle returned here is what proves it.
  */
 final class OwnedProcess
 {
@@ -34,7 +27,7 @@ final class OwnedProcess
 
     public const float STOP_DEADLINE_SECONDS = 20.0;
 
-    private const float PORT_PROBE_INTERVAL_SECONDS = 0.05;
+    private const float POLL_INTERVAL_SECONDS = 0.05;
 
     private const float PORT_PROBE_CONNECT_SECONDS = 0.2;
 
@@ -52,10 +45,10 @@ final class OwnedProcess
     /**
      * Start a child and hand back the handle that owns it.
      *
-     * The environment is the child's whole environment when $env is given, not
-     * a patch, because a child that inherited a developer's shell and then
-     * picked up two overrides is a platform whose configuration depends on
-     * which terminal started it. Pass the full set you mean.
+     * A non-empty $env is the child's whole environment, not a patch on this
+     * process's one, so a child's configuration never depends on the shell
+     * that started the command. An empty $env inherits this process's
+     * environment, putenv() changes included.
      *
      * @param list<string>         $argv   the child's command, argv-style
      * @param array<string, string> $env
@@ -104,20 +97,25 @@ final class OwnedProcess
     ): self {
         $child = self::start($argv, $name, $logDir, $env);
 
-        if (!self::portAnswers($host, $port, $deadlineSeconds)) {
-            $child->stop();
+        // Watching the child too means one that dies on start (a config
+        // error, a port already taken) fails at once instead of after the
+        // whole deadline - and is never mistaken for ready because someone
+        // else answers on its port.
+        $ready = self::waitForQuietly(
+            static fn (): bool => !$child->isRunning() || self::portAnswers($host, $port, self::PORT_PROBE_CONNECT_SECONDS),
+            $deadlineSeconds,
+        );
 
-            throw new RuntimeException(sprintf(
-                'The %s process did not answer on tcp://%s:%d within %.0fs. Output: %s',
-                $name,
-                $host,
-                $port,
-                $deadlineSeconds,
-                $child->output(),
-            ));
+        if ($ready && $child->isRunning()) {
+            return $child;
         }
 
-        return $child;
+        $exitCode = $child->stop();
+        $problem = $ready
+            ? sprintf('exited with code %d before answering on tcp://%s:%d', $exitCode, $host, $port)
+            : sprintf('did not answer on tcp://%s:%d within %.0fs', $host, $port, $deadlineSeconds);
+
+        throw new RuntimeException(sprintf('The %s process %s. Output: %s', $name, $problem, $child->output()));
     }
 
     public function pid(): int
@@ -127,7 +125,7 @@ final class OwnedProcess
 
     public function isRunning(): bool
     {
-        return is_resource($this->process) && (bool) proc_get_status($this->process)['running'];
+        return is_resource($this->process) && proc_get_status($this->process)['running'];
     }
 
     /**
@@ -149,31 +147,16 @@ final class OwnedProcess
         );
 
         if (!$exited) {
-            // A child that ignored SIGTERM is not a child that stopped, and
-            // waiting for it to change its mind would block the run it has
-            // already decided to slow down. Make it gone, then say so with a
-            // non-zero code instead of reporting a polite shutdown that did
-            // not happen.
+            // Ignored SIGTERM: make it gone, and report it as non-zero below.
             proc_terminate($this->process, 9);
         }
 
+        // proc_close() returns the exit code proc_get_status() already
+        // observed (PHP >= 8.3), so the wait above does not lose it.
         $code = proc_close($this->process);
         $this->process = null;
 
         return $exited ? $code : ($code === 0 ? 1 : $code);
-    }
-
-    /**
-     * Stop the child the hard way, for a process that has to be gone before
-     * the next phase of a run can start on the same port.
-     */
-    public function kill(): void
-    {
-        if (is_resource($this->process)) {
-            proc_terminate($this->process, 9);
-            proc_close($this->process);
-            $this->process = null;
-        }
     }
 
     /** Everything the child wrote, both streams: the only explanation a failed run has. */
@@ -182,6 +165,11 @@ final class OwnedProcess
         return trim((string) @file_get_contents($this->stdoutPath) . "\n" . (string) @file_get_contents($this->stderrPath));
     }
 
+    /**
+     * Whether a TCP connect succeeds within $timeoutSeconds. It keeps retrying
+     * until then, so the full timeout is spent whenever nothing listens: keep
+     * it short for "is something already running" checks.
+     */
     public static function portAnswers(string $host, int $port, float $timeoutSeconds): bool
     {
         $deadline = microtime(true) + $timeoutSeconds;
@@ -200,7 +188,7 @@ final class OwnedProcess
                 return true;
             }
 
-            usleep((int) (self::PORT_PROBE_INTERVAL_SECONDS * 1_000_000));
+            usleep((int) (self::POLL_INTERVAL_SECONDS * 1_000_000));
         }
 
         return false;
@@ -219,10 +207,16 @@ final class OwnedProcess
     }
 
     /**
+     * Poll $probe until it holds or the deadline passes; one last probe after
+     * the deadline so a condition met during the final sleep still counts.
+     *
      * @param Closure(): bool $probe
      */
-    public static function waitForQuietly(Closure $probe, float $deadlineSeconds): bool
-    {
+    public static function waitForQuietly(
+        Closure $probe,
+        float $deadlineSeconds,
+        float $intervalSeconds = self::POLL_INTERVAL_SECONDS,
+    ): bool {
         $deadline = microtime(true) + $deadlineSeconds;
 
         while (microtime(true) < $deadline) {
@@ -230,10 +224,40 @@ final class OwnedProcess
                 return true;
             }
 
-            usleep((int) (self::PORT_PROBE_INTERVAL_SECONDS * 1_000_000));
+            usleep((int) ($intervalSeconds * 1_000_000));
         }
 
         return $probe();
+    }
+
+    /**
+     * A serve that was killed can leave the daemonized database server it
+     * started behind. Its pid file is the only unambiguous owner, so it is
+     * read (and the server stopped) before a run wipes the data directory
+     * for a fresh platform. A port that answers without a pid file belongs
+     * to someone else and is left alone.
+     */
+    public static function stopStaleDatabaseServer(
+        string $host,
+        int $port,
+        string $dataDir,
+        float $deadlineSeconds = self::STOP_DEADLINE_SECONDS,
+    ): void {
+        if (!self::portAnswers($host, $port, 0.5)) {
+            return;
+        }
+
+        $pidFile = $dataDir . '/minidb.pid';
+        $pid = is_file($pidFile) ? (int) trim((string) file_get_contents($pidFile)) : 0;
+
+        if ($pid > 0) {
+            posix_kill($pid, SIGTERM);
+            self::waitFor(
+                static fn (): bool => !posix_kill($pid, 0),
+                $deadlineSeconds,
+                'the stale database server did not stop in time.',
+            );
+        }
     }
 
     public static function mkdir(string $dir): void

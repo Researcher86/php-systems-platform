@@ -16,11 +16,9 @@ use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
  * the loader a queue worker uses: a worker that is already a process in a
  * pool has nothing to gain from asking that same pool to do its waiting.
  *
- * `simulatedLatencyMs` models an enrichment that talks to something slower
- * than a local table - the "external/simulated operation" of the plan's
- * concurrency diagram. It is a measurement knob for `orders:compare`, applied
- * identically by both loaders so the comparison stays fair; it is 0 on every
- * real path.
+ * `simulatedLatencyMs` models an enrichment slower than a local table: a
+ * measurement knob for `orders:compare`, applied identically by both loaders
+ * so the comparison stays fair, and 0 on every real path.
  */
 final readonly class SequentialOrderLoader implements OrderLoader
 {

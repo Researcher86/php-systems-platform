@@ -5,17 +5,16 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Queue;
 
 /**
- * PLAN Step 19's "do not retry every possible error", the half of the
- * question a job type can answer cheaply, without any I/O: is this payload
- * even shaped like something that could work?
+ * PLAN Step 19's "do not retry every possible error": the half of the
+ * question a job type can answer without I/O - is this payload even shaped
+ * like something that could work?
  *
- * A job class implements this to opt into a pre-flight check, run before it
- * is ever dispatched to a worker (see ValidatingQueue). It deliberately
- * cannot see a database or a cache - only the payload - which is what keeps
- * the check cheap enough to run on every pop() and honest about what it can
- * actually rule out: a missing field, never "does this row exist right now".
- * The latter needs I/O to answer and can genuinely be transient in a
- * different topology, so it stays on the normal retry path.
+ * Nothing validates before dispatch. The job's own execute() fails on a bad
+ * payload, and JobRegistry::shouldRetry() consults validate() to refuse a
+ * retry that could never succeed, so one delivery is spent instead of the
+ * whole attempts budget. The check sees only the payload, which keeps it
+ * honest: a missing field, never "does this row exist right now" - that
+ * needs I/O, may be transient, and stays on the normal retry path.
  */
 interface ValidatesPayload
 {

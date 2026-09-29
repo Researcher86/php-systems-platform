@@ -11,45 +11,22 @@ use PhpSystemsPlatform\Observability\MetricsRegistry;
 use PhpSystemsPlatform\Observability\Trace;
 
 /**
- * The platform's one seam over php-mini-database: a small, fixed-size pool of
- * connections and two shaped operations (read rows, write rows). The pool
- * reconnects a stale connection between requests, which is all this wrapper
- * needs to care about - the SQL itself stays in the repositories, and the
- * component's types never leak past here.
+ * The platform's one seam over php-mini-database: a small fixed-size
+ * connection pool and two shaped operations (read rows, write rows). The SQL
+ * stays in the repositories; the component's types never leak past here.
  *
- * PLAN Step 23: with a MetricsRegistry attached, every read/write reports
- * db.operations, db.errors (a failed query still counts the operation) and
- * db.operation_duration, so the database load is observable the same way the
- * cache and HTTP paths are. Without one the wrapper behaves exactly as
- * before - observability is the server's wiring decision, never this class's.
- *
- * PLAN Step 24: the same opt-in seam carries a Trace. A read/write records
- * a db.read / db.write span - still correlated to the HTTP request that
- * issued it (serve opens the request scope around every answer, and a queue
- * worker re-opens it from a job's payload), because the trace only records
- * while a request is actually active. Every call keeps its exact behavior
- * without one.
- *
- * PLAN Step 30: the same seam carries a deliberate delay, off unless the
- * config asks for it. A platform that has only ever talked to a database
- * answering in microseconds has never seen what it does when the database
- * stops doing that - the latency lands in the request, the workers hold their
- * connections while they wait, and the queue behind them grows. That is
- * measurable but not demonstrable without a slow database, so the config can
- * ask for one. It is a fault, not a setting, which is why the delay is only
- * honored where failure injection is on at all (dev/demo/test, see
- * config/platform.php) and only when it is asked for by name.
- *
- * The delay sits inside the timed region rather than around it, so
- * db.operation_duration reports what the caller actually waited - the point
- * of the experiment is to watch the platform react to slow I/O, and a
- * measurement that excluded the slowness would be measuring nothing.
+ * Optional, wiring-decided extras:
+ *  - a MetricsRegistry: db.operations, db.errors and db.operation_duration
+ *    for every statement, failed ones included;
+ *  - a Trace: a db.read / db.write span, correlated to whichever request
+ *    is active (the Trace records nothing outside one);
+ *  - a delay (the slow-database experiment, config `delay_ms`, which the
+ *    config zeroes unless failure injection is on): paid by every statement
+ *    INSIDE the timed region, so the metrics report what the caller waited.
  */
 final readonly class Database
 {
-    /** The component's own default - kept here so a config without
-     *  read_timeout/write_timeout gets exactly what it would have gotten
-     *  before those keys existed, not a silent zero. */
+    /** The component's own default, for a config without read_timeout/write_timeout. */
     private const float DEFAULT_OPERATION_TIMEOUT = 30.0;
 
     public function __construct(
@@ -66,39 +43,21 @@ final readonly class Database
     }
 
     /**
-     * PLAN Step 30's slow-database experiment: a whole-platform delay, off by
-     * default, that every read and every write pays. connect() is the only
-     * caller that can be asked for it - fromConfig() is the pure config
-     * mapping and deliberately does not take it, so the shape of a ClientConfig
-     * stays the component's own.
-     *
-     * @param array<string, mixed> $config
-     */
-    private static function delayFrom(array $config): float
-    {
-        $delay = (float) ($config['delay_ms'] ?? 0.0);
-
-        return $delay > 0.0 ? $delay : 0.0;
-    }
-
-    /**
-     * The platform's usual way in: build straight from the `database`
-     * config block (host/port/timeout, plus PLAN Step 18's read_timeout/
-     * write_timeout - the database operation timeout) instead of every
-     * caller repeating the same ClientConfig construction.
+     * Build straight from the `database` config block: host/port/timeout,
+     * read_timeout/write_timeout and the optional delay_ms.
      *
      * @param array<string, mixed> $config
      */
     public static function connect(array $config, int $maxConnections = 10, ?MetricsRegistry $metrics = null, ?Trace $trace = null): self
     {
-        return self::fromConfig(self::configFrom($config), $maxConnections, $metrics, $trace, self::delayFrom($config));
+        $delayMs = max(0.0, (float) ($config['delay_ms'] ?? 0.0));
+
+        return self::fromConfig(self::configFrom($config), $maxConnections, $metrics, $trace, $delayMs);
     }
 
     /**
-     * The pure half of connect() - config array in, component ClientConfig
-     * out, no connection attempted. Kept separate so the mapping (which
-     * keys mean what, what a missing one defaults to) is testable on its
-     * own.
+     * The pure half of connect() - config array in, ClientConfig out, no
+     * connection attempted - so the key mapping is testable on its own.
      *
      * @param array<string, mixed> $config
      */
@@ -130,8 +89,7 @@ final readonly class Database
 
     /**
      * Run an INSERT/UPDATE/DELETE. Returns the affected row count, or null
-     * for a statement type that does not name one (DDL such as the
-     * migration).
+     * for a statement type that does not name one (DDL).
      *
      * @param list<mixed> $parameters
      */
@@ -143,21 +101,19 @@ final readonly class Database
         return $affected;
     }
 
+    public function close(): void
+    {
+        $this->pool->close();
+    }
+
     /**
-     * One statement: acquire a connection, run it, and report the outcome -
-     * the same four bookkeeping steps whichever way it went.
+     * One statement: acquire a connection, run it, report the outcome once.
      *
-     * read() and write() used to carry this between them, twice each, and the
-     * duplication was not cosmetic: the failure path records its own
-     * duration and then rethrows, so any change to how an operation is
-     * reported had to be made in four places, and a missed one is a span that
-     * reports the wrong outcome while the metrics report the right one. The
-     * report is here once, with one success path and one failure path.
-     *
-     * The connection is released in `finally` whether the statement succeeded,
-     * failed or threw, so a failing query cannot leak a pool slot - which is
-     * how a database outage under load turns into a server that stops
-     * answering rather than one that reports errors.
+     * Acquiring is inside the reported region: a refused connection or an
+     * exhausted pool is exactly the database error db.errors must show. The
+     * connection goes back in `finally` whatever happened, so a failing
+     * query cannot leak a pool slot - which is how an outage under load
+     * turns into a server that stops answering instead of one that errors.
      *
      * @template T
      *
@@ -168,17 +124,20 @@ final readonly class Database
     private function run(string $span, callable $operation): mixed
     {
         $startedAt = microtime(true);
-        $this->slowDown();
-        $connection = $this->pool->acquire();
+        $connection = null;
 
         try {
+            $this->slowDown();
+            $connection = $this->pool->acquire();
             $result = $operation($connection);
         } catch (\Throwable $e) {
             $this->report($span, $startedAt, false);
 
             throw $e;
         } finally {
-            $this->pool->release($connection);
+            if ($connection !== null) {
+                $this->pool->release($connection);
+            }
         }
 
         $this->report($span, $startedAt, true);
@@ -186,33 +145,24 @@ final readonly class Database
         return $result;
     }
 
-    /**
-     * Count the operation, note its duration, and record the span - the same
-     * three things for every statement, in one place.
-     */
     private function report(string $span, float $startedAt, bool $ok): void
     {
+        $duration = microtime(true) - $startedAt;
+
         $this->metrics?->increment(MetricsRegistry::DB_OPERATIONS);
 
         if (!$ok) {
             $this->metrics?->increment(MetricsRegistry::DB_ERRORS);
         }
 
-        $this->metrics?->observe(MetricsRegistry::DB_OPERATION_DURATION, microtime(true) - $startedAt);
-        $this->trace?->record($span, microtime(true) - $startedAt, ['meta' => ['ok' => $ok]]);
-    }
-
-    public function close(): void
-    {
-        $this->pool->close();
+        $this->metrics?->observe(MetricsRegistry::DB_OPERATION_DURATION, $duration);
+        $this->trace?->record($span, $duration, ['meta' => ['ok' => $ok]]);
     }
 
     private function slowDown(): void
     {
-        if ($this->delayMs <= 0.0) {
-            return;
+        if ($this->delayMs > 0.0) {
+            usleep((int) round($this->delayMs * 1000.0));
         }
-
-        usleep((int) round($this->delayMs * 1000.0));
     }
 }

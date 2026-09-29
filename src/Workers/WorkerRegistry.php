@@ -9,32 +9,36 @@ use PhpJobQueue\Support\Clock;
 use PhpJobQueue\Support\SystemClock;
 use PhpJobQueue\Worker\Worker;
 use PhpJobQueue\Worker\WorkerPool;
+use PhpSystemsPlatform\Queue\JournalTail;
 use PhpSystemsPlatform\Queue\QueueJournal;
 use RuntimeException;
 
 /**
  * The queue consumer's own worker lifecycle, made observable (PLAN Step 11).
  *
- * php-worker-pool keeps its workers' states private inside the Master, with
- * no client channel to read them, so the lifecycle the platform can truthfully
- * observe is the one it owns: the php-job-queue forwarders that queue:consume
- * forks. Each has a real pid, a real state (STARTING/IDLE/BUSY/DRAINING/
- * STOPPING/DEAD), and a current job while busy - all read straight off the
- * Worker objects the consumer owns in-process.
+ * php-worker-pool keeps its workers' states private inside the Master, so
+ * the lifecycle the platform can truthfully observe is the one it owns: the
+ * php-job-queue forwarders queue:consume forks. Pid, state, current job and
+ * the tasks_completed/tasks_failed counters are read straight off those
+ * in-process Worker objects.
  *
- * tasks_completed/tasks_failed are read straight off the component's own
- * Worker::getTasksCompleted()/getTasksFailed() now - they used to be
- * reconstructed here from the journal (capture() right after dispatching a
- * batch, settle() after the answers land, crediting whichever worker held a
- * job once the journal showed its terminal state), because the component
- * did not expose them at all. The journal replay stays for what Worker's
- * own counters cannot answer: resolvedAt()/resolvedCount() need to know
- * WHICH job resolved and WHEN, not just how many a worker has finished, for
- * per-job latency measurement (see QueueBenchmark).
+ * The journal answers what Worker's counters cannot: WHICH job resolved and
+ * WHEN (resolvedAt()/resolvedCount()), for per-job latency (QueueBenchmark).
  */
 final class WorkerRegistry
 {
     private const float SNAPSHOT_INTERVAL = 0.5;
+
+    /** How often resolvedAt() is pruned - a scan of the whole map, so not every tick. */
+    private const float PRUNE_INTERVAL = 0.05;
+
+    /**
+     * How long a resolution stays in resolvedAt(). A reader must poll within
+     * this window or copy the value out (QueueBenchmark copies it on the next
+     * tick); without a bound the map would grow with throughput for the life
+     * of the consumer.
+     */
+    private const float RESOLVED_TTL_SECONDS = 300.0;
 
     /**
      * workerId => worker snapshot.
@@ -44,11 +48,9 @@ final class WorkerRegistry
     private array $workers = [];
 
     /**
-     * Job ids dispatched but not yet seen at a terminal state in the
-     * journal - a set, not keyed by worker: a worker moves on to the next
-     * delivery while an earlier one still awaits its terminal state, and
-     * keying by worker would drop that earlier job (overwritten by the
-     * next delivery).
+     * Job ids dispatched but not yet seen terminal in the journal. A set, not
+     * keyed by worker: a worker moves on to its next delivery while an
+     * earlier one may still await its terminal row.
      *
      * @var array<string, true>
      */
@@ -59,29 +61,7 @@ final class WorkerRegistry
 
     private int $resolvedCount = 0;
 
-    private const float JOURNAL_REFRESH_SECONDS = 0.05;
-
-    /**
-     * How long a resolution stays in resolvedAt() after it was credited.
-     *
-     * The entry exists to answer "when did this job finish" for a consumer
-     * that is polling, and it used to be kept forever - one entry per job for
-     * the life of the consumer, which is a leak proportional to throughput
-     * rather than to pool size. Time is the right axis instead of a count
-     * because the reader's contract is "poll within a window or copy the
-     * value out": QueueBenchmark copies each value into its own map on the
-     * tick after it appears, and it polls every few milliseconds, so a five
-     * minute window is orders of magnitude more than any reader needs while
-     * still bounding a consumer that runs for days.
-     */
-    private const float RESOLVED_TTL_SECONDS = 300.0;
-
     private float $lastPruneAt = 0.0;
-
-    /** @var array<string, array<string, mixed>>|null */
-    private ?array $rowsCache = null;
-
-    private float $rowsCacheAt = 0.0;
 
     private float $nextSnapshotAt = 0.0;
 
@@ -90,13 +70,18 @@ final class WorkerRegistry
 
     private float $lastSampleAt = 0.0;
 
+    private readonly JournalTail $tail;
+
     public function __construct(
-        private WorkerPool $pool,
-        private QueueJournal $journal,
-        private Clock $clock = new SystemClock(),
-        private string $statusPath = '',
+        private readonly WorkerPool $pool,
+        QueueJournal $journal,
+        private readonly Clock $clock = new SystemClock(),
+        private readonly string $statusPath = '',
         private readonly float $resolvedTtl = self::RESOLVED_TTL_SECONDS,
     ) {
+        // Tailed, not replayed: settle() runs every tick, and a full replay of
+        // a never-compacted journal would cost the whole queue history each time.
+        $this->tail = new JournalTail($journal->logPath());
     }
 
     /**
@@ -106,34 +91,30 @@ final class WorkerRegistry
     public function capture(): void
     {
         $now = $this->clock->now();
-
-        // Utilization sampling: weight the number of busy workers by the time
-        // since the previous sample, so busySeconds() is Σ(busy × Δt).
-        if ($this->lastSampleAt > 0.0) {
-            $this->busySeconds += ($now - $this->lastSampleAt) * $this->busyCount();
-        }
-
-        $this->lastSampleAt = $now;
+        $busy = 0;
 
         foreach ($this->pool->getWorkers() as $worker) {
             $this->observe($worker);
-
-            if (!$worker->isWorking()) {
-                continue;
-            }
-
             $job = $worker->getCurrentJob();
 
             if ($job !== null) {
+                $busy++;
                 $this->inFlight[$job->getId()->toString()] = true;
             }
         }
+
+        // Utilization: the busy count weighted by the time since the previous sample.
+        if ($this->lastSampleAt > 0.0) {
+            $this->busySeconds += ($now - $this->lastSampleAt) * $busy;
+        }
+
+        $this->lastSampleAt = $now;
     }
 
     /**
-     * Credit completed and failed jobs to the workers that delivered them,
-     * called after the answers were applied. A job whose terminal state has
-     * not been journaled yet stays in flight until a later settle().
+     * Credit the jobs that reached a terminal state, called after the answers
+     * were applied. A job whose terminal row is not journaled yet stays in
+     * flight until a later settle().
      */
     public function settle(): void
     {
@@ -143,65 +124,26 @@ final class WorkerRegistry
             $this->observe($worker);
         }
 
-        // The journal is replayed for attribution on a short interval, not
-        // every tick: a benchmark with thousands of jobs would otherwise
-        // decode the whole log on every fast pass. The same $now both the
-        // replay and the pruning below judge staleness by, so a slow tick
-        // cannot make the two disagree about what "recent" means.
-        $rows = $this->rows($now);
-
-        foreach (array_keys($this->inFlight) as $jobId) {
-            $row = $rows[$jobId] ?? null;
-
-            if ($row === null) {
+        foreach ($this->tail->read() as $jobId => $row) {
+            if (!isset($this->inFlight[$jobId])) {
                 continue;
             }
 
-            switch (JobState::fromName((string) $row['state'])) {
-                case JobState::COMPLETED:
-                    $this->resolvedAt[$jobId] = $now;
-                    $this->resolvedCount++;
-                    unset($this->inFlight[$jobId]);
-                    break;
-                case JobState::FAILED:
-                    $this->resolvedCount++;
-                    unset($this->inFlight[$jobId]);
-                    break;
-                default:
-                    // READY/PROCESSING/DELAYED - the job is still someone's
-                    // work (a retry waiting, or a delivery in flight).
-                    break;
+            $state = JobState::fromName((string) $row['state']);
+
+            if (!$state->isTerminal()) {
+                continue;
             }
+
+            if ($state === JobState::COMPLETED) {
+                $this->resolvedAt[$jobId] = $now;
+            }
+
+            $this->resolvedCount++;
+            unset($this->inFlight[$jobId]);
         }
 
         $this->pruneResolvedAt($now);
-    }
-
-    /**
-     * Drop resolutions older than the TTL.
-     *
-     * Only on the same interval the journal replay uses: pruning is a scan of
-     * the whole map, and doing it on every settle() of a tight consumer loop
-     * would be a per-tick cost proportional to everything resolved so far -
-     * the same growth the pruning exists to stop, paid on the hot path. Once
-     * per 50ms the scan is cheap regardless of throughput.
-     */
-    private function pruneResolvedAt(float $now): void
-    {
-        if ($now - $this->lastPruneAt < self::JOURNAL_REFRESH_SECONDS) {
-            return;
-        }
-
-        $this->lastPruneAt = $now;
-        $cutoff = $now - $this->resolvedTtl;
-
-        foreach ($this->resolvedAt as $jobId => $at) {
-            if ($at >= $cutoff) {
-                continue;
-            }
-
-            unset($this->resolvedAt[$jobId]);
-        }
     }
 
     /**
@@ -230,8 +172,7 @@ final class WorkerRegistry
 
     /**
      * The wall time a job was credited COMPLETED, or null if it has not been
-     * resolved yet - how a benchmark measures per-job latency without polling
-     * the journal (the registry credits it the moment the answer lands).
+     * (or was pruned after the TTL).
      */
     public function resolvedAt(string $jobId): ?float
     {
@@ -245,39 +186,6 @@ final class WorkerRegistry
     public function resolvedCount(): int
     {
         return $this->resolvedCount;
-    }
-
-    /**
-     * How many workers are holding a job right now.
-     */
-    private function busyCount(): int
-    {
-        $busy = 0;
-
-        foreach ($this->pool->getWorkers() as $worker) {
-            if ($worker->isWorking()) {
-                $busy++;
-            }
-        }
-
-        return $busy;
-    }
-
-    /**
-     * The journal replay, cached for JOURNAL_REFRESH_SECONDS.
-     *
-     * @return array<string, array<string, mixed>>
-     */
-    private function rows(?float $now = null): array
-    {
-        $now ??= $this->clock->now();
-
-        if ($this->rowsCache === null || $now - $this->rowsCacheAt >= self::JOURNAL_REFRESH_SECONDS) {
-            $this->rowsCache = $this->journal->rows();
-            $this->rowsCacheAt = $now;
-        }
-
-        return $this->rowsCache;
     }
 
     /**
@@ -319,47 +227,40 @@ final class WorkerRegistry
         }
     }
 
+    private function pruneResolvedAt(float $now): void
+    {
+        if ($now - $this->lastPruneAt < self::PRUNE_INTERVAL) {
+            return;
+        }
+
+        $this->lastPruneAt = $now;
+        $cutoff = $now - $this->resolvedTtl;
+
+        foreach ($this->resolvedAt as $jobId => $at) {
+            if ($at < $cutoff) {
+                unset($this->resolvedAt[$jobId]);
+            }
+        }
+    }
+
     /**
-     * Keep one row per worker id current: pid, state, current job, and the
-     * component's own tasks_completed/tasks_failed counters. A pid change
-     * means the worker process was replaced (php-job-queue reuses the id
-     * for a fresh worker), so started_at restarts here - Worker's own
-     * counters already reset to 0 on replacement (a new Worker object), so
-     * nothing extra is needed to keep them in step with it.
+     * Keep one row per worker id current. php-job-queue reuses the id for a
+     * replacement worker, so a pid change restarts started_at; the task
+     * counters reset by themselves (the replacement is a new Worker object).
      */
     private function observe(Worker $worker): void
     {
         $id = $worker->getId();
         $pid = $worker->getPid();
+        $previous = $this->workers[$id] ?? null;
 
-        if (!isset($this->workers[$id])) {
-            $this->workers[$id] = [
-                'pid' => $pid,
-                'state' => $worker->getState()->name,
-                'current_job' => $this->currentJobId($worker),
-                'started_at' => $this->clock->now(),
-                'tasks_completed' => $worker->getTasksCompleted(),
-                'tasks_failed' => $worker->getTasksFailed(),
-            ];
-
-            return;
-        }
-
-        if ($pid !== $this->workers[$id]['pid']) {
-            $this->workers[$id]['pid'] = $pid;
-            $this->workers[$id]['started_at'] = $this->clock->now();
-        }
-
-        $this->workers[$id]['state'] = $worker->getState()->name;
-        $this->workers[$id]['current_job'] = $this->currentJobId($worker);
-        $this->workers[$id]['tasks_completed'] = $worker->getTasksCompleted();
-        $this->workers[$id]['tasks_failed'] = $worker->getTasksFailed();
-    }
-
-    private function currentJobId(Worker $worker): ?string
-    {
-        $job = $worker->getCurrentJob();
-
-        return $job?->getId()->toString();
+        $this->workers[$id] = [
+            'pid' => $pid,
+            'state' => $worker->getState()->name,
+            'current_job' => $worker->getCurrentJob()?->getId()->toString(),
+            'started_at' => $previous !== null && $previous['pid'] === $pid ? $previous['started_at'] : $this->clock->now(),
+            'tasks_completed' => $worker->getTasksCompleted(),
+            'tasks_failed' => $worker->getTasksFailed(),
+        ];
     }
 }

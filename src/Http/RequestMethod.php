@@ -5,11 +5,9 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Http;
 
 /**
- * HTTP methods the platform's router routes on.
- *
- * Values are the RFC 7230 wire tokens (case-sensitive, RFC says `get` is not
- * GET), so a request method read off the component request maps onto this
- * enum with a plain from(), and the router keys stay honest on the wire.
+ * HTTP methods the platform's router routes on. Values are the
+ * case-sensitive RFC 7230 wire tokens and the same cases as the component's
+ * HttpMethod, so the Application maps one onto the other with a plain from().
  */
 enum RequestMethod: string
 {

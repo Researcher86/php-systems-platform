@@ -11,17 +11,12 @@ use RuntimeException;
 use Throwable;
 
 /**
- * The platform's schema, applied as part of `serve`'s startup (the DB server
- * starts with an empty data directory on a fresh checkout). Single-statement,
- * idempotent DDL only: the mini database's server opens exactly one database
- * per data directory, so a migration is a CREATE TABLE ... IF NOT EXISTS
- * rather than a versioned history.
+ * The platform's schema, applied at startup by every process that needs it.
+ * Idempotent single-statement DDL (CREATE TABLE IF NOT EXISTS) rather than a
+ * versioned history: the mini database holds one database per data dir.
  *
- * Besides `orders` it owns the reference catalog - customers, products,
- * inventory - and seeds it. Those three tables are the platform's read-only
- * reference data: the concurrency phase loads them per order, and nothing in
- * the platform ever writes them, so seeding them here keeps the demo
- * self-contained instead of requiring a fixture step.
+ * Besides `orders` it creates and seeds the reference catalog - customers,
+ * products, inventory - so the demo needs no fixture step.
  */
 final class Migrator
 {
@@ -101,23 +96,13 @@ final class Migrator
     }
 
     /**
-     * CREATE TABLE IF NOT EXISTS leaves an existing table alone, so a data
-     * directory written before orders carried a product keeps the old shape
-     * and would only break later, on the first insert. ALTER TABLE brings it
-     * forward in place: the column is added (nullable, which is what an
-     * added column can be for rows that already exist) and every order
-     * written before it is backfilled with the default sku.
+     * Bring a data dir created before orders had a product forward in place:
+     * add the (nullable) column and backfill old rows with the default sku.
      *
-     * Adding a column that is already there is the normal case - every
-     * restart after the first - and this is the one failure to swallow.
-     *
-     * The match is on the message text, and deliberately not on the wire
-     * error code. The server reports "Table \"orders\" already has a column
-     * \"product\"." with code TABLE_NOT_FOUND - the same code a genuinely
-     * missing table arrives with - so matching the code would also swallow a
-     * real "table does not exist" and leave the platform running against no
-     * schema at all. The message is the only signal that distinguishes them.
-     * Anything else is a real problem and belongs to the caller.
+     * "Column already exists" is the normal case on every restart and the one
+     * failure swallowed. It is matched on the message, NOT the error code: the
+     * server sends it as TABLE_NOT_FOUND, the same code a genuinely missing
+     * table gets, and swallowing that would leave the platform schema-less.
      */
     private static function upgradeOrders(Database $database): void
     {
@@ -177,13 +162,9 @@ final class Migrator
     /**
      * Insert one reference row unless it is already there.
      *
-     * The read and the insert are separate statements, so two processes
-     * starting at the same moment - a serve and a queue consumer, both of
-     * which migrate at startup - can both find the key missing and both
-     * insert it. Whoever lost that race gets a primary-key violation, and
-     * used to fail startup over a row that is present and correct. The
-     * duplicate is the outcome the seeding wanted, so it is treated as
-     * success; any other constraint failure still propagates.
+     * Check-then-insert races when two processes migrate at the same moment
+     * (a serve and a queue consumer): the loser gets a duplicate-key error
+     * for a row that is present and correct, so that one error is success.
      *
      * @param list<mixed> $lookupParameters
      * @param list<mixed> $insertParameters
@@ -209,15 +190,8 @@ final class Migrator
     }
 
     /**
-     * Whether this is "that unique index already holds the value" and not
-     * some other constraint failure.
-     *
-     * Both halves are required, and neither alone would do. The wire code
-     * CONSTRAINT_VIOLATION is too broad: a NOT NULL violation and a foreign
-     * key with no parent arrive with that same code, and treating either as
-     * "already seeded" would quietly leave reference data unwritten. The
-     * message alone is too loose across versions. Together they name exactly
-     * the case where another process won the insert.
+     * Code AND message: CONSTRAINT_VIOLATION alone also covers NOT NULL and
+     * foreign-key failures, which must not pass as "already seeded".
      */
     private static function isDuplicateKey(Throwable $e): bool
     {

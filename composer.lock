@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "2284cb484b9bbc05721cd5f2005b2e25",
+    "content-hash": "c851e601a6ad46b168ff3c0d1e44e170",
     "packages": [
         {
             "name": "brick/math",
@@ -221,17 +221,17 @@
             "time": "2026-09-16T11:39:30+00:00"
         },
         {
-            "name": "tanat/php-job-queue",
+            "name": "researcher86/php-job-queue",
             "version": "dev-master",
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-job-queue.git",
-                "reference": "eefc0bb094aca32bb0cd6b6cad1d355854f79103"
+                "reference": "b9681e71ca06f161eeb4585a590aafaaffaaef2d"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-job-queue/zipball/eefc0bb094aca32bb0cd6b6cad1d355854f79103",
-                "reference": "eefc0bb094aca32bb0cd6b6cad1d355854f79103",
+                "url": "https://api.github.com/repos/Researcher86/php-job-queue/zipball/b9681e71ca06f161eeb4585a590aafaaffaaef2d",
+                "reference": "b9681e71ca06f161eeb4585a590aafaaffaaef2d",
                 "shasum": ""
             },
             "require": {
@@ -264,34 +264,30 @@
                 "analyse": [
                     "phpstan analyse"
                 ],
-                "lint": [
-                    "php-cs-fixer check --diff"
-                ],
-                "fix": [
+                "format": [
                     "php-cs-fixer fix"
+                ],
+                "format:check": [
+                    "php-cs-fixer check --diff"
                 ]
             },
             "license": [
                 "MIT"
             ],
-            "support": {
-                "source": "https://github.com/Researcher86/php-job-queue/tree/master",
-                "issues": "https://github.com/Researcher86/php-job-queue/issues"
-            },
-            "time": "2026-09-24T10:54:53+00:00"
+            "time": "2026-09-30T13:33:50+00:00"
         },
         {
-            "name": "tanat/php-mini-cache",
+            "name": "researcher86/php-mini-cache",
             "version": "dev-master",
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-mini-cache.git",
-                "reference": "fa782d2c36727b33fa2538227b8d0c75a1ee9f2b"
+                "reference": "34f325b15cc84f7bd2bd1eac558bd69a3392e4f3"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-mini-cache/zipball/fa782d2c36727b33fa2538227b8d0c75a1ee9f2b",
-                "reference": "fa782d2c36727b33fa2538227b8d0c75a1ee9f2b",
+                "url": "https://api.github.com/repos/Researcher86/php-mini-cache/zipball/34f325b15cc84f7bd2bd1eac558bd69a3392e4f3",
+                "reference": "34f325b15cc84f7bd2bd1eac558bd69a3392e4f3",
                 "shasum": ""
             },
             "require": {
@@ -333,24 +329,20 @@
             "license": [
                 "MIT"
             ],
-            "support": {
-                "source": "https://github.com/Researcher86/php-mini-cache/tree/master",
-                "issues": "https://github.com/Researcher86/php-mini-cache/issues"
-            },
-            "time": "2026-09-29T13:37:46+00:00"
+            "time": "2026-09-30T13:33:57+00:00"
         },
         {
-            "name": "tanat/php-mini-database",
+            "name": "researcher86/php-mini-database",
             "version": "dev-master",
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-mini-database.git",
-                "reference": "d8aba01705de55ddbc521974e34e8c284294636d"
+                "reference": "76886bc7e24a01a76f5578aa49a8a0974c2acc06"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-mini-database/zipball/d8aba01705de55ddbc521974e34e8c284294636d",
-                "reference": "d8aba01705de55ddbc521974e34e8c284294636d",
+                "url": "https://api.github.com/repos/Researcher86/php-mini-database/zipball/76886bc7e24a01a76f5578aa49a8a0974c2acc06",
+                "reference": "76886bc7e24a01a76f5578aa49a8a0974c2acc06",
                 "shasum": ""
             },
             "require": {
@@ -401,24 +393,20 @@
             "license": [
                 "MIT"
             ],
-            "support": {
-                "source": "https://github.com/Researcher86/php-mini-database/tree/master",
-                "issues": "https://github.com/Researcher86/php-mini-database/issues"
-            },
-            "time": "2026-09-24T11:01:21+00:00"
+            "time": "2026-09-30T13:34:02+00:00"
         },
         {
-            "name": "tanat/php-mini-http-server",
+            "name": "researcher86/php-mini-http-server",
             "version": "dev-master",
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-mini-http-server.git",
-                "reference": "1a61eba64d4eaa7fa0f2c1b3905215d2d3b6751e"
+                "reference": "57aa5c0959455bdacc902feab0f143af88d7006e"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-mini-http-server/zipball/1a61eba64d4eaa7fa0f2c1b3905215d2d3b6751e",
-                "reference": "1a61eba64d4eaa7fa0f2c1b3905215d2d3b6751e",
+                "url": "https://api.github.com/repos/Researcher86/php-mini-http-server/zipball/57aa5c0959455bdacc902feab0f143af88d7006e",
+                "reference": "57aa5c0959455bdacc902feab0f143af88d7006e",
                 "shasum": ""
             },
             "require": {
@@ -451,34 +439,30 @@
                 "analyse": [
                     "phpstan analyse"
                 ],
-                "lint": [
-                    "php-cs-fixer check --diff"
-                ],
-                "fix": [
+                "format": [
                     "php-cs-fixer fix"
+                ],
+                "format:check": [
+                    "php-cs-fixer check --diff"
                 ]
             },
             "license": [
                 "MIT"
             ],
-            "support": {
-                "source": "https://github.com/Researcher86/php-mini-http-server/tree/master",
-                "issues": "https://github.com/Researcher86/php-mini-http-server/issues"
-            },
-            "time": "2026-09-24T11:02:42+00:00"
+            "time": "2026-09-30T13:34:00+00:00"
         },
         {
-            "name": "tanat/php-worker-pool",
+            "name": "researcher86/php-worker-pool",
             "version": "dev-master",
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-worker-pool.git",
-                "reference": "4367f6639e645b152aa8c7982285336e609763e0"
+                "reference": "862f00783dfc3275533e31cf10cef3ed9e123905"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-worker-pool/zipball/4367f6639e645b152aa8c7982285336e609763e0",
-                "reference": "4367f6639e645b152aa8c7982285336e609763e0",
+                "url": "https://api.github.com/repos/Researcher86/php-worker-pool/zipball/862f00783dfc3275533e31cf10cef3ed9e123905",
+                "reference": "862f00783dfc3275533e31cf10cef3ed9e123905",
                 "shasum": ""
             },
             "require": {
@@ -521,11 +505,7 @@
             "license": [
                 "MIT"
             ],
-            "support": {
-                "source": "https://github.com/Researcher86/php-worker-pool/tree/master",
-                "issues": "https://github.com/Researcher86/php-worker-pool/issues"
-            },
-            "time": "2026-09-24T11:16:29+00:00"
+            "time": "2026-09-30T13:33:35+00:00"
         }
     ],
     "packages-dev": [
@@ -5118,11 +5098,11 @@
     "aliases": [],
     "minimum-stability": "dev",
     "stability-flags": {
-        "tanat/php-job-queue": 20,
-        "tanat/php-mini-cache": 20,
-        "tanat/php-mini-database": 20,
-        "tanat/php-mini-http-server": 20,
-        "tanat/php-worker-pool": 20
+        "researcher86/php-job-queue": 20,
+        "researcher86/php-mini-cache": 20,
+        "researcher86/php-mini-database": 20,
+        "researcher86/php-mini-http-server": 20,
+        "researcher86/php-worker-pool": 20
     },
     "prefer-stable": true,
     "prefer-lowest": false,

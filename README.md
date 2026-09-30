@@ -1,6 +1,8 @@
 # PHP Systems Platform
 
-**The final integration project of PHP Systems Lab.**
+**[🧪 PHP Systems Lab](https://github.com/Researcher86/php-systems-lab)** · Level 8 of 8 · ← [`php-mini-database`](https://github.com/Researcher86/php-mini-database)
+
+> The final integration project of PHP Systems Lab.
 
 `php-systems-platform` brings together the components developed throughout the lab into a single educational backend system.
 
@@ -100,20 +102,22 @@ bin/worker.php  the pool Master: forks, supervises and replaces worker processes
 
 ## Systems Lab Components
 
-The platform integrates concepts and components developed in the previous projects.
+The platform integrates the components developed in the previous levels. Five
+of them are Composer dependencies; the first two are concepts the platform
+reimplements where it needs them.
 
-| Project                | Role                                           |
-| ---------------------- | ---------------------------------------------- |
-| `php-concurrency`      | Process-based concurrency, IPC, task execution |
-| `php-memory-lab`       | Memory, fork, copy-on-write, RSS experiments   |
-| `php-worker-pool`      | Worker lifecycle and process management        |
-| `php-mini-http-server` | HTTP networking and request handling           |
-| `php-mini-database`    | Database and storage                           |
-| `php-mini-cache`       | In-memory caching                              |
-| `php-job-queue`        | Asynchronous job processing                    |
-| `php-benchmark-lab`    | Performance experiments and measurements       |
+| Level | Project | Role | How the platform uses it |
+| ----- | ------- | ---- | ------------------------ |
+| 1 | [`php-memory-lab`](https://github.com/Researcher86/php-memory-lab) | memory, fork, copy-on-write, RSS | concept — `src/Memory/` |
+| 2 | [`php-concurrency`](https://github.com/Researcher86/php-concurrency) | process-based concurrency, IPC | concept — `src/Workers/` |
+| 3 | [`php-worker-pool`](https://github.com/Researcher86/php-worker-pool) | worker lifecycle and process management | Composer — `src/Workers/` |
+| 4 | [`php-job-queue`](https://github.com/Researcher86/php-job-queue) | asynchronous job processing | Composer — `src/Queue/` |
+| 5 | [`php-mini-cache`](https://github.com/Researcher86/php-mini-cache) | in-memory caching | Composer — `src/Cache/` |
+| 6 | [`php-mini-http-server`](https://github.com/Researcher86/php-mini-http-server) | HTTP networking and request handling | Composer — `src/Http/`, `src/Application/` |
+| 7 | [`php-mini-database`](https://github.com/Researcher86/php-mini-database) | database and storage | Composer — `src/Storage/` |
 
-The platform is the integration layer connecting these concepts.
+Performance experiments live in this repository: `src/Benchmarks/` and
+[`docs/benchmarks.md`](docs/benchmarks.md).
 
 ---
 
@@ -1738,38 +1742,38 @@ Failure Recovery
 
 # PHP Systems Lab
 
-This repository is the final integration stage of **PHP Systems Lab**.
+This project is part of [**PHP Systems Lab**](https://github.com/Researcher86/php-systems-lab) — a collection of small
+educational PHP projects that rebuild the mechanisms behind backend
+infrastructure in order to understand them. The recommended order:
 
-The lab progresses from isolated experiments toward a complete system:
+| Level | Project | Focus |
+| ----- | ------- | ----- |
+| 1 | 🧠 [`php-memory-lab`](https://github.com/Researcher86/php-memory-lab) | memory, RSS, fork, copy-on-write, `mmap`, shared memory, FFI |
+| 2 | ⚡ [`php-concurrency`](https://github.com/Researcher86/php-concurrency) | processes, IPC, concurrency patterns, event loops, Fibers (course in Russian) |
+| 3 | ⚙️ [`php-worker-pool`](https://github.com/Researcher86/php-worker-pool) | persistent master/worker pool, supervision, graceful shutdown |
+| 4 | 📬 [`php-job-queue`](https://github.com/Researcher86/php-job-queue) | reliable background jobs: delivery leases, ACK, retries, DLQ |
+| 5 | 💾 [`php-mini-cache`](https://github.com/Researcher86/php-mini-cache) | event-driven in-memory server: RESP, pipelining, TTL, Pub/Sub |
+| 6 | 🌐 [`php-mini-http-server`](https://github.com/Researcher86/php-mini-http-server) | event-driven HTTP server: parsing, routing, middleware, keep-alive |
+| 7 | 🗄️ [`php-mini-database`](https://github.com/Researcher86/php-mini-database) | relational engine: pages, B-trees, SQL, transactions, WAL, recovery |
+| **8** | 🏗️ **`php-systems-platform`** (this project) | **integration of the components into one backend platform** |
 
-```text
-Phase 1
-Foundations
-     │
-     ▼
-Phase 2
-Concurrency & Processes
-     │
-     ▼
-Phase 3
-Systems Components
-     │
-     ▼
-Phase 4
-Storage / Networking / Async Processing
-     │
-     ▼
-Phase 5
-Final Platform
-```
+These are teaching projects, not libraries: a mechanism travels between them
+by being read in one and reimplemented in the next. Levels 1–7 do not depend
+on each other as packages. Only [`php-systems-platform`](https://github.com/Researcher86/php-systems-platform) requires the
+five components (worker pool, job queue, cache, HTTP server, database)
+through Composer and runs them together as one system.
 
-The final platform connects the individual experiments into one coherent system.
+## How this project relates
+
+This project is the last level: it depends on the five components as
+Composer packages and uses the first two levels as concepts — see
+[Systems Lab Components](#systems-lab-components) for what comes from where.
 
 ---
 
 ## Status
 
-**Phase 5 — Final Platform**
+**Level 8 of 8 — Final Platform**
 
 The project is intended to evolve incrementally through the implementation plan.
 

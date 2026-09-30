@@ -1,7 +1,7 @@
 # Component APIs
 
 This file fixes the surface of each integrated component the way the platform
-uses it. It is written once, from the installed sources under `vendor/tanat/`,
+uses it. It is written once, from the installed sources under `vendor/researcher86/`,
 so every later phase wires its adapter against a known contract instead of
 re-reading the components' internals each time.
 

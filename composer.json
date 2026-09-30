@@ -1,5 +1,5 @@
 {
-    "name": "tanat/php-systems-platform",
+    "name": "researcher86/php-systems-platform",
     "type": "project",
     "license": "MIT",
     "autoload": {
@@ -46,11 +46,11 @@
         "ext-sysvsem": "*",
         "ext-sysvshm": "*",
         "ramsey/uuid": "^4.9",
-        "tanat/php-job-queue": "dev-master",
-        "tanat/php-mini-cache": "dev-master",
-        "tanat/php-mini-database": "dev-master",
-        "tanat/php-mini-http-server": "dev-master",
-        "tanat/php-worker-pool": "dev-master"
+        "researcher86/php-job-queue": "dev-master",
+        "researcher86/php-mini-cache": "dev-master",
+        "researcher86/php-mini-database": "dev-master",
+        "researcher86/php-mini-http-server": "dev-master",
+        "researcher86/php-worker-pool": "dev-master"
     },
     "require-dev": {
         "friendsofphp/php-cs-fixer": "^3.0",

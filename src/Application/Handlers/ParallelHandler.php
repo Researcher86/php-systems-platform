@@ -41,6 +41,12 @@ final readonly class ParallelHandler
             return Response::json(['error' => 'split must be between 1 and 16.'], 400);
         }
 
+        // A chunk needs at least one iteration: the worker refuses an empty
+        // one, which would read as a degraded answer no worker caused.
+        if ($split > $work) {
+            return Response::json(['error' => 'split must not exceed work.'], 400);
+        }
+
         if ($this->runner === null) {
             return Response::json(['error' => 'worker pool is not configured.'], 503);
         }

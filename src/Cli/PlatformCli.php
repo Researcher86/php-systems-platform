@@ -697,7 +697,7 @@ final class PlatformCli
     /** @param resource $process */
     private function terminate(mixed $process): void
     {
-        proc_terminate($process);
+        OwnedProcess::terminate($process);
         proc_close($process);
     }
 

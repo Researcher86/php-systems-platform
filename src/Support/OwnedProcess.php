@@ -27,6 +27,9 @@ final class OwnedProcess
 
     public const float STOP_DEADLINE_SECONDS = 20.0;
 
+    /** How long one SIGTERM gets before it is sent again - see terminate(). */
+    private const float SIGTERM_RESEND_SECONDS = 2.0;
+
     private const float POLL_INTERVAL_SECONDS = 0.05;
 
     private const float PORT_PROBE_CONNECT_SECONDS = 0.2;
@@ -139,17 +142,8 @@ final class OwnedProcess
             return 0;
         }
 
-        proc_terminate($this->process);
-
-        $exited = self::waitForQuietly(
-            fn (): bool => !proc_get_status($this->process)['running'],
-            $deadlineSeconds,
-        );
-
-        if (!$exited) {
-            // Ignored SIGTERM: make it gone, and report it as non-zero below.
-            proc_terminate($this->process, 9);
-        }
+        // Ignored SIGTERM ends in a SIGKILL, reported as non-zero below.
+        $exited = self::terminate($this->process, $deadlineSeconds);
 
         // proc_close() returns the exit code proc_get_status() already
         // observed (PHP >= 8.3), so the wait above does not lose it.
@@ -157,6 +151,40 @@ final class OwnedProcess
         $this->process = null;
 
         return $exited ? $code : ($code === 0 ? 1 : $code);
+    }
+
+    /**
+     * SIGTERM $process and wait for it to exit, sending SIGTERM again every
+     * SIGTERM_RESEND_SECONDS while it still runs, and SIGKILL once
+     * $deadlineSeconds have passed. The caller still proc_close()s it.
+     *
+     * The repeat is not paranoia. The worker pool's Master, which only sets
+     * a flag in its SIGTERM handler, was caught in CI still running its main
+     * loop minutes after a SIGTERM that proc_terminate() reported as sent -
+     * and stopping on the very next one. Every server here takes a repeated
+     * SIGTERM as the same request, so asking again costs nothing, while a
+     * single unanswered one used to hang whoever was waiting for good.
+     *
+     * @param resource $process
+     *
+     * @return bool whether it exited on SIGTERM, without needing the SIGKILL
+     */
+    public static function terminate(mixed $process, float $deadlineSeconds = self::STOP_DEADLINE_SECONDS): bool
+    {
+        $deadline = microtime(true) + $deadlineSeconds;
+        $exited = static fn (): bool => !proc_get_status($process)['running'];
+
+        do {
+            proc_terminate($process);
+
+            if (self::waitForQuietly($exited, min(self::SIGTERM_RESEND_SECONDS, max(0.0, $deadline - microtime(true))))) {
+                return true;
+            }
+        } while (microtime(true) < $deadline);
+
+        proc_terminate($process, 9);
+
+        return false;
     }
 
     /** Everything the child wrote, both streams: the only explanation a failed run has. */

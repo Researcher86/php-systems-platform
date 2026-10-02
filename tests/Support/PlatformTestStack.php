@@ -44,6 +44,8 @@ final class PlatformTestStack
 
     private const float CHILD_STOP_DEADLINE_SECONDS = 20.0;
 
+    private const float SIGTERM_RESEND_SECONDS = 2.0;
+
     private static ?self $running = null;
 
     private static int $holders = 0;
@@ -430,15 +432,22 @@ final class PlatformTestStack
         }
 
         $deadline = microtime(true) + $deadlineSeconds;
+        $resendAt = microtime(true) + self::SIGTERM_RESEND_SECONDS;
         $reaped = pcntl_waitpid($pid, $status, WNOHANG);
 
         // Polled, not slept through: the point of this wait is to let the
         // child take its graceful shutdown - a serve that is SIGKILLed here
         // never stops the daemons it started, and the next suite inherits
-        // them.
+        // them. A SIGTERM can go unanswered (see OwnedProcess::terminate()),
+        // so it is repeated while the child is still there.
         while ($reaped !== $pid && microtime(true) < $deadline) {
             usleep(50_000);
             $reaped = pcntl_waitpid($pid, $status, WNOHANG);
+
+            if ($reaped !== $pid && is_resource($process) && microtime(true) >= $resendAt) {
+                proc_terminate($process);
+                $resendAt = microtime(true) + self::SIGTERM_RESEND_SECONDS;
+            }
         }
 
         if ($reaped !== $pid) {

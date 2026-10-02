@@ -37,6 +37,7 @@ use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
 use PhpSystemsPlatform\Storage\Repositories\InventoryRepository;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
+use PhpSystemsPlatform\Support\OwnedProcess;
 use PhpSystemsPlatform\Workers\ConcurrentOrderLoader;
 use PhpSystemsPlatform\Workers\ConcurrentTaskRunner;
 use PhpSystemsPlatform\Workers\ForkedOrderLoader;
@@ -699,7 +700,7 @@ final class ServeIntegrationTest extends TestCase
 
             self::assertTrue($answer['pong']);
         } finally {
-            proc_terminate($pool);
+            OwnedProcess::terminate($pool);
             proc_close($pool);
         }
     }
@@ -756,7 +757,7 @@ final class ServeIntegrationTest extends TestCase
             self::assertNotNull($report['replacement_pid']);
             self::assertNotSame($report['crashed_pid'], $report['replacement_pid']);
         } finally {
-            proc_terminate($pool);
+            OwnedProcess::terminate($pool);
             proc_close($pool);
         }
     }
@@ -816,7 +817,7 @@ final class ServeIntegrationTest extends TestCase
             // refused is still there.
             self::assertCount(1, $client->stats());
         } finally {
-            proc_terminate($pool);
+            OwnedProcess::terminate($pool);
             proc_close($pool);
         }
     }
@@ -1194,7 +1195,7 @@ final class ServeIntegrationTest extends TestCase
                 (string) file_get_contents(self::LOG_DIR . '/consume.out'),
             ));
         } finally {
-            proc_terminate($process);
+            OwnedProcess::terminate($process);
             proc_close($process);
         }
     }
@@ -1506,7 +1507,7 @@ final class ServeIntegrationTest extends TestCase
             self::assertTrue($payload['running']);
             self::assertNotEmpty($payload['workers']);
         } finally {
-            proc_terminate($process);
+            OwnedProcess::terminate($process);
             proc_close($process);
         }
     }
@@ -1999,7 +2000,7 @@ final class ServeIntegrationTest extends TestCase
     private static function stopServe(): void
     {
         if (is_resource(self::$serveProcess)) {
-            proc_terminate(self::$serveProcess);
+            OwnedProcess::terminate(self::$serveProcess);
             proc_close(self::$serveProcess);
         }
 

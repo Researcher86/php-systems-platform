@@ -27,7 +27,7 @@ get a document of their own.
 1. **A process stops only what it started.** The cache server is the sharpest
    example: it has no daemon mode, so it is a child of whoever started it.
    `serve` adopts an already-running cache and will not stop it on the way
-   out (`stopCacheServer()` is a no-op when there is no handle). This is why
+   out (only a server it spawned gets a stop step on its `ShutdownStack`). This is why
    a command that must kill the cache mid-run - the failure experiments -
    starts the cache server itself: it needs the handle.
 

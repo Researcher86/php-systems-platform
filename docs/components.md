@@ -429,7 +429,8 @@ The wiring, platform-side:
   `WorkerTasks`, and `job.execute` to `WorkerJobs`. Like the cache, the pool
   has no daemon mode, so `PlatformCli::serve()` spawns it as a child when no
   pool answers a ping on the configured socket (`workerPoolAnswers()`), owns
-  it, and SIGTERMs it on shutdown (`stopWorkerPool()`) — graceful:
+  it, and SIGTERMs it on shutdown (the stop step `ensureWorkerPool()`
+  registers on the command's `ShutdownStack`) — graceful:
   settle in-flight tasks, exit workers, remove the socket. `queue:consume`
   uses the same ensure/own/stop helpers when it runs standalone.
 - `Workers\WorkerTasks` — the hash tasks: `ping` and `hash_chunk`
@@ -920,13 +921,10 @@ observability seams:
 
 - a running serve's `GET /metrics`: the HTTP/cache/database counters and
   the master process's own RSS exist only inside serve, so `status` reads
-  them over HTTP - one raw `GET /metrics` with `Connection: close`, the
-  same wire exercise the vendor component's `bin/client.php` demonstrates
-  (`Cli\PlatformCli::statusMetrics`);
+  them over HTTP through `Support\HttpProbe::metrics()`;
 - live probes: a short TCP connect to the database and cache ports and
-  one `stats()` round-trip to the pool (`Cli\PlatformCli::statusWorkerStats`,
-  mirroring `MetricsReporter`'s own aggregation so the numbers agree with a
-  /metrics read) tell *running* from *stopped*;
+  one `stats()` round-trip to the pool (through `MetricsReporter` itself,
+  so the numbers agree with a /metrics read) tell *running* from *stopped*;
 - the durable queue journal: `depth`/`processed`/`failed` read exactly the
   way `queue:status` and `GET /queue/status` read them.
 

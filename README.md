@@ -56,7 +56,7 @@ The final system provides a practical environment for experimenting with the con
                     │ Routing           │
                     │ Services          │
                     │ Domain logic      │
-                    └────┬────┬────┬───┘
+                    └────┬────┬────┬────┘
                          │    │    │
               ┌──────────┘    │    └────────────┐
               ▼               ▼                 ▼
@@ -85,7 +85,7 @@ The final system provides a practical environment for experimenting with the con
 
              ┌─────────────────────────────────────────┐
              │ Concurrency / Memory / IPC / Metrics    │
-             │ Backpressure / Retry / Timeout / Trace │
+             │ Backpressure / Retry / Timeout / Trace  │
              └─────────────────────────────────────────┘
 ```
 

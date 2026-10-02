@@ -226,12 +226,12 @@
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-job-queue.git",
-                "reference": "b9681e71ca06f161eeb4585a590aafaaffaaef2d"
+                "reference": "a1fb925a687533eada81141bb981cd3b8202a69f"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-job-queue/zipball/b9681e71ca06f161eeb4585a590aafaaffaaef2d",
-                "reference": "b9681e71ca06f161eeb4585a590aafaaffaaef2d",
+                "url": "https://api.github.com/repos/Researcher86/php-job-queue/zipball/a1fb925a687533eada81141bb981cd3b8202a69f",
+                "reference": "a1fb925a687533eada81141bb981cd3b8202a69f",
                 "shasum": ""
             },
             "require": {
@@ -274,7 +274,11 @@
             "license": [
                 "MIT"
             ],
-            "time": "2026-09-30T13:33:50+00:00"
+            "support": {
+                "source": "https://github.com/Researcher86/php-job-queue/tree/master",
+                "issues": "https://github.com/Researcher86/php-job-queue/issues"
+            },
+            "time": "2026-10-02T06:46:11+00:00"
         },
         {
             "name": "researcher86/php-mini-cache",
@@ -282,12 +286,12 @@
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-mini-cache.git",
-                "reference": "34f325b15cc84f7bd2bd1eac558bd69a3392e4f3"
+                "reference": "155237e9e7a4e5a0e2cc685d8b16415213b08276"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-mini-cache/zipball/34f325b15cc84f7bd2bd1eac558bd69a3392e4f3",
-                "reference": "34f325b15cc84f7bd2bd1eac558bd69a3392e4f3",
+                "url": "https://api.github.com/repos/Researcher86/php-mini-cache/zipball/155237e9e7a4e5a0e2cc685d8b16415213b08276",
+                "reference": "155237e9e7a4e5a0e2cc685d8b16415213b08276",
                 "shasum": ""
             },
             "require": {
@@ -329,7 +333,11 @@
             "license": [
                 "MIT"
             ],
-            "time": "2026-09-30T13:33:57+00:00"
+            "support": {
+                "source": "https://github.com/Researcher86/php-mini-cache/tree/master",
+                "issues": "https://github.com/Researcher86/php-mini-cache/issues"
+            },
+            "time": "2026-10-02T06:46:11+00:00"
         },
         {
             "name": "researcher86/php-mini-database",
@@ -337,12 +345,12 @@
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-mini-database.git",
-                "reference": "76886bc7e24a01a76f5578aa49a8a0974c2acc06"
+                "reference": "07058a5e5e42a051865fa7a13ddc79977db7415b"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-mini-database/zipball/76886bc7e24a01a76f5578aa49a8a0974c2acc06",
-                "reference": "76886bc7e24a01a76f5578aa49a8a0974c2acc06",
+                "url": "https://api.github.com/repos/Researcher86/php-mini-database/zipball/07058a5e5e42a051865fa7a13ddc79977db7415b",
+                "reference": "07058a5e5e42a051865fa7a13ddc79977db7415b",
                 "shasum": ""
             },
             "require": {
@@ -393,7 +401,11 @@
             "license": [
                 "MIT"
             ],
-            "time": "2026-09-30T13:34:02+00:00"
+            "support": {
+                "source": "https://github.com/Researcher86/php-mini-database/tree/master",
+                "issues": "https://github.com/Researcher86/php-mini-database/issues"
+            },
+            "time": "2026-10-02T11:21:04+00:00"
         },
         {
             "name": "researcher86/php-mini-http-server",
@@ -401,12 +413,12 @@
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-mini-http-server.git",
-                "reference": "57aa5c0959455bdacc902feab0f143af88d7006e"
+                "reference": "1f067f78db947d2282087de303d5b7ad5c544ab3"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-mini-http-server/zipball/57aa5c0959455bdacc902feab0f143af88d7006e",
-                "reference": "57aa5c0959455bdacc902feab0f143af88d7006e",
+                "url": "https://api.github.com/repos/Researcher86/php-mini-http-server/zipball/1f067f78db947d2282087de303d5b7ad5c544ab3",
+                "reference": "1f067f78db947d2282087de303d5b7ad5c544ab3",
                 "shasum": ""
             },
             "require": {
@@ -449,7 +461,11 @@
             "license": [
                 "MIT"
             ],
-            "time": "2026-09-30T13:34:00+00:00"
+            "support": {
+                "source": "https://github.com/Researcher86/php-mini-http-server/tree/master",
+                "issues": "https://github.com/Researcher86/php-mini-http-server/issues"
+            },
+            "time": "2026-10-02T06:50:25+00:00"
         },
         {
             "name": "researcher86/php-worker-pool",
@@ -457,12 +473,12 @@
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-worker-pool.git",
-                "reference": "862f00783dfc3275533e31cf10cef3ed9e123905"
+                "reference": "ee776796cbf30fce76150fc62f35c97275f689d6"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-worker-pool/zipball/862f00783dfc3275533e31cf10cef3ed9e123905",
-                "reference": "862f00783dfc3275533e31cf10cef3ed9e123905",
+                "url": "https://api.github.com/repos/Researcher86/php-worker-pool/zipball/ee776796cbf30fce76150fc62f35c97275f689d6",
+                "reference": "ee776796cbf30fce76150fc62f35c97275f689d6",
                 "shasum": ""
             },
             "require": {
@@ -505,7 +521,11 @@
             "license": [
                 "MIT"
             ],
-            "time": "2026-09-30T13:33:35+00:00"
+            "support": {
+                "source": "https://github.com/Researcher86/php-worker-pool/tree/master",
+                "issues": "https://github.com/Researcher86/php-worker-pool/issues"
+            },
+            "time": "2026-10-02T06:46:51+00:00"
         }
     ],
     "packages-dev": [

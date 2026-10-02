@@ -172,15 +172,16 @@ final class OwnedProcess
      */
     public static function portAnswers(string $host, int $port, float $timeoutSeconds): bool
     {
+        return self::endpointAnswers(sprintf('tcp://%s:%d', $host, $port), $timeoutSeconds);
+    }
+
+    /** portAnswers() for any stream address: tcp://host:port or unix:///path. */
+    public static function endpointAnswers(string $address, float $timeoutSeconds): bool
+    {
         $deadline = microtime(true) + $timeoutSeconds;
 
         while (microtime(true) < $deadline) {
-            $socket = @stream_socket_client(
-                sprintf('tcp://%s:%d', $host, $port),
-                $code,
-                $message,
-                self::PORT_PROBE_CONNECT_SECONDS,
-            );
+            $socket = @stream_socket_client($address, $code, $message, self::PORT_PROBE_CONNECT_SECONDS);
 
             if ($socket !== false) {
                 fclose($socket);

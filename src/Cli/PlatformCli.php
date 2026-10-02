@@ -61,6 +61,7 @@ use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Migrator;
 use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
+use PhpSystemsPlatform\Support\OwnedProcess;
 use PhpSystemsPlatform\Support\ShutdownStack;
 use PhpSystemsPlatform\Workers\ConcurrentOrderLoader;
 use PhpSystemsPlatform\Workers\ConcurrentTaskRunner;
@@ -89,7 +90,7 @@ use RuntimeException;
  *   database server  daemonizes and is tracked by a pid file, so ownership is
  *                    decided once at start-up (did this call start it?)
  *   cache server,    no daemon mode: spawned as direct children, and the
- *   worker pool      process handle held in a property IS the ownership
+ *   worker pool      process handle captured by the stop step IS the ownership
  *
  * An already-running server of any kind is adopted and left running. Every
  * release is pushed onto one ShutdownStack as soon as the resource is held,
@@ -122,18 +123,8 @@ final class PlatformCli
         'trace' => 'Print the spans recorded for one request_id: trace <request_id>.',
     ];
 
-    /**
-     * The cache server and pool Master this process spawned, if any. Neither
-     * has a daemon mode, so holding the handle is the proof of ownership: an
-     * adopted server was never stored here, and a stop*() on a null handle
-     * is a no-op. No separate "owned" flag that could disagree with it.
-     *
-     * @var resource|null
-     */
-    private mixed $cacheProcess = null;
-
-    /** @var resource|null */
-    private mixed $workerProcess = null;
+    /** How long a server this process started gets to start answering. */
+    private const float START_DEADLINE_SECONDS = 10.0;
 
     /**
      * @param list<string> $argv
@@ -228,7 +219,7 @@ final class PlatformCli
 
             $cacheConfig = $config['cache'];
             $cache = CacheService::fromConfig($cacheConfig, $systemMetrics);
-            $this->ensureCacheServerIfEnabled($shutdown, $cacheConfig);
+            $this->ensureCacheServer($shutdown, $cacheConfig);
             $shutdown->push(static fn (): null => $cache->close(), 'cache');
 
             $this->ensureWorkerPool($shutdown, $workersConfig);
@@ -402,7 +393,7 @@ final class PlatformCli
     private function producer(array $queueConfig): Producer
     {
         $dataDir = $queueConfig['data_dir'];
-        $this->ensureDirectory($dataDir, 'queue data directory');
+        OwnedProcess::mkdir($dataDir);
 
         $clock = new SystemClock();
 
@@ -429,9 +420,7 @@ final class PlatformCli
         ?MetricsRegistry $metrics = null,
         ?Trace $trace = null,
     ): Database {
-        if ($this->ensureDatabaseServer($databaseConfig)) {
-            $shutdown->push(fn (): null => $this->stopDatabaseServer($databaseConfig), 'database server');
-        }
+        $this->ensureDatabaseServer($shutdown, $databaseConfig);
 
         // connect() is lazy (a connection pool), so nothing is dialled yet.
         $database = Database::connect($databaseConfig, 10, $metrics, $trace);
@@ -443,63 +432,34 @@ final class PlatformCli
     }
 
     /**
-     * CACHE_ENABLED=0 is a platform with no cache tier, not one whose cache is
-     * down: no server is started, and the printed line is how a load test's
-     * output tells the two configurations apart.
-     *
-     * The stop is registered unconditionally: it releases by handle, so it is
-     * a no-op exactly when nothing is owned (disabled or adopted).
-     *
-     * @param array<string, mixed> $cacheConfig
-     */
-    private function ensureCacheServerIfEnabled(ShutdownStack $shutdown, array $cacheConfig): void
-    {
-        if ((bool) ($cacheConfig['enabled'] ?? true)) {
-            $this->ensureCacheServer($cacheConfig);
-        } else {
-            printf("Cache disabled (CACHE_ENABLED): no cache server on tcp://%s:%d\n", $cacheConfig['host'], $cacheConfig['port']);
-        }
-
-        $shutdown->push(fn (): null => $this->stopCacheServer(), 'cache server');
-    }
-
-    /**
-     * @param array<string, mixed> $workersConfig
-     */
-    private function ensureWorkerPool(ShutdownStack $shutdown, array $workersConfig): void
-    {
-        $this->ensureWorkerPoolServer($workersConfig);
-        $shutdown->push(fn (): null => $this->stopWorkerPool(), 'worker pool');
-    }
-
-    /**
-     * Start a daemonized database server unless one already answers, and
-     * return whether this call started it (and so must stop it).
+     * Start a daemonized database server unless one already answers. Only a
+     * server this call started gets a stop step: it daemonizes, so the pid
+     * file - not a child handle - is what the stop goes through.
      *
      * @param array<string, mixed> $config
      */
-    private function ensureDatabaseServer(array $config): bool
+    private function ensureDatabaseServer(ShutdownStack $shutdown, array $config): void
     {
         $script = $this->binary('minidb.php');
         $pidFile = $config['data_dir'] . '/minidb.pid';
-        $output = '';
+        $address = sprintf('tcp://%s:%d', $config['host'], $config['port']);
 
         // The pid file alone is not enough: it can be stale, or belong to
         // another platform process. The port is the ground truth, and only
         // when neither says "running" may this process start and own one -
         // otherwise two processes would each think they own the same server
         // and the second would stop the first's infrastructure on the way out.
-        $hadServer = $this->runServerCli([$script, 'status', '--pid-file', $pidFile], $output) === 0;
+        [$statusCode] = $this->runServerCli([$script, 'status', '--pid-file', $pidFile]);
 
-        if ($hadServer || $this->waitForPort($config['host'], (int) $config['port'], 0.3)) {
-            printf("Database server already running on tcp://%s:%d\n", $config['host'], $config['port']);
+        if ($statusCode === 0 || OwnedProcess::endpointAnswers($address, 0.3)) {
+            printf("Database server already running on %s\n", $address);
 
-            return false;
+            return;
         }
 
-        $this->ensureDirectory($config['data_dir'], 'database data directory');
+        OwnedProcess::mkdir($config['data_dir']);
 
-        $code = $this->runServerCli([
+        [$code, $output] = $this->runServerCli([
             $script,
             'start',
             '--host', $config['host'],
@@ -508,46 +468,37 @@ final class PlatformCli
             '--daemon',
             '--pid-file', $pidFile,
             '--log-file', $config['data_dir'] . '/minidb.log',
-        ], $output);
+        ]);
 
         if ($code !== 0) {
-            throw new RuntimeException('Could not start the database server: ' . rtrim($output));
+            throw new RuntimeException('Could not start the database server: ' . $output);
         }
 
-        if (!$this->waitForPort($config['host'], (int) $config['port'])) {
-            throw new RuntimeException(sprintf(
-                'Database server did not start listening on tcp://%s:%d in time.',
-                $config['host'],
-                $config['port'],
-            ));
-        }
+        $shutdown->push(function () use ($script, $pidFile): void {
+            [$code, $output] = $this->runServerCli([$script, 'stop', '--pid-file', $pidFile]);
 
-        printf("Database server listening on tcp://%s:%d\n", $config['host'], $config['port']);
+            if ($code !== 0) {
+                throw new RuntimeException($output);
+            }
 
-        return true;
-    }
-
-    /** @param array<string, mixed> $config */
-    private function stopDatabaseServer(array $config): void
-    {
-        $output = '';
-        $command = [$this->binary('minidb.php'), 'stop', '--pid-file', $config['data_dir'] . '/minidb.pid'];
-
-        if ($this->runServerCli($command, $output) === 0) {
             printf("Database server stopped\n");
+        }, 'database server');
 
-            return;
+        if (!OwnedProcess::endpointAnswers($address, self::START_DEADLINE_SECONDS)) {
+            throw new RuntimeException(sprintf('Database server did not start listening on %s in time.', $address));
         }
 
-        fwrite(STDERR, 'Database server could not be stopped: ' . rtrim($output) . PHP_EOL);
+        printf("Database server listening on %s\n", $address);
     }
 
     /**
-     * Run a server's control CLI to completion; $output gets stdout + stderr.
+     * Run a server's control CLI to completion.
      *
      * @param list<string> $command
+     *
+     * @return array{0: int, 1: string} the exit code and stdout + stderr
      */
-    private function runServerCli(array $command, string &$output): int
+    private function runServerCli(array $command): array
     {
         $process = proc_open([PHP_BINARY, ...$command], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
 
@@ -559,11 +510,8 @@ final class PlatformCli
         $stderr = stream_get_contents($pipes[2]);
         fclose($pipes[1]);
         fclose($pipes[2]);
-        $code = proc_close($process);
 
-        $output = trim($stdout . "\n" . $stderr);
-
-        return $code;
+        return [proc_close($process), trim($stdout . "\n" . $stderr)];
     }
 
     /**
@@ -571,41 +519,43 @@ final class PlatformCli
      * a foreground server configured through the environment, the same
      * contract as the component's own bin/server.php.
      *
+     * CACHE_ENABLED=0 is a platform with no cache tier, not one whose cache is
+     * down: no server is started, and the printed line is how a load test's
+     * output tells the two configurations apart.
+     *
      * @param array<string, mixed> $config
      */
-    private function ensureCacheServer(array $config): void
+    private function ensureCacheServer(ShutdownStack $shutdown, array $config): void
     {
+        $address = sprintf('tcp://%s:%d', $config['host'], $config['port']);
+
+        if (!(bool) ($config['enabled'] ?? true)) {
+            printf("Cache disabled (CACHE_ENABLED): no cache server on %s\n", $address);
+
+            return;
+        }
+
         if ($this->cacheServerAnswers($config)) {
-            printf("Cache server already running on tcp://%s:%d\n", $config['host'], $config['port']);
+            printf("Cache server already running on %s\n", $address);
 
             return;
         }
 
         $dataDir = $config['data_dir'];
-        $this->ensureDirectory($dataDir, 'cache data directory');
+        OwnedProcess::mkdir($dataDir);
 
-        $this->cacheProcess = $this->spawn(
-            $this->binary('cache.php'),
-            $dataDir . '/cache',
-            [
-                'CACHE_HOST' => $config['host'],
-                'CACHE_PORT' => (string) $config['port'],
-                'CACHE_SNAPSHOT' => $dataDir . '/cache.snapshot',
-            ],
-            'Could not start the cache server process.',
-        );
+        // SIGTERM is the cache's graceful shutdown, final snapshot included.
+        $this->spawnOwned($shutdown, 'cache server', $this->binary('cache.php'), $dataDir . '/cache', [
+            'CACHE_HOST' => $config['host'],
+            'CACHE_PORT' => (string) $config['port'],
+            'CACHE_SNAPSHOT' => $dataDir . '/cache.snapshot',
+        ]);
 
-        if (!$this->waitForPort($config['host'], (int) $config['port'])) {
-            $this->stopCacheServer();
-
-            throw new RuntimeException(sprintf(
-                'Cache server did not start listening on tcp://%s:%d in time.',
-                $config['host'],
-                $config['port'],
-            ));
+        if (!OwnedProcess::endpointAnswers($address, self::START_DEADLINE_SECONDS)) {
+            throw new RuntimeException(sprintf('Cache server did not start listening on %s in time.', $address));
         }
 
-        printf("Cache server listening on tcp://%s:%d\n", $config['host'], $config['port']);
+        printf("Cache server listening on %s\n", $address);
     }
 
     /**
@@ -625,22 +575,15 @@ final class PlatformCli
         }
     }
 
-    /** SIGTERM is the cache's graceful shutdown, final snapshot included. */
-    private function stopCacheServer(): void
-    {
-        if ($this->releaseChild($this->cacheProcess)) {
-            printf("Cache server stopped\n");
-        }
-    }
-
     /**
      * Spawn the pool Master (bin/worker.php) as a child unless a pool already
      * answers on the socket. Kept out of the HTTP process on purpose: the
-     * process boundary is what the lab points at.
+     * process boundary is what the lab points at. SIGTERM is the pool's
+     * graceful shutdown: drain in-flight tasks, exit the workers.
      *
      * @param array<string, mixed> $config
      */
-    private function ensureWorkerPoolServer(array $config): void
+    private function ensureWorkerPool(ShutdownStack $shutdown, array $config): void
     {
         if ($this->workerPoolAnswers($config)) {
             printf("Worker pool already running on %s\n", $config['socket']);
@@ -649,18 +592,11 @@ final class PlatformCli
         }
 
         $dataDir = $config['data_dir'];
-        $this->ensureDirectory($dataDir, 'worker data directory');
+        OwnedProcess::mkdir($dataDir);
 
-        $this->workerProcess = $this->spawn(
-            $this->binary('worker.php'),
-            $dataDir . '/worker',
-            null,
-            'Could not start the worker pool process.',
-        );
+        $this->spawnOwned($shutdown, 'worker pool', $this->binary('worker.php'), $dataDir . '/worker', null);
 
-        if (!$this->waitForSocket($config['socket'])) {
-            $this->stopWorkerPool();
-
+        if (!OwnedProcess::endpointAnswers('unix://' . $config['socket'], self::START_DEADLINE_SECONDS)) {
             throw new RuntimeException(sprintf('Worker pool did not start listening on "%s" in time.', $config['socket']));
         }
 
@@ -684,30 +620,55 @@ final class PlatformCli
         }
     }
 
-    /** SIGTERM is the pool's graceful shutdown: drain in-flight tasks, exit the workers. */
-    private function stopWorkerPool(): void
+    /**
+     * Spawn a child server and register its stop at once. Neither the cache
+     * nor the pool has a daemon mode, so the handle captured by the shutdown
+     * step IS the ownership: an adopted server never reaches this method.
+     *
+     * @param array<string, string>|null $env
+     */
+    private function spawnOwned(ShutdownStack $shutdown, string $name, string $script, string $logPrefix, ?array $env): void
     {
-        if ($this->releaseChild($this->workerProcess)) {
-            printf("Worker pool stopped\n");
-        }
+        $process = $this->spawn($script, $logPrefix, $env, sprintf('Could not start the %s process.', $name));
+
+        $shutdown->push(function () use ($process, $name): void {
+            $this->terminate($process);
+            printf("%s stopped\n", ucfirst($name));
+        }, $name);
     }
 
     /**
      * A throwaway pool of exactly $workers processes on its own socket, so a
      * measurement controls the parallelism it measures and never disturbs a
-     * pool that is already running. The caller owns the returned handle.
+     * pool that is already running. The caller owns the returned handle; a
+     * pool that never starts listening is stopped before this throws.
      *
-     * @return resource
+     * @return array{0: resource, 1: string, 2: string} the Master's handle,
+     *                                                   its socket and its
+     *                                                   log directory
      */
-    private function spawnIsolatedPool(string $logDir, string $socketPath, int $workers, int $timeoutSeconds, string $failure): mixed
+    private function startIsolatedPool(string $name, int $workers, int $timeoutSeconds): array
     {
+        $id = uniqid('', true);
+        $logDir = sprintf('%s/php-systems-platform/%s-%s', sys_get_temp_dir(), $name, $id);
+        $socketPath = sprintf('%s/php-%s-%s.sock', sys_get_temp_dir(), $name, $id);
+        OwnedProcess::mkdir($logDir);
+
         // The environment replaces the child's whole environment.
-        return $this->spawn($this->binary('worker.php'), $logDir . '/worker', [
+        $master = $this->spawn($this->binary('worker.php'), $logDir . '/worker', [
             'WORKER_POOL_SOCKET' => $socketPath,
             'WORKER_POOL_MIN' => (string) $workers,
             'WORKER_POOL_MAX' => (string) $workers,
             'WORKER_POOL_TIMEOUT' => (string) $timeoutSeconds,
-        ], $failure);
+        ], sprintf('Could not start the %d-worker %s pool.', $workers, $name));
+
+        if (!OwnedProcess::endpointAnswers('unix://' . $socketPath, self::START_DEADLINE_SECONDS)) {
+            $this->terminate($master);
+
+            throw new RuntimeException(sprintf('The %d-worker %s pool did not start listening on "%s" in time.', $workers, $name, $socketPath));
+        }
+
+        return [$master, $socketPath, $logDir];
     }
 
     /**
@@ -738,60 +699,11 @@ final class PlatformCli
         return $process;
     }
 
-    /**
-     * SIGTERM a child, wait for it and clear the handle. False when there was
-     * nothing to release.
-     *
-     * @param resource|null $process
-     */
-    private function releaseChild(mixed &$process): bool
-    {
-        if (!is_resource($process)) {
-            return false;
-        }
-
-        $handle = $process;
-        $process = null;
-        $this->terminate($handle);
-
-        return true;
-    }
-
     /** @param resource $process */
     private function terminate(mixed $process): void
     {
         proc_terminate($process);
         proc_close($process);
-    }
-
-    private function waitForPort(string $host, int $port, float $timeoutSeconds = 10.0): bool
-    {
-        return $this->waitForEndpoint(sprintf('tcp://%s:%d', $host, $port), $timeoutSeconds);
-    }
-
-    private function waitForSocket(string $socketPath, float $timeoutSeconds = 10.0): bool
-    {
-        return $this->waitForEndpoint(sprintf('unix://%s', $socketPath), $timeoutSeconds);
-    }
-
-    /** Poll until something accepts a connection on $address, or the deadline passes. */
-    private function waitForEndpoint(string $address, float $timeoutSeconds): bool
-    {
-        $deadline = microtime(true) + $timeoutSeconds;
-
-        while (microtime(true) < $deadline) {
-            $socket = @stream_socket_client($address, $errorCode, $errorMessage, 0.2);
-
-            if ($socket !== false) {
-                fclose($socket);
-
-                return true;
-            }
-
-            usleep(100_000);
-        }
-
-        return false;
     }
 
     // ---------------------------------------------------------------------
@@ -879,7 +791,7 @@ final class PlatformCli
         $logPath = $this->queueLogPath($config);
 
         try {
-            $this->ensureDirectory($queueConfig['data_dir'], 'queue data directory');
+            OwnedProcess::mkdir($queueConfig['data_dir']);
         } catch (RuntimeException $e) {
             return $this->fail($e);
         }
@@ -919,7 +831,7 @@ final class PlatformCli
 
         try {
             $this->openDatabase($shutdown, $config['database']);
-            $this->ensureCacheServerIfEnabled($shutdown, $config['cache']);
+            $this->ensureCacheServer($shutdown, $config['cache']);
             $this->ensureWorkerPool($shutdown, $workersConfig);
 
             // Each job-queue worker is only a forwarder: it hands its job to
@@ -1048,7 +960,7 @@ final class PlatformCli
      */
     private function workerRegistry(WorkerPool $pool, string $logPath, array $workersConfig): WorkerRegistry
     {
-        $this->ensureDirectory($workersConfig['data_dir'], 'worker data directory');
+        OwnedProcess::mkdir($workersConfig['data_dir']);
 
         return new WorkerRegistry(
             pool: $pool,
@@ -1305,22 +1217,13 @@ final class PlatformCli
 
         try {
             $this->openDatabase($shutdown, $config['database']);
-            $this->ensureCacheServerIfEnabled($shutdown, $config['cache']);
-
-            $benchDir = sys_get_temp_dir() . '/php-systems-platform/bench-' . uniqid('', true);
-            $this->ensureDirectory($benchDir, 'benchmark directory');
-
-            $socketPath = sys_get_temp_dir() . '/php-bench-' . uniqid('', true) . '.sock';
+            $this->ensureCacheServer($shutdown, $config['cache']);
 
             // Thousands of jobs through a small pool: the default 5s task
             // timeout would fail jobs queued behind a burst, so the pool gets
             // the full 30s the forwarders wait.
-            $master = $this->spawnIsolatedPool($benchDir, $socketPath, $workers, 30, 'Could not start the benchmark worker pool.');
+            [$master, $socketPath, $benchDir] = $this->startIsolatedPool('bench', $workers, 30);
             $shutdown->push(fn (): null => $this->terminate($master), 'benchmark pool');
-
-            if (!$this->waitForSocket($socketPath)) {
-                throw new RuntimeException(sprintf('Benchmark pool did not start listening on "%s" in time.', $socketPath));
-            }
 
             return new QueueBenchmark(logPath: $benchDir . '/queue.log', socketPath: $socketPath, forwarders: $workers)
                 ->run($jobs, $workers);
@@ -1524,16 +1427,7 @@ final class PlatformCli
         $pool = null;
 
         try {
-            $dir = sys_get_temp_dir() . '/php-systems-platform/memdemo-' . uniqid('', true);
-            $this->ensureDirectory($dir);
-
-            $socketPath = sys_get_temp_dir() . '/php-memdemo-' . uniqid('', true) . '.sock';
-            $pool = $this->spawnIsolatedPool($dir, $socketPath, $workers, 30, sprintf('Could not start a %d-worker pool.', $workers));
-
-            if (!$this->waitForSocket($socketPath)) {
-                throw new RuntimeException(sprintf('The %d-worker pool did not start listening in time.', $workers));
-            }
-
+            [$pool, $socketPath] = $this->startIsolatedPool('memdemo', $workers, 30);
             $masterPid = (int) proc_get_status($pool)['pid'];
 
             return $benchmark->run(new ConcurrentTaskRunner(new WorkerPoolClient($socketPath, 30.0)), $workers, $elements, $masterPid);
@@ -1740,15 +1634,7 @@ final class PlatformCli
         $pool = null;
 
         try {
-            $dir = sys_get_temp_dir() . '/php-systems-platform/failuredemo-' . uniqid('', true);
-            $this->ensureDirectory($dir);
-
-            $socketPath = sys_get_temp_dir() . '/php-failuredemo-' . uniqid('', true) . '.sock';
-            $pool = $this->spawnIsolatedPool($dir, $socketPath, 2, 5, 'Could not start the demo worker pool.');
-
-            if (!$this->waitForSocket($socketPath)) {
-                throw new RuntimeException('The demo worker pool did not start listening in time.');
-            }
+            [$pool, $socketPath] = $this->startIsolatedPool('failuredemo', 2, 5);
 
             $report = new WorkerFailureInjector(new WorkerPoolClient($socketPath, 5.0))->crashOneWorker();
 
@@ -1782,10 +1668,10 @@ final class PlatformCli
 
         try {
             $this->openDatabase($shutdown, $config['database']);
-            $this->ensureCacheServerIfEnabled($shutdown, $config['cache']);
+            $this->ensureCacheServer($shutdown, $config['cache']);
 
             $dir = sys_get_temp_dir() . '/php-systems-platform';
-            $this->ensureDirectory($dir);
+            OwnedProcess::mkdir($dir);
             $logPath = $dir . '/failingjob-' . uniqid('', true) . '.log';
             $clock = new SystemClock();
 
@@ -1999,8 +1885,8 @@ final class PlatformCli
         $cacheConfig = $config['cache'];
 
         $metrics = $this->statusMetrics($config['http']);
-        $databaseRunning = $this->waitForPort((string) $databaseConfig['host'], (int) $databaseConfig['port'], 0.3);
-        $cacheRunning = $this->waitForPort((string) $cacheConfig['host'], (int) $cacheConfig['port'], 0.3);
+        $databaseRunning = OwnedProcess::portAnswers((string) $databaseConfig['host'], (int) $databaseConfig['port'], 0.3);
+        $cacheRunning = OwnedProcess::portAnswers((string) $cacheConfig['host'], (int) $cacheConfig['port'], 0.3);
         [$poolRunning, $workers] = $this->statusWorkerStats($config['workers']);
         $queue = new QueueJournal($this->queueLogPath($config))->snapshot();
 
@@ -2226,14 +2112,6 @@ final class PlatformCli
     private function binary(string $name): string
     {
         return dirname(__DIR__, 2) . '/bin/' . $name;
-    }
-
-    /** Create $dir with its parents unless it exists; $what names it in the error. */
-    private function ensureDirectory(string $dir, string $what = ''): void
-    {
-        if (!is_dir($dir) && !@mkdir($dir, 0o777, true) && !is_dir($dir)) {
-            throw new RuntimeException(sprintf('Could not create %s"%s".', $what === '' ? '' : $what . ' ', $dir));
-        }
     }
 
     private function fail(RuntimeException $e): int

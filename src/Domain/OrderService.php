@@ -100,8 +100,10 @@ final readonly class OrderService
             throw new InvalidArgumentException('customer must not be empty.');
         }
 
-        if (mb_strlen($customer) > 255) {
-            throw new InvalidArgumentException('customer must not exceed 255 characters.');
+        // Bytes, not characters: the column is VARCHAR(255) and the mini
+        // database caps it in bytes, so a longer name would fail the INSERT.
+        if (strlen($customer) > 255) {
+            throw new InvalidArgumentException('customer must not exceed 255 bytes.');
         }
 
         return $customer;

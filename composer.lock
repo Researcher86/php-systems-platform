@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "c851e601a6ad46b168ff3c0d1e44e170",
+    "content-hash": "7f61653f93a14fffe9c8a32c53d81040",
     "packages": [
         {
             "name": "brick/math",
@@ -222,7 +222,7 @@
         },
         {
             "name": "researcher86/php-job-queue",
-            "version": "dev-master",
+            "version": "v1.0.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-job-queue.git",
@@ -245,7 +245,6 @@
                 "phpstan/phpstan": "^2.2",
                 "phpunit/phpunit": "^11.5"
             },
-            "default-branch": true,
             "type": "project",
             "autoload": {
                 "psr-4": {
@@ -275,14 +274,14 @@
                 "MIT"
             ],
             "support": {
-                "source": "https://github.com/Researcher86/php-job-queue/tree/master",
+                "source": "https://github.com/Researcher86/php-job-queue/tree/v1.0.0",
                 "issues": "https://github.com/Researcher86/php-job-queue/issues"
             },
             "time": "2026-10-02T06:46:11+00:00"
         },
         {
             "name": "researcher86/php-mini-cache",
-            "version": "dev-master",
+            "version": "v1.0.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-mini-cache.git",
@@ -304,7 +303,6 @@
                 "phpstan/phpstan": "^2.2",
                 "phpunit/phpunit": "^11.5"
             },
-            "default-branch": true,
             "type": "project",
             "autoload": {
                 "psr-4": {
@@ -334,14 +332,14 @@
                 "MIT"
             ],
             "support": {
-                "source": "https://github.com/Researcher86/php-mini-cache/tree/master",
+                "source": "https://github.com/Researcher86/php-mini-cache/tree/v1.0.0",
                 "issues": "https://github.com/Researcher86/php-mini-cache/issues"
             },
             "time": "2026-10-02T14:02:48+00:00"
         },
         {
             "name": "researcher86/php-mini-database",
-            "version": "dev-master",
+            "version": "v1.0.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-mini-database.git",
@@ -369,7 +367,6 @@
                 "phpstan/phpstan-phpunit": "^2.0",
                 "phpunit/phpunit": "^11.5"
             },
-            "default-branch": true,
             "type": "project",
             "autoload": {
                 "psr-4": {
@@ -402,14 +399,14 @@
                 "MIT"
             ],
             "support": {
-                "source": "https://github.com/Researcher86/php-mini-database/tree/master",
+                "source": "https://github.com/Researcher86/php-mini-database/tree/v1.0.0",
                 "issues": "https://github.com/Researcher86/php-mini-database/issues"
             },
             "time": "2026-10-02T11:21:04+00:00"
         },
         {
             "name": "researcher86/php-mini-http-server",
-            "version": "dev-master",
+            "version": "v1.0.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-mini-http-server.git",
@@ -432,7 +429,6 @@
                 "phpstan/phpstan-phpunit": "^2.0",
                 "phpunit/phpunit": "^11.5"
             },
-            "default-branch": true,
             "type": "project",
             "autoload": {
                 "psr-4": {
@@ -462,14 +458,14 @@
                 "MIT"
             ],
             "support": {
-                "source": "https://github.com/Researcher86/php-mini-http-server/tree/master",
+                "source": "https://github.com/Researcher86/php-mini-http-server/tree/v1.0.0",
                 "issues": "https://github.com/Researcher86/php-mini-http-server/issues"
             },
             "time": "2026-10-02T06:50:25+00:00"
         },
         {
             "name": "researcher86/php-worker-pool",
-            "version": "dev-master",
+            "version": "v1.0.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-worker-pool.git",
@@ -492,7 +488,6 @@
                 "phpstan/phpstan": "^2.2",
                 "phpunit/phpunit": "^11.5"
             },
-            "default-branch": true,
             "type": "project",
             "autoload": {
                 "psr-4": {
@@ -522,7 +517,7 @@
                 "MIT"
             ],
             "support": {
-                "source": "https://github.com/Researcher86/php-worker-pool/tree/master",
+                "source": "https://github.com/Researcher86/php-worker-pool/tree/v1.0.0",
                 "issues": "https://github.com/Researcher86/php-worker-pool/issues"
             },
             "time": "2026-10-02T06:46:51+00:00"
@@ -5116,15 +5111,9 @@
         }
     ],
     "aliases": [],
-    "minimum-stability": "dev",
-    "stability-flags": {
-        "researcher86/php-job-queue": 20,
-        "researcher86/php-mini-cache": 20,
-        "researcher86/php-mini-database": 20,
-        "researcher86/php-mini-http-server": 20,
-        "researcher86/php-worker-pool": 20
-    },
-    "prefer-stable": true,
+    "minimum-stability": "stable",
+    "stability-flags": {},
+    "prefer-stable": false,
     "prefer-lowest": false,
     "platform": {
         "php": "^8.5",

@@ -46,11 +46,11 @@
         "ext-sysvsem": "*",
         "ext-sysvshm": "*",
         "ramsey/uuid": "^4.9",
-        "researcher86/php-job-queue": "dev-master",
-        "researcher86/php-mini-cache": "dev-master",
-        "researcher86/php-mini-database": "dev-master",
-        "researcher86/php-mini-http-server": "dev-master",
-        "researcher86/php-worker-pool": "dev-master"
+        "researcher86/php-job-queue": "1.0.0",
+        "researcher86/php-mini-cache": "1.0.0",
+        "researcher86/php-mini-database": "1.0.0",
+        "researcher86/php-mini-http-server": "1.0.0",
+        "researcher86/php-worker-pool": "1.0.0"
     },
     "require-dev": {
         "friendsofphp/php-cs-fixer": "^3.0",
@@ -72,7 +72,5 @@
     },
     "config": {
         "sort-packages": true
-    },
-    "minimum-stability": "dev",
-    "prefer-stable": true
+    }
 }

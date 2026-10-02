@@ -5,8 +5,12 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Benchmarks;
 
 use Closure;
+use PhpSystemsPlatform\Domain\Order;
+use PhpSystemsPlatform\Domain\OrderService;
+use PhpSystemsPlatform\Domain\OrderStatus;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Migrator;
+use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
 use PhpSystemsPlatform\Support\OwnedProcess;
 use RuntimeException;
 
@@ -188,6 +192,7 @@ final class LoadTestRunner
     private function seedCorpus(array $database): array
     {
         $db = Database::connect($database);
+        $orders = new OrderRepository($db);
         $ids = [];
         $now = gmdate('Y-m-d\TH:i:s\Z');
 
@@ -198,10 +203,7 @@ final class LoadTestRunner
 
             for ($i = 0; $i < $this->requests; $i++) {
                 $id = sprintf('load-%06d', $i);
-                $db->write(
-                    'INSERT INTO orders (id, customer, amount, product, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                    [$id, 'Load Test Customer', '19.99', 'SKU-STANDARD', 'created', $now, $now],
-                );
+                $orders->create(new Order($id, 'Load Test Customer', '19.99', OrderService::DEFAULT_PRODUCT, OrderStatus::CREATED, $now, $now));
                 $ids[] = $id;
             }
         } finally {

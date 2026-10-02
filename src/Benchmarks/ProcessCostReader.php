@@ -28,11 +28,13 @@ final class ProcessCostReader
             throw new RuntimeException('A process cost needs a real pid.');
         }
 
+        $status = $this->status->read($pid);
+
         return new ProcessCost(
             $pid,
             $this->cpuSeconds($pid),
-            $this->rss($pid, 'VmRSS'),
-            $this->rss($pid, 'VmHWM'),
+            (int) ($status['VmRSS'] ?? 0),
+            (int) ($status['VmHWM'] ?? 0),
         );
     }
 
@@ -58,12 +60,5 @@ final class ProcessCostReader
         $stime = (int) ($fields[12] ?? 0);
 
         return ($utime + $stime) / ProcessCost::CLOCK_TICKS_PER_SECOND;
-    }
-
-    private function rss(int $pid, string $field): int
-    {
-        $status = $this->status->read($pid);
-
-        return (int) ($status[$field] ?? 0);
     }
 }

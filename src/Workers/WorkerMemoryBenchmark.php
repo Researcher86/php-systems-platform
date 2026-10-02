@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Workers;
 
-use PhpSystemsPlatform\Memory\ProcStatusReader;
+use PhpSystemsPlatform\Memory\MemoryReporter;
 use PhpWorkerPool\Protocol\Request as WorkerRequest;
 use RuntimeException;
 
@@ -25,7 +25,7 @@ use RuntimeException;
 final readonly class WorkerMemoryBenchmark
 {
     public function __construct(
-        private ProcStatusReader $statusReader = new ProcStatusReader(),
+        private MemoryReporter $memory = new MemoryReporter(),
     ) {
     }
 
@@ -46,7 +46,7 @@ final readonly class WorkerMemoryBenchmark
             throw new RuntimeException(sprintf('The memory pool could not answer for %d worker(s): %s', $workers, $e->getMessage()), 0, $e);
         }
 
-        return $this->aggregate($workers, $this->safeRss($masterPid), $answers);
+        return $this->aggregate($workers, $this->memory->snapshot($masterPid)->rss, $answers);
     }
 
     /**
@@ -72,17 +72,6 @@ final readonly class WorkerMemoryBenchmark
             'total_before_rss' => self::total($parentRss, $before),
             'total_after_rss' => self::total($parentRss, $after),
         ];
-    }
-
-    private function safeRss(int $pid): ?int
-    {
-        try {
-            $fields = $this->statusReader->read($pid);
-        } catch (RuntimeException) {
-            return null;
-        }
-
-        return self::intOrNull($fields['VmRSS'] ?? null);
     }
 
     /**

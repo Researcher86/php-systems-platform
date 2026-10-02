@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Workers;
 
 use PhpSystemsPlatform\Memory\MemoryReporter;
-use PhpSystemsPlatform\Memory\MemorySnapshot;
 use PhpWorkerPool\Protocol\Request;
 use PhpWorkerPool\Protocol\Response;
 
@@ -70,22 +69,8 @@ final class WorkerMemoryTasks
             // not a scratch variable a single call could do without)
             // externally checkable rather than merely asserted by comment.
             'holds' => count($this->held),
-            'before' => self::encode($before),
-            'after' => self::encode($after),
+            'before' => get_object_vars($before),
+            'after' => get_object_vars($after),
         ]);
-    }
-
-    /**
-     * @return array{phpUsage: int, phpRealUsage: int, rss: ?int, privateMemory: ?int, sharedMemory: ?int}
-     */
-    private static function encode(MemorySnapshot $snapshot): array
-    {
-        return [
-            'phpUsage' => $snapshot->phpUsage,
-            'phpRealUsage' => $snapshot->phpRealUsage,
-            'rss' => $snapshot->rss,
-            'privateMemory' => $snapshot->privateMemory,
-            'sharedMemory' => $snapshot->sharedMemory,
-        ];
     }
 }

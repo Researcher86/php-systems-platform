@@ -61,6 +61,7 @@ use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Migrator;
 use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
+use PhpSystemsPlatform\Support\HttpProbe;
 use PhpSystemsPlatform\Support\OwnedProcess;
 use PhpSystemsPlatform\Support\ShutdownStack;
 use PhpSystemsPlatform\Workers\ConcurrentOrderLoader;
@@ -1773,13 +1774,7 @@ final class PlatformCli
             new MemoryReporter(),
         );
 
-        $lines = [];
-
-        foreach ($reporter->snapshot() as $name => $value) {
-            $lines[] = sprintf('%s %s', $name, is_float($value) ? sprintf('%.4f', $value) : $value);
-        }
-
-        echo implode(PHP_EOL, $lines) . PHP_EOL;
+        echo $reporter->toText();
 
         return 0;
     }
@@ -1872,7 +1867,8 @@ final class PlatformCli
      *   a running serve's /metrics  http/cache/db counters and the master's
      *                               RSS exist only inside serve
      *   live probes                 a TCP connect per server, one stats call
-     *                               to the pool
+     *                               to the pool (MetricsReporter's own
+     *                               aggregation, so the two always agree)
      *   the queue journal           queue.* counts, as queue:status reads them
      *
      * None failing is an error - a stopped platform is what this command is
@@ -1881,56 +1877,64 @@ final class PlatformCli
     private function statusCommand(): int
     {
         $config = $this->config();
+        $http = $config['http'];
         $databaseConfig = $config['database'];
         $cacheConfig = $config['cache'];
 
-        $metrics = $this->statusMetrics($config['http']);
+        try {
+            $serve = new HttpProbe(sprintf('http://%s:%d', $http['host'], $http['port']), 2.0)->metrics();
+        } catch (RuntimeException) {
+            $serve = null;
+        }
+
         $databaseRunning = OwnedProcess::portAnswers((string) $databaseConfig['host'], (int) $databaseConfig['port'], 0.3);
         $cacheRunning = OwnedProcess::portAnswers((string) $cacheConfig['host'], (int) $cacheConfig['port'], 0.3);
-        [$poolRunning, $workers] = $this->statusWorkerStats($config['workers']);
+        // A pool that does not answer leaves the workers.* metrics out.
+        $pool = new MetricsReporter(new MetricsRegistry(), pool: $this->poolClient($config['workers']))->snapshot();
         $queue = new QueueJournal($this->queueLogPath($config))->snapshot();
 
-        $count = fn (string $metric): string => $this->formatStatusCount($this->statusMetricInt($metrics, $metric));
+        $bytes = static fn (?array $metrics, string $name): ?int => isset($metrics[$name]) ? (int) $metrics[$name] : null;
+        $count = static fn (int|float|null $value): string => number_format((int) ($value ?? 0));
         $running = static fn (bool $up): string => $up ? 'running' : 'stopped';
 
         printf("PHP Systems Platform\n--------------------\n\n");
 
         $this->printStatusSection('HTTP Server', [
-            'status' => $running($metrics !== null),
-            'requests' => $count('http.requests'),
-            'errors' => $count('http.errors'),
+            'status' => $running($serve !== null),
+            'requests' => $count($serve['http.requests'] ?? null),
+            'errors' => $count($serve['http.errors'] ?? null),
         ]);
 
         $this->printStatusSection('Cache', [
             'status' => $running($cacheRunning),
-            'hits' => $count('cache.hit'),
-            'misses' => $count('cache.miss'),
+            'hits' => $count($serve['cache.hit'] ?? null),
+            'misses' => $count($serve['cache.miss'] ?? null),
         ]);
 
         $this->printStatusSection('Database', [
             'status' => $running($databaseRunning),
-            'operations' => $count('db.operations'),
+            'operations' => $count($serve['db.operations'] ?? null),
         ]);
 
         $this->printStatusSection('Queue', [
-            'status' => $running($poolRunning),
-            'depth' => $this->formatStatusCount($queue['depth']),
-            'processed' => $this->formatStatusCount($queue['completed']),
-            'failed' => $this->formatStatusCount($queue['failed']),
+            'status' => $running(isset($pool[MetricsRegistry::WORKERS_ACTIVE])),
+            'depth' => $count($queue['depth']),
+            'processed' => $count($queue['completed']),
+            'failed' => $count($queue['failed']),
         ]);
 
         $this->printStatusSection('Workers', [
-            'total' => $this->formatStatusCount($workers['active'] + $workers['failed']),
-            'idle' => $this->formatStatusCount($workers['idle']),
-            'busy' => $this->formatStatusCount($workers['busy']),
-            'failed' => $this->formatStatusCount($workers['failed']),
+            'total' => $count(($pool[MetricsRegistry::WORKERS_ACTIVE] ?? 0) + ($pool[MetricsRegistry::WORKERS_FAILED] ?? 0)),
+            'idle' => $count($pool[MetricsRegistry::WORKERS_IDLE] ?? null),
+            'busy' => $count($pool[MetricsRegistry::WORKERS_BUSY] ?? null),
+            'failed' => $count($pool[MetricsRegistry::WORKERS_FAILED] ?? null),
         ]);
 
         // master = the serve process's own RSS; workers = the pool average,
         // from /metrics or, without a serve, from the same stats call.
         $this->printStatusSection('Memory', [
-            'master RSS' => $this->formatMegabytes($this->statusMetricInt($metrics, 'process.rss')),
-            'workers RSS' => $this->formatMegabytes($this->statusMetricInt($metrics, 'worker.rss') ?? $workers['rss']),
+            'master RSS' => $this->formatMegabytes($bytes($serve, MetricsRegistry::PROCESS_RSS)),
+            'workers RSS' => $this->formatMegabytes($bytes($serve, MetricsRegistry::WORKER_RSS) ?? $bytes($pool, MetricsRegistry::WORKER_RSS)),
         ]);
 
         return 0;
@@ -1950,126 +1954,6 @@ final class PlatformCli
         }
 
         echo "\n";
-    }
-
-    /** Thousands separators; a counter only a stopped serve could hold reads as 0. */
-    private function formatStatusCount(?int $value): string
-    {
-        return number_format($value ?? 0);
-    }
-
-    /**
-     * @param array<string, string>|null $metrics
-     */
-    private function statusMetricInt(?array $metrics, string $name): ?int
-    {
-        return $metrics !== null && isset($metrics[$name]) ? (int) $metrics[$name] : null;
-    }
-
-    /**
-     * A running serve's GET /metrics, read with one raw HTTP request.
-     * "Connection: close" makes read-until-EOF a complete answer; everything
-     * after the blank line is the metric dump. Null when no serve answers or
-     * the answer holds no metric lines.
-     *
-     * @param array<string, mixed> $http
-     *
-     * @return array<string, string>|null metric name -> value, as printed
-     */
-    private function statusMetrics(array $http): ?array
-    {
-        $host = (string) $http['host'];
-        $socket = @stream_socket_client(sprintf('tcp://%s:%d', $host, (int) $http['port']), $errorCode, $errorMessage, 0.5);
-
-        if ($socket === false) {
-            return null;
-        }
-
-        stream_set_timeout($socket, 2);
-        fwrite($socket, sprintf("GET /metrics HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", $host));
-
-        $raw = stream_get_contents($socket);
-        fclose($socket);
-
-        if (!is_string($raw) || $raw === '') {
-            return null;
-        }
-
-        $lines = preg_split('/\R/', $raw);
-
-        if ($lines === false) {
-            return null;
-        }
-
-        $metrics = [];
-        $inBody = false;
-
-        foreach ($lines as $line) {
-            if (!$inBody) {
-                $inBody = $line === '';
-
-                continue;
-            }
-
-            $pair = explode(' ', $line, 2);
-
-            if (count($pair) === 2) {
-                $metrics[$pair[0]] = $pair[1];
-            }
-        }
-
-        return $metrics === [] ? null : $metrics;
-    }
-
-    /**
-     * The pool's live worker tally and whether a Master answered at all. The
-     * aggregation mirrors MetricsReporter's so the two agree, but it is read
-     * directly: a pool running without a serve still answers.
-     *
-     * @param array<string, mixed> $config
-     *
-     * @return array{0: bool, 1: array{active: int, busy: int, idle: int, failed: int, rss: int|null}}
-     */
-    private function statusWorkerStats(array $config): array
-    {
-        $client = $this->poolClient($config);
-
-        try {
-            $stats = $client->stats();
-        } catch (\Throwable) {
-            return [false, ['active' => 0, 'busy' => 0, 'idle' => 0, 'failed' => 0, 'rss' => null]];
-        }
-
-        $client->close();
-
-        $tally = ['active' => 0, 'busy' => 0, 'idle' => 0, 'failed' => 0];
-        $samples = [];
-
-        foreach ($stats as $worker) {
-            $state = (string) $worker['state'];
-
-            if ($state === 'DEAD') {
-                $tally['failed']++;
-
-                continue;
-            }
-
-            $tally['active']++;
-
-            if ($state === 'BUSY') {
-                $tally['busy']++;
-            } elseif ($state === 'IDLE') {
-                $tally['idle']++;
-            }
-
-            if ($worker['memoryBytes'] !== null) {
-                $samples[] = (int) $worker['memoryBytes'];
-            }
-        }
-
-        $tally['rss'] = $samples === [] ? null : (int) round(array_sum($samples) / count($samples));
-
-        return [true, $tally];
     }
 
     // ---------------------------------------------------------------------

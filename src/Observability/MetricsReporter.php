@@ -81,6 +81,22 @@ final readonly class MetricsReporter
         return $snapshot;
     }
 
+    /**
+     * The snapshot as `name value` lines, the text GET /metrics and the
+     * `metrics` CLI both answer with. The metric names are the contract;
+     * floats are fixed at four decimals.
+     */
+    public function toText(): string
+    {
+        $text = '';
+
+        foreach ($this->snapshot() as $name => $value) {
+            $text .= sprintf(is_float($value) ? "%s %.4f\n" : "%s %d\n", $name, $value);
+        }
+
+        return $text;
+    }
+
     /** @return array<string, int> */
     private function queueSnapshot(): array
     {

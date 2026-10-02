@@ -46,19 +46,6 @@ final readonly class Response
         return self::body($body, 'text/plain; charset=utf-8', $status, $headers);
     }
 
-    /**
-     * A response with no body at all - status only. No Content-Type is
-     * claimed, mirroring the component's own empty() factory.
-     *
-     * @param array<string, string> $headers
-     */
-    public static function empty(int $status = 204, array $headers = []): self
-    {
-        $headers['Content-Length'] = '0';
-
-        return new self($status, $headers, '');
-    }
-
     /** A header's value by case-insensitive name, or null when absent. */
     public function header(string $name): ?string
     {

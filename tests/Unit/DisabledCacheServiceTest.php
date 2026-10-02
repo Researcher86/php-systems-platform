@@ -48,18 +48,17 @@ final class DisabledCacheServiceTest extends TestCase
         ]);
     }
 
-    public function testTheConfigFlagIsWhatTurnsItOff(): void
-    {
-        self::assertFalse($this->service(['enabled' => false])->isEnabled());
-        self::assertTrue($this->service()->isEnabled());
-    }
-
     public function testAMissingFlagLeavesTheCacheOn(): void
     {
         // Every other config key is optional in practice; a platform built
         // from a hand-written config array that predates the switch must not
-        // come up with its cache silently disabled.
-        self::assertTrue(CacheService::fromConfig(['host' => '127.0.0.1', 'port' => 1, 'timeout' => 0.2])->isEnabled());
+        // come up with its cache silently disabled - so it reaches the
+        // (closed) port and fails, like the enabled control below.
+        $service = CacheService::fromConfig(['host' => '127.0.0.1', 'port' => 1, 'timeout' => 0.2]);
+
+        $this->expectException(CacheClientException::class);
+
+        $service->getOrder('any-order-id');
     }
 
     public function testADisabledLookupIsAMissWithoutTouchingTheCache(): void

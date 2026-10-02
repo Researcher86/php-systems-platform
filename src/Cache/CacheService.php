@@ -55,11 +55,6 @@ final readonly class CacheService
         );
     }
 
-    public function isEnabled(): bool
-    {
-        return $this->enabled;
-    }
-
     public function counters(): CacheCounters
     {
         return $this->counters;

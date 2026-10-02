@@ -189,9 +189,8 @@ final class TraceTest extends TestCase
         $trace->record('http.request', 0.01);
         $trace->finishRequest();
 
-        self::assertNull($trace->spansForRequest('req-030405060708090a'));
-        self::assertCount(1, $trace->spansForRequest('req-0405060708090a0b'));
-        // A request this process never saw is also null, not an empty list.
-        self::assertNull($trace->spansForRequest('req-05060708090a0b0c'));
+        self::assertSame([], $trace->spans('req-030405060708090a'));
+        self::assertCount(1, $trace->readLog('req-030405060708090a'));
+        self::assertCount(1, $trace->spans('req-0405060708090a0b'));
     }
 }

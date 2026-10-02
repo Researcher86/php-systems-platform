@@ -34,10 +34,9 @@ final class MemoryReporterTest extends TestCase
         $hold = array_fill(0, 1_000_000, 0);
 
         $after = $reporter->snapshot();
-        $diff = $reporter->diff($before, $after);
 
-        self::assertGreaterThan(0, $diff->phpUsage);
-        self::assertGreaterThan(0, $diff->rss);
+        self::assertGreaterThan($before->phpUsage, $after->phpUsage);
+        self::assertGreaterThan($before->rss, $after->rss);
 
         unset($hold);
     }

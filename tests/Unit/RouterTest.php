@@ -49,7 +49,7 @@ final class RouterTest extends TestCase
     public function testUnknownPathThrowsRouteNotFound(): void
     {
         $router = new Router();
-        $router->get('/health', static fn (Request $request, array $params): Response => Response::empty());
+        $router->get('/health', static fn (Request $request, array $params): Response => Response::text(''));
 
         $this->expectException(RouteNotFoundException::class);
 
@@ -59,8 +59,8 @@ final class RouterTest extends TestCase
     public function testKnownPathWrongMethodThrowsMethodNotAllowed(): void
     {
         $router = new Router();
-        $router->get('/orders', static fn (Request $request, array $params): Response => Response::empty());
-        $router->post('/orders', static fn (Request $request, array $params): Response => Response::empty());
+        $router->get('/orders', static fn (Request $request, array $params): Response => Response::text(''));
+        $router->post('/orders', static fn (Request $request, array $params): Response => Response::text(''));
 
         try {
             $router->dispatch(new Request(RequestMethod::DELETE, '/orders'));
@@ -78,15 +78,6 @@ final class RouterTest extends TestCase
         $response = $router->dispatch(new Request(RequestMethod::HEAD, '/health'));
 
         self::assertSame('up', $response->body);
-    }
-
-    public function testCount(): void
-    {
-        $router = new Router();
-        $router->get('/a', static fn (Request $request, array $params): Response => Response::empty());
-        $router->post('/b/{id}', static fn (Request $request, array $params): Response => Response::empty());
-
-        self::assertSame(2, $router->count());
     }
 
     public function testBodyAndHeadersReachTheHandler(): void

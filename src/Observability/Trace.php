@@ -137,21 +137,6 @@ final class Trace
     }
 
     /**
-     * Spans still in memory for one request, or null when there are none -
-     * null rather than [] because "never seen here" and "aged out of the
-     * window" look the same from memory, and the answer to both is "ask the
-     * journal", not "the trace is empty".
-     *
-     * @return list<array<string, mixed>>|null
-     */
-    public function spansForRequest(string $requestId): ?array
-    {
-        $spans = $this->spans($requestId);
-
-        return $spans === [] ? null : $spans;
-    }
-
-    /**
      * Read the full chain for one request back from the journal: the serve
      * process's request and database spans plus every worker's job.execute
      * span under the same request_id, no matter which process recorded

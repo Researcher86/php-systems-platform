@@ -35,17 +35,4 @@ final readonly class ProcessCost
     {
         return round(max(0.0, $this->cpuSeconds - $before->cpuSeconds), 3);
     }
-
-    /**
-     * @return array<string, mixed>
-     */
-    public function toArray(): array
-    {
-        return [
-            'pid' => $this->pid,
-            'cpu_seconds_total' => round($this->cpuSeconds, 3),
-            'rss_bytes' => $this->rssBytes,
-            'peak_rss_bytes' => $this->peakRssBytes,
-        ];
-    }
 }

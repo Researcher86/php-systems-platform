@@ -120,14 +120,4 @@ final class ShutdownStackTest extends TestCase
         $stack->push(static function (): void {
         }, 'too late');
     }
-
-    public function testReportsWhetherItHasRun(): void
-    {
-        $stack = new ShutdownStack('test');
-        self::assertFalse($stack->ran());
-
-        $stack->run();
-
-        self::assertTrue($stack->ran());
-    }
 }

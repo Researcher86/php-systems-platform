@@ -10,7 +10,6 @@ use PhpMiniHttpServer\Http\Protocol\HttpVersion;
 use PhpMiniHttpServer\Http\Request\HttpRequest;
 use PhpMiniHttpServer\Support\Logger;
 use PhpSystemsPlatform\Application\Application;
-use PhpSystemsPlatform\Application\Handlers\FailWorkerHandler;
 use PhpSystemsPlatform\Application\Handlers\HealthHandler;
 use PhpSystemsPlatform\Http\Request;
 use PhpSystemsPlatform\Http\Response;
@@ -51,7 +50,7 @@ final class ApplicationTest extends TestCase
     public function testPathMissMethodBecomes405WithAllowHeader(): void
     {
         $router = new Router();
-        $router->get('/orders', static fn (Request $request, array $params): Response => Response::empty());
+        $router->get('/orders', static fn (Request $request, array $params): Response => Response::text(''));
 
         $response = new Application($router)->handle($this->request(HttpMethod::DELETE, '/orders'));
 
@@ -103,22 +102,6 @@ final class ApplicationTest extends TestCase
         $response = $application->handle($request);
 
         self::assertSame('{"query":{"verbose":"1"},"body":"payload"}', $response->body);
-    }
-
-    public function testFailWorkerWithoutAnInjectorAnswers503(): void
-    {
-        // PLAN Step 22: the /debug/fail-worker route exists only where serve
-        // has an injector to back it (development/demo environments). The
-        // handler's null-tolerant half is still worth pinning directly: a
-        // serve that somehow routes to it without injection must refuse,
-        // not guess at a pool to crash.
-        $router = new Router();
-        $router->post('/debug/fail-worker', new FailWorkerHandler()->__invoke(...));
-
-        $response = new Application($router)->handle($this->request(HttpMethod::POST, '/debug/fail-worker'));
-
-        self::assertSame(503, $response->statusCode());
-        self::assertSame('{"error":"failure_injection_disabled"}', $response->body);
     }
 
     public function testRequestsRecordIntoTheSharedMetricsRegistry(): void

@@ -97,13 +97,12 @@ final class ProcessCostReaderTest extends TestCase
         $this->reader->read(0);
     }
 
-    public function testTheArrayFormNamesBothMemoryNumbers(): void
+    public function testReadsBothMemoryNumbersForTheGivenPid(): void
     {
-        $cost = $this->reader->read(getmypid())->toArray();
+        $cost = $this->reader->read(getmypid());
 
-        self::assertSame(getmypid(), $cost['pid']);
-        self::assertArrayHasKey('cpu_seconds_total', $cost);
-        self::assertArrayHasKey('rss_bytes', $cost);
-        self::assertArrayHasKey('peak_rss_bytes', $cost);
+        self::assertSame(getmypid(), $cost->pid);
+        self::assertGreaterThan(0, $cost->rssBytes);
+        self::assertGreaterThanOrEqual($cost->rssBytes, $cost->peakRssBytes);
     }
 }

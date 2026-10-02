@@ -546,8 +546,7 @@ needs instead of the lab's whole measurement stack.
   reader.
 - `Memory\MemoryReporter` — `snapshot()` joins `memory_get_usage()` /
   `memory_get_usage(true)` (the PHP view) with `VmRSS`/`RssAnon`/`RssShmem`
-  (the OS view); `diff()` turns two snapshots into signed deltas. A failed
-  `/proc` read degrades OS fields to `null` rather than throwing.
+  (the OS view). A failed `/proc` read degrades OS fields to `null` rather than throwing.
 - `Memory\ForkedMemoryDemo` — the demo itself: allocates an array, then the
   same fork + `socketpair()` + `pcntl_waitpid()` idiom as
   `Workers\ForkedOrderLoader` (Step 14), except one child reporting two

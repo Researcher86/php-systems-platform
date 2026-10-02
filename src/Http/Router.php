@@ -83,21 +83,6 @@ final class Router
         throw new RouteNotFoundException(sprintf('No route for %s %s', $request->method->value, $path));
     }
 
-    public function count(): int
-    {
-        $total = 0;
-
-        foreach ($this->exact as $byMethod) {
-            $total += count($byMethod);
-        }
-
-        foreach ($this->patterns as $byMethod) {
-            $total += count($byMethod);
-        }
-
-        return $total;
-    }
-
     private function serves(string $token, string $path): bool
     {
         return isset($this->exact[$token][$path]) || $this->matchPattern($token, $path) !== null;

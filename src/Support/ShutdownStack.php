@@ -73,9 +73,4 @@ final class ShutdownStack
             }
         }
     }
-
-    public function ran(): bool
-    {
-        return $this->ran;
-    }
 }

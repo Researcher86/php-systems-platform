@@ -8,7 +8,7 @@ use RuntimeException;
 
 /**
  * Takes MemorySnapshots (PHP allocator counters plus the kernel's view of
- * resident pages) and diffs them. A failed /proc read leaves the OS fields
+ * resident pages). A failed /proc read leaves the OS fields
  * null instead of throwing, so the PHP half still works off Linux.
  */
 final readonly class MemoryReporter
@@ -31,17 +31,6 @@ final readonly class MemoryReporter
         );
     }
 
-    public function diff(MemorySnapshot $before, MemorySnapshot $after): MemoryDiff
-    {
-        return new MemoryDiff(
-            phpUsage: $after->phpUsage - $before->phpUsage,
-            phpRealUsage: $after->phpRealUsage - $before->phpRealUsage,
-            rss: self::nullableDelta($before->rss, $after->rss),
-            privateMemory: self::nullableDelta($before->privateMemory, $after->privateMemory),
-            sharedMemory: self::nullableDelta($before->sharedMemory, $after->sharedMemory),
-        );
-    }
-
     /**
      * @return array<string, int|string>|null
      */
@@ -57,14 +46,5 @@ final readonly class MemoryReporter
     private static function intOrNull(int|string|null $value): ?int
     {
         return $value === null ? null : (int) $value;
-    }
-
-    private static function nullableDelta(?int $before, ?int $after): ?int
-    {
-        if ($before === null || $after === null) {
-            return null;
-        }
-
-        return $after - $before;
     }
 }

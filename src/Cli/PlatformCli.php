@@ -917,31 +917,24 @@ final class PlatformCli
 
     /**
      * After the drain, every journal row must be terminal (COMPLETED/FAILED)
-     * or recoverable by a restart (READY/PROCESSING/DELAYED). The journal is
-     * append-only, so anything else means the platform stopped tracking a
-     * job - reported, and turned into the exit code.
+     * or recoverable by a restart (anything else: restoreFromStorage()
+     * admits every non-terminal row again). The journal is append-only, so a
+     * row in neither bucket means the platform stopped tracking a job -
+     * reported, and turned into the exit code. The buckets are QueueJournal's
+     * own, so this check and queue:status can never disagree about a state
+     * (a hand-written state list here once called a CREATED row "lost").
      */
     private function verifyNoJobLost(string $logPath): bool
     {
-        $rows = new QueueJournal($logPath)->rows();
-
-        $terminal = 0;
-        $recoverable = 0;
-        $lost = 0;
-
-        foreach ($rows as $row) {
-            match ($row['state']) {
-                'COMPLETED', 'FAILED' => $terminal++,
-                'READY', 'PROCESSING', 'DELAYED' => $recoverable++,
-                default => $lost++,
-            };
-        }
+        $snapshot = new QueueJournal($logPath)->snapshot();
+        $terminal = $snapshot['completed'] + $snapshot['failed'];
+        $lost = $snapshot['published'] - $terminal - $snapshot['depth'];
 
         printf(
             "  shutdown verification: journal rows=%d terminal=%d recoverable=%d lost=%d\n",
-            count($rows),
+            $snapshot['published'],
             $terminal,
-            $recoverable,
+            $snapshot['depth'],
             $lost,
         );
 

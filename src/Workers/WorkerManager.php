@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Workers;
 
+use Closure;
 use PhpJobQueue\Job\Job;
 use PhpWorkerPool\Protocol\Request;
 use PhpWorkerPool\Sdk\ServerErrorException;
@@ -29,6 +30,27 @@ final readonly class WorkerManager
     public function __construct(
         private WorkerPoolClient $client,
     ) {
+    }
+
+    /**
+     * The php-job-queue WorkerPool handler that turns each of its forked
+     * workers into a forwarder: hand the job to the pool, wait for the
+     * verdict. The client is built lazily inside the handler, so every
+     * forked forwarder dials its own connection instead of inheriting the
+     * parent's socket.
+     *
+     * @return Closure(Job): null
+     */
+    public static function forwarder(string $socketPath, float $timeoutSeconds): Closure
+    {
+        $manager = null;
+
+        return static function (Job $job) use (&$manager, $socketPath, $timeoutSeconds): mixed {
+            $manager ??= new self(new WorkerPoolClient($socketPath, $timeoutSeconds));
+            $manager->execute($job);
+
+            return null;
+        };
     }
 
     public function execute(Job $job): void

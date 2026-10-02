@@ -5,17 +5,10 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Experiments;
 
 use Closure;
-use PhpJobQueue\Metrics\MetricsCollector;
-use PhpJobQueue\Persistence\FileStorage;
-use PhpJobQueue\Producer\JobFactory;
-use PhpJobQueue\Producer\Producer;
-use PhpJobQueue\Queue\InMemoryQueue;
-use PhpJobQueue\Support\SystemClock;
+use PhpSystemsPlatform\Queue\Jobs\DemoSlowJob;
+use PhpSystemsPlatform\Queue\JournalOnlyQueue;
 use PhpSystemsPlatform\Support\HttpProbe;
 use PhpSystemsPlatform\Support\OwnedProcess;
-use PhpWorkerPool\IPC\ConnectionClosedException;
-use PhpWorkerPool\Sdk\ConnectionFailedException;
-use PhpWorkerPool\Sdk\ServerErrorException;
 use PhpWorkerPool\Sdk\WorkerPoolClient;
 use RuntimeException;
 
@@ -392,14 +385,10 @@ final class FailureExperiments
 
     private function publishSlowJobs(int $count, float $seconds): void
     {
-        $clock = new SystemClock();
-        $producer = new Producer(
-            new InMemoryQueue($clock, new FileStorage($this->queueLog)),
-            new JobFactory($clock, new MetricsCollector()),
-        );
+        $producer = JournalOnlyQueue::producer($this->queueLog);
 
         for ($i = 0; $i < $count; $i++) {
-            $producer->dispatch('demo.slow', ['seconds' => $seconds], maxAttempts: 1);
+            $producer->dispatch(DemoSlowJob::TYPE, ['seconds' => $seconds], maxAttempts: 1);
         }
     }
 
@@ -416,7 +405,9 @@ final class FailureExperiments
     {
         try {
             $stats = new WorkerPoolClient((string) $this->config['workers']['socket'], 3.0)->stats();
-        } catch (ConnectionFailedException | ConnectionClosedException | ServerErrorException) {
+        } catch (RuntimeException) {
+            // Any pool-client failure (refused, dropped, error, timed out):
+            // a pool busy replacing a worker may not answer in time.
             return [];
         }
 

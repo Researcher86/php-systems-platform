@@ -393,15 +393,9 @@ final class PlatformCli
      */
     private function producer(array $queueConfig): Producer
     {
-        $dataDir = $queueConfig['data_dir'];
-        OwnedProcess::mkdir($dataDir);
+        OwnedProcess::mkdir($queueConfig['data_dir']);
 
-        $clock = new SystemClock();
-
-        return new Producer(
-            new JournalOnlyQueue(new FileStorage($dataDir . '/queue.log'), $clock),
-            new JobFactory($clock, new MetricsCollector()),
-        );
+        return JournalOnlyQueue::producer($queueConfig['data_dir'] . '/queue.log');
     }
 
     // ---------------------------------------------------------------------
@@ -835,21 +829,11 @@ final class PlatformCli
             $this->ensureCacheServer($shutdown, $config['cache']);
             $this->ensureWorkerPool($shutdown, $workersConfig);
 
-            // Each job-queue worker is only a forwarder: it hands its job to
-            // the pool as a job.execute task and waits for the verdict. The
-            // client is built lazily inside the handler so every forked
-            // forwarder dials its own connection instead of inheriting the
-            // parent's socket.
+            // Each job-queue worker is only a forwarder to the pool.
             $metrics = new MetricsCollector();
-            $workerManager = null;
             $pool = new WorkerPool(
                 size: (int) $queueConfig['consumers'],
-                handler: function (Job $job) use (&$workerManager, $workersConfig): mixed {
-                    $workerManager ??= new WorkerManager($this->poolClient($workersConfig));
-                    $workerManager->execute($job);
-
-                    return null;
-                },
+                handler: WorkerManager::forwarder((string) $workersConfig['socket'], (float) $workersConfig['task_timeout']),
                 metrics: $metrics,
             );
             $dispatcher = new JobDispatcher(
@@ -1669,10 +1653,8 @@ final class PlatformCli
             $logPath = $dir . '/failingjob-' . uniqid('', true) . '.log';
             $clock = new SystemClock();
 
-            $job = new Producer(
-                new InMemoryQueue($clock, new FileStorage($logPath)),
-                new JobFactory($clock, new MetricsCollector()),
-            )->dispatch(FailingJob::TYPE, [], maxAttempts: (int) $config['queue']['max_attempts']);
+            $job = JournalOnlyQueue::producer($logPath, $clock)
+                ->dispatch(FailingJob::TYPE, [], maxAttempts: (int) $config['queue']['max_attempts']);
             $jobId = (string) $job->getId();
 
             $executor = new JobExecutor($config['database'], $config['cache']);

@@ -8,17 +8,15 @@ use PhpJobQueue\Dispatcher\JobDispatcher;
 use PhpJobQueue\Job\Job;
 use PhpJobQueue\Metrics\MetricsCollector;
 use PhpJobQueue\Persistence\FileStorage;
-use PhpJobQueue\Producer\JobFactory;
-use PhpJobQueue\Producer\Producer;
 use PhpJobQueue\Queue\InMemoryQueue;
 use PhpJobQueue\Retry\FixedDelayRetry;
 use PhpJobQueue\Support\Clock;
 use PhpJobQueue\Support\SystemClock;
 use PhpJobQueue\Worker\WorkerPool;
 use PhpSystemsPlatform\Queue\Jobs\NoopJob;
+use PhpSystemsPlatform\Queue\JournalOnlyQueue;
 use PhpSystemsPlatform\Queue\QueueConsumer;
 use PhpSystemsPlatform\Queue\QueueJournal;
-use PhpWorkerPool\Sdk\WorkerPoolClient;
 use RuntimeException;
 
 /**
@@ -127,10 +125,7 @@ final class QueueBenchmark
     private function publish(int $jobs): array
     {
         $publishedAt = [];
-        $producer = new Producer(
-            new InMemoryQueue($this->clock, new FileStorage($this->logPath)),
-            new JobFactory($this->clock, new MetricsCollector()),
-        );
+        $producer = JournalOnlyQueue::producer($this->logPath, $this->clock);
 
         for ($i = 0; $i < $jobs; $i++) {
             $job = $producer->dispatch(
@@ -155,17 +150,7 @@ final class QueueBenchmark
     {
         $queue = InMemoryQueue::restoreFromStorage(new FileStorage($this->logPath), $this->clock);
 
-        $workerManager = null;
-        $pool = new WorkerPool(
-            size: $this->forwarders,
-            handler: function (Job $job) use (&$workerManager): mixed {
-                $workerManager ??= new WorkerManager(new WorkerPoolClient($this->socketPath, 30.0));
-
-                $workerManager->execute($job);
-
-                return null;
-            },
-        );
+        $pool = new WorkerPool(size: $this->forwarders, handler: WorkerManager::forwarder($this->socketPath, 30.0));
 
         $this->registry = new WorkerRegistry($pool, new QueueJournal($this->logPath));
         $dispatcher = new JobDispatcher(

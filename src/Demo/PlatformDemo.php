@@ -4,13 +4,8 @@ declare(strict_types=1);
 
 namespace PhpSystemsPlatform\Demo;
 
-use PhpJobQueue\Metrics\MetricsCollector;
-use PhpJobQueue\Persistence\FileStorage;
-use PhpJobQueue\Producer\JobFactory;
-use PhpJobQueue\Producer\Producer;
-use PhpJobQueue\Queue\InMemoryQueue;
-use PhpJobQueue\Support\SystemClock;
 use PhpSystemsPlatform\Queue\Jobs\FailingJob;
+use PhpSystemsPlatform\Queue\JournalOnlyQueue;
 use PhpSystemsPlatform\Queue\QueueJournal;
 use PhpSystemsPlatform\Support\HttpProbe;
 use PhpSystemsPlatform\Support\OwnedProcess;
@@ -353,11 +348,8 @@ final class PlatformDemo
     {
         printf("Retrying failed jobs...\n");
 
-        $clock = new SystemClock();
-        $job = new Producer(
-            new InMemoryQueue($clock, new FileStorage($this->queueLog)),
-            new JobFactory($clock, new MetricsCollector()),
-        )->dispatch(FailingJob::TYPE, [], maxAttempts: (int) $this->config['queue']['max_attempts']);
+        $job = JournalOnlyQueue::producer($this->queueLog)
+            ->dispatch(FailingJob::TYPE, [], maxAttempts: (int) $this->config['queue']['max_attempts']);
 
         printf("  published demo.failing (%s, max %d attempts)\n", $job->getId(), $job->getMaxAttempts());
 

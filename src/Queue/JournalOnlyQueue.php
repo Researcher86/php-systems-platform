@@ -6,7 +6,11 @@ namespace PhpSystemsPlatform\Queue;
 
 use PhpJobQueue\Job\Job;
 use PhpJobQueue\Job\JobState;
+use PhpJobQueue\Metrics\MetricsCollector;
+use PhpJobQueue\Persistence\FileStorage;
 use PhpJobQueue\Persistence\JobStorage;
+use PhpJobQueue\Producer\JobFactory;
+use PhpJobQueue\Producer\Producer;
 use PhpJobQueue\Queue\Queue;
 use PhpJobQueue\Support\Clock;
 use PhpJobQueue\Support\SystemClock;
@@ -30,6 +34,15 @@ final readonly class JournalOnlyQueue implements Queue
         private JobStorage $storage,
         private Clock $clock = new SystemClock(),
     ) {
+    }
+
+    /**
+     * The component's Producer in front of this queue: what every process
+     * that only publishes (serve, queue:publish, the demos) dispatches with.
+     */
+    public static function producer(string $logPath, Clock $clock = new SystemClock()): Producer
+    {
+        return new Producer(new self(new FileStorage($logPath), $clock), new JobFactory($clock, new MetricsCollector()));
     }
 
     /**

@@ -286,12 +286,12 @@
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-mini-cache.git",
-                "reference": "155237e9e7a4e5a0e2cc685d8b16415213b08276"
+                "reference": "c916a2831bbefc188c7ac83eb2e96d7c772c8e2b"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-mini-cache/zipball/155237e9e7a4e5a0e2cc685d8b16415213b08276",
-                "reference": "155237e9e7a4e5a0e2cc685d8b16415213b08276",
+                "url": "https://api.github.com/repos/Researcher86/php-mini-cache/zipball/c916a2831bbefc188c7ac83eb2e96d7c772c8e2b",
+                "reference": "c916a2831bbefc188c7ac83eb2e96d7c772c8e2b",
                 "shasum": ""
             },
             "require": {
@@ -337,7 +337,7 @@
                 "source": "https://github.com/Researcher86/php-mini-cache/tree/master",
                 "issues": "https://github.com/Researcher86/php-mini-cache/issues"
             },
-            "time": "2026-10-02T06:46:11+00:00"
+            "time": "2026-10-02T14:02:48+00:00"
         },
         {
             "name": "researcher86/php-mini-database",

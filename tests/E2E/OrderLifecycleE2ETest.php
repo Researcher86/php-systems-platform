@@ -191,7 +191,7 @@ final class OrderLifecycleE2ETest extends TestCase
     private function poolHandledRequests(): int
     {
         return array_sum(array_map(
-            static fn (array $row): int => (int) ($row['handledRequests'] ?? 0),
+            static fn (array $row): int => $row['handledRequests'],
             self::$stack->pool()->stats(),
         ));
     }

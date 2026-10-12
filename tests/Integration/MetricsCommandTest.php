@@ -23,8 +23,6 @@ use PHPUnit\Framework\TestCase;
  */
 final class MetricsCommandTest extends TestCase
 {
-    private const QUEUE_LOG = '/tmp/php-systems-platform/queue/queue.log';
-
     public function testPrintsTheStandardSnapshotFromTheJournalAndRss(): void
     {
         $this->prepareJournal(2);
@@ -43,11 +41,11 @@ final class MetricsCommandTest extends TestCase
         fclose($pipes[2]);
         $code = proc_close($process);
 
-        @unlink(self::QUEUE_LOG);
+        @unlink(self::queueLog());
 
         self::assertSame(0, $code, $errors . $output);
 
-        $lines = array_values(array_filter(preg_split('/\R/', trim((string) $output))));
+        $lines = array_values(array_filter(preg_split('/\R/', trim((string) $output)) ?: []));
         self::assertNotSame([], $lines);
 
         $metrics = [];
@@ -77,22 +75,30 @@ final class MetricsCommandTest extends TestCase
 
     private function prepareJournal(int $count): void
     {
-        $dir = dirname(self::QUEUE_LOG);
+        $dir = dirname(self::queueLog());
 
         if (!is_dir($dir) && !@mkdir($dir, 0o777, true) && !is_dir($dir)) {
             self::fail('Could not create the queue data dir for the metrics test.');
         }
 
-        @unlink(self::QUEUE_LOG);
+        @unlink(self::queueLog());
 
         $clock = new SystemClock();
         $producer = new Producer(
-            new InMemoryQueue($clock, new FileStorage(self::QUEUE_LOG)),
+            new InMemoryQueue($clock, new FileStorage(self::queueLog())),
             new JobFactory($clock, new MetricsCollector()),
         );
 
         for ($i = 0; $i < $count; $i++) {
             $producer->dispatch(NoopJob::TYPE);
         }
+    }
+
+    /** Where the platform's own config puts it, so TMPDIR moves it for both sides. */
+    private static function queueLog(): string
+    {
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+
+        return (string) $config['queue']['data_dir'] . '/queue.log';
     }
 }

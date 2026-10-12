@@ -5,8 +5,8 @@ uses it. It is written once, from the installed sources under `vendor/researcher
 so every later phase wires its adapter against a known contract instead of
 re-reading the components' internals each time.
 
-All five are Composer `vcs` dependencies on `https://github.com/Researcher86`
-at `dev-master`. The components stay the owners of their mechanics; the
+All five are Composer `vcs` dependencies on `https://github.com/Researcher86`,
+pinned to `1.0.0` (the `v1.0.0` tags). The components stay the owners of their mechanics; the
 platform only ever calls the entry points listed here.
 
 ## Common defaults
@@ -17,10 +17,11 @@ platform only ever calls the entry points listed here.
 | php-mini-database             | `bin/minidb.php start` (platform entry) | `127.0.0.1:5433`   |
 | php-mini-cache                | `bin/cache.php` (platform entry)      | `127.0.0.1:6380`    |
 | php-job-queue                 | none (in-process)                 | -                   |
-| php-worker-pool               | `bin/worker.php` (platform entry)     | `/tmp/php-worker-pool.sock` |
+| php-worker-pool               | `bin/worker.php` (platform entry)     | `sys_get_temp_dir()/php-worker-pool.sock` |
 
-`config/platform.php` mirrors these addresses; wherever a value differs from
-what a component defaults to, the component's own default wins.
+`config/platform.php` is where the platform's addresses come from - every
+process reads them from there - and each can be overridden from the
+environment: `HTTP_PORT`, `DATABASE_PORT`, `CACHE_PORT`, `WORKER_POOL_SOCKET`.
 
 ## php-mini-http-server
 
@@ -67,13 +68,19 @@ interface RequestHandler {
 Namespace `PhpMiniDatabase`. Client side only — the server is started as a
 process and talked to over TCP.
 
-The component's own `bin/minidb-server` boots with
-`require __DIR__.'/../vendor/autoload.php'`, which only resolves while the
-component *is* the root project; as a Composer dependency the path points at
-the component's own vendor directory and does not exist. The platform runs
-the server through its own one-file entry `bin/minidb.php`, which loads the
-platform autoloader and calls `PhpMiniDatabase\Cli\ServerApplication` with the
-same arguments the component's bin script would receive.
+The platform runs the server through its own one-file entry `bin/minidb.php`,
+which loads the platform autoloader and calls
+`PhpMiniDatabase\Cli\ServerApplication` with the same arguments the
+component's `bin/minidb-server` would receive. The entry was written when the
+component's bin script did `require __DIR__.'/../vendor/autoload.php'`, which
+only resolved while the component was the root project. That is fixed
+upstream and shipped in `v1.0.0`: the component's `bin/bootstrap.php` walks up
+from its own directory to the first `vendor/autoload.php`, so
+`vendor/researcher86/php-mini-database/bin/minidb-server` now works from an
+installed dependency too. `bin/minidb.php` is kept anyway - it is one stable
+path inside the platform for `serve`, the demo and the experiments to spawn
+(the component declares no Composer `bin`, so nothing lands in `vendor/bin`) -
+and it runs exactly the same `ServerApplication`.
 
 `PlatformCli::serve()` owns the server process: it spawns it daemonized
 (`start --host --port --data --daemon --pid-file --log-file`), waits for the
@@ -117,15 +124,19 @@ $connection = $pool->acquire();   // throws past maxConnections; reconnects dead
 $pool->release($connection);
 ```
 
-Methods the platform uses:
+Methods the platform calls (all through `Storage\Database`):
 
-- `query(string $sql, array $parameters = []): ResultSet`
-- `execute(string $sql, array $parameters = []): ?int` — affected rows
-- `prepare($sql): Statement` (+ `execute([...])`, `close()`)
-- `beginTransaction(?IsolationLevel)/commit()/rollback()/savepoint($name)`
-- `showStatus(): ResultSet`, `showConnections(): ResultSet`, `isAlive()`
-- `ResultSet`: `fetch(): ?array`, `fetchAll()`, iteration, `count()`,
-  `affectedRows(): ?int`
+- `ConnectionPool`: `acquire()`, `release($connection)`, `close()`
+- `Connection::query(string $sql, array $parameters = []): ResultSet` - every
+  read and every write goes through it
+- `ResultSet`: `fetchAll()` for reads, `affectedRows(): ?int` for writes
+
+The component offers more that the platform does not call:
+`Connection::execute()`, `prepare($sql): Statement`,
+`beginTransaction()/commit()/rollback()/savepoint()`, `showStatus()`,
+`showConnections()`, `isAlive()`, `ResultSet::fetch()`. In particular the
+platform has no transactions - see `failure-handling.md` for what that
+costs.
 
 Placeholders in `query()` are positional (`$parameters` is `list<mixed>`).
 
@@ -133,13 +144,13 @@ Placeholders in `query()` are positional (`$parameters` is `list<mixed>`).
 
 Namespace `PhpMiniCache`. Client side only (RESP over TCP).
 
-The component's own `bin/server.php` has the same `require
-__DIR__.'/../vendor/autoload.php'` flaw as the database's — it only resolves
-while the component *is* the root project. The platform runs the server
-through its own one-file entry `bin/cache.php`, which boots the platform
-autoloader and runs `PhpMiniCache\Server\CacheServer` with the component's
-own environment contract (`CACHE_HOST`, `CACHE_PORT`, plus a `CACHE_SNAPSHOT`
-path that enables persistence).
+The platform runs the server through its own one-file entry `bin/cache.php`,
+which boots the platform autoloader and runs `PhpMiniCache\Server\CacheServer`
+with the component's own environment contract (`CACHE_HOST`, `CACHE_PORT`,
+plus a `CACHE_SNAPSHOT` path that enables persistence). The component's own
+`bin/server.php` resolves the autoloader from an installed dependency since
+`v1.0.0` (its `bin/bootstrap.php`), but it has no snapshot option, which is
+why the platform keeps its own entry.
 
 The cache component has **no daemon mode**: its server is a foreground
 process. `PlatformCli::serve()` therefore owns the cache as a direct child —
@@ -376,9 +387,11 @@ use PhpWorkerPool\Protocol\Request;
 use PhpWorkerPool\Protocol\Response;
 use PhpWorkerPool\Sdk\WorkerPoolClient;
 
+$socket = $config['workers']['socket'];   // sys_get_temp_dir() . '/php-worker-pool.sock'
+
 // server side
 $master = new Master(
-    socketPath: '/tmp/php-worker-pool.sock',
+    socketPath: $socket,
     minWorkers: 2, maxWorkers: 16, maxQueueSize: 10_000,
     requestTimeoutSeconds: 30.0,
     handler: static fn (Request $request): Response => match ($request->action) {
@@ -390,7 +403,7 @@ $master = new Master(
 $master->run();   // SIGTERM/SIGINT/SIGCHLD/SIGHUP/SIGUSR1 handled internally
 
 // client side
-$client = new WorkerPoolClient('/tmp/php-worker-pool.sock', timeoutSeconds: 5.0);
+$client = new WorkerPoolClient($socket, timeoutSeconds: 5.0);
 $result = $client->call(new Request('calculate', ['a' => 10, 'b' => 20]));
 
 // parallel fan-out: several sends, awaited together (workers run concurrently)
@@ -949,10 +962,12 @@ by a live fact rather than a canned script:
   and probes each component the way `status` does: `GET /health`, the
   database/cache TCP ports, `GET /queue/status`, and the pool's `stats()`.
   One env override is set before the serve child starts —
-  `WORKER_POOL_MIN` to the platform's declared `workers.count` — because the
-  pool Master autoscales from its own floor of two otherwise, and the story
-  wants a real pool of the exact size config declares. (The pool's floor
-  and ceiling were already the Master's own env knobs, `bin/worker.php`.)
+  `WORKER_POOL_MIN` to the platform's `workers.demo_workers` (4) — because the
+  pool Master autoscales from `workers.min_workers` (2) otherwise, and the
+  story wants a real pool of a fixed, known size. `demo_workers` is only the
+  demo's pinned size and the load test's baseline; the pool `serve` runs
+  autoscales between `workers.min_workers` and `workers.max_workers` (2..16),
+  which `config/platform.php` reads from `WORKER_POOL_MIN`/`WORKER_POOL_MAX`.
 - **Orders** — 100 real `POST /orders` over HTTP, each one the platform's
   full write path: database insert plus an `order.created` job appended to
   the durable journal. `Published 100 jobs` is read back from the journal.

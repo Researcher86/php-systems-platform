@@ -158,6 +158,7 @@ final class ApplicationTest extends TestCase
         self::assertMatchesRegularExpression('/^req-[a-f0-9]{16}$/', (string) $trace->spans()[1]['request_id']);
     }
 
+    /** @param array<string, string> $headers */
     private function request(HttpMethod $method, string $target, array $headers = []): HttpRequest
     {
         $httpHeaders = new Headers();

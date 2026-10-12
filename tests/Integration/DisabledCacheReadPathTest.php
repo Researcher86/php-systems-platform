@@ -69,10 +69,6 @@ final class DisabledCacheReadPathTest extends TestCase
             $socket,
             sprintf('A serve with CACHE_ENABLED=0 started a cache server on port %d anyway.', $cachePort),
         );
-
-        if (is_resource($socket)) {
-            fclose($socket);
-        }
     }
 
     public function testTheFirstReadIsAMiss(): void

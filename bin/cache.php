@@ -9,11 +9,11 @@ use PhpMiniCache\Server\ServerConfig;
 require __DIR__ . '/../vendor/autoload.php';
 
 /*
- * Entry point for the php-mini-cache server. The component's own
- * bin/server.php loads the component's vendor/autoload.php, which does not
- * exist once it is installed as a dependency, so this boots the platform's
- * autoloader instead and runs the same server with the same CACHE_HOST /
- * CACHE_PORT defaults. It runs in the foreground, owned by `serve`.
+ * Entry point for the php-mini-cache server: boots the platform's autoloader
+ * and runs the component's server with the same CACHE_HOST / CACHE_PORT
+ * defaults as the component's own bin/server.php, plus the CACHE_SNAPSHOT
+ * persistence that script does not offer. It runs in the foreground, owned
+ * by `serve`.
  *
  * CACHE_SNAPSHOT enables persistence: loaded on boot, saved every 30s and
  * once more on SIGTERM.

@@ -57,7 +57,7 @@ use RuntimeException;
  * `php bin/platform.php serve` - the platform's own launch, with the real ports
  * and data directories from config - and a serve that is already up is
  * reused rather than started a second time. The tests speak the same
- * protocol a client does (HTTP to 127.0.0.1:8080), read the real append-only
+ * protocol a client does (HTTP to the configured port, 8080 by default), read the real append-only
  * queue journal in the queue data directory, reach the database the way the
  * components do, and, when this class started the serve, tear it down again
  * gracefully.
@@ -65,12 +65,6 @@ use RuntimeException;
 final class ServeIntegrationTest extends TestCase
 {
     private const HOST = '127.0.0.1';
-    private const HTTP_PORT = 8080;
-    private const DB_PORT = 5433;
-    private const CACHE_PORT = 6380;
-
-    private const DATA_DIR = '/tmp/php-systems-platform';
-    private const LOG_DIR = '/tmp/php-systems-platform-test';
 
     /** @var resource|null */
     private static mixed $serveProcess = null;
@@ -81,7 +75,7 @@ final class ServeIntegrationTest extends TestCase
 
     public static function setUpBeforeClass(): void
     {
-        self::$ownsServe = !self::portAnswers(self::HTTP_PORT);
+        self::$ownsServe = !self::portAnswers(self::httpPort());
 
         if (self::$ownsServe) {
             self::startServe();
@@ -89,12 +83,12 @@ final class ServeIntegrationTest extends TestCase
 
         self::$database = Database::fromConfig(new ClientConfig(
             host: self::HOST,
-            port: self::DB_PORT,
+            port: self::dbPort(),
             connectTimeoutSeconds: 2.0,
         ));
         self::$cache = CacheService::fromConfig([
             'host' => self::HOST,
-            'port' => self::CACHE_PORT,
+            'port' => self::cachePort(),
             'timeout' => 2.0,
         ]);
     }
@@ -116,7 +110,7 @@ final class ServeIntegrationTest extends TestCase
 
     public function testAConnectionThatSendsNothingIsClosedAfterTheRequestTimeout(): void
     {
-        $socket = stream_socket_client(sprintf('tcp://%s:%d', self::HOST, self::HTTP_PORT), $code, $message, 5.0);
+        $socket = stream_socket_client(sprintf('tcp://%s:%d', self::HOST, self::httpPort()), $code, $message, 5.0);
         self::assertIsResource($socket);
 
         // The configured request_timeout (5s) plus the Master-style periodic
@@ -156,7 +150,7 @@ final class ServeIntegrationTest extends TestCase
         // And the write → enqueue → respond path wrote the READY job into the
         // real append-only journal - the artifact a consumer restores in the
         // next phase.
-        $journal = (string) file_get_contents(self::DATA_DIR . '/queue/queue.log');
+        $journal = (string) file_get_contents(self::dataDir() . '/queue/queue.log');
         self::assertStringContainsString('order.created', $journal);
         self::assertStringContainsString('"state":"READY"', $journal);
         self::assertStringContainsString($order['id'], $journal);
@@ -257,7 +251,7 @@ final class ServeIntegrationTest extends TestCase
         $id = (string) $order['id'];
         self::$cache->deleteOrder($id);
 
-        $writer = CacheService::fromConfig(['host' => self::HOST, 'port' => self::CACHE_PORT, 'timeout' => 2.0]);
+        $writer = CacheService::fromConfig(['host' => self::HOST, 'port' => self::cachePort(), 'timeout' => 2.0]);
         $abandonedBefore = self::$cache->counters()->abandonedFills;
 
         try {
@@ -343,7 +337,7 @@ final class ServeIntegrationTest extends TestCase
         self::assertSame('gold', $snapshot->customer?->tier);
         self::assertSame('Standard plan', $snapshot->product?->title);
         self::assertSame(OrderService::DEFAULT_PRODUCT, $snapshot->stock?->sku);
-        self::assertGreaterThan(0, (int) $snapshot->stock?->available);
+        self::assertGreaterThan(0, $snapshot->stock->available);
     }
 
     public function testSequentialLoaderAnswersNullForAnUnknownOrder(): void
@@ -506,7 +500,7 @@ final class ServeIntegrationTest extends TestCase
         $clock = new SystemClock();
 
         new Producer(
-            new InMemoryQueue($clock, new FileStorage(self::DATA_DIR . '/queue/queue.log')),
+            new InMemoryQueue($clock, new FileStorage(self::dataDir() . '/queue/queue.log')),
             new JobFactory($clock, new MetricsCollector()),
         )->dispatch(OrderProcessJob::TYPE, ['order_id' => $order['id']], maxAttempts: 3);
 
@@ -522,7 +516,7 @@ final class ServeIntegrationTest extends TestCase
 
         // The key names the operation, not a delivery: any copy of
         // "order X was created" deduplicates the same way (PLAN Step 20).
-        $journal = (string) file_get_contents(self::DATA_DIR . '/queue/queue.log');
+        $journal = (string) file_get_contents(self::dataDir() . '/queue/queue.log');
         self::assertStringContainsString(sprintf('"idempotencyKey":"order.created:%s"', $order['id']), $journal);
     }
 
@@ -531,13 +525,13 @@ final class ServeIntegrationTest extends TestCase
         $order = $this->postOrder('Idempotency No Key', 2);
         $inventory = new InventoryRepository(self::$database);
         $stock = new CatalogRepository(self::$database);
-        $before = (int) ($stock->findStock((string) $order['product'])?->available ?? 0);
+        $before = (int) ($stock->findStock((string) $order['product'])->available ?? 0);
 
         // No store wired -> the context's guard is null: redelivery is
         // delivered, and delivered again.
         $executor = new JobExecutor(
-            ['host' => self::HOST, 'port' => self::DB_PORT, 'timeout' => 2.0],
-            ['host' => self::HOST, 'port' => self::CACHE_PORT, 'timeout' => 2.0],
+            ['host' => self::HOST, 'port' => self::dbPort(), 'timeout' => 2.0],
+            ['host' => self::HOST, 'port' => self::cachePort(), 'timeout' => 2.0],
         );
         $producer = new Producer(new InMemoryQueue(new SystemClock()), new JobFactory(new SystemClock(), new MetricsCollector()));
 
@@ -545,17 +539,17 @@ final class ServeIntegrationTest extends TestCase
         $executor($producer->dispatch(OrderProcessJob::TYPE, ['order_id' => $order['id']], maxAttempts: 3));
 
         // Two deliveries, two settles: the same operation applied twice.
-        $after = (int) ($stock->findStock((string) $order['product'])?->available ?? 0);
+        $after = (int) ($stock->findStock((string) $order['product'])->available ?? 0);
         self::assertSame($before - 2, $after);
     }
 
     public function testOrderProcessWithAnOperationKeySettlesStockOnceAcrossRedeliveries(): void
     {
         $order = $this->postOrder('Idempotency Guarded', 3);
-        $store = self::LOG_DIR . '/idem-' . uniqid('', true) . '.log';
+        $store = self::logDir() . '/idem-' . uniqid('', true) . '.log';
         $key = 'order.process:' . $order['id'];
         $stock = new CatalogRepository(self::$database);
-        $before = (int) ($stock->findStock((string) $order['product'])?->available ?? 0);
+        $before = (int) ($stock->findStock((string) $order['product'])->available ?? 0);
 
         $producer = new Producer(
             new InMemoryQueue(new SystemClock()),
@@ -565,8 +559,8 @@ final class ServeIntegrationTest extends TestCase
         // Delivery 1: a worker with a guard over the store settles the order
         // and records the operation.
         $first = new JobExecutor(
-            ['host' => self::HOST, 'port' => self::DB_PORT, 'timeout' => 2.0],
-            ['host' => self::HOST, 'port' => self::CACHE_PORT, 'timeout' => 2.0],
+            ['host' => self::HOST, 'port' => self::dbPort(), 'timeout' => 2.0],
+            ['host' => self::HOST, 'port' => self::cachePort(), 'timeout' => 2.0],
             $store,
         );
         $first($producer->dispatch(
@@ -576,14 +570,14 @@ final class ServeIntegrationTest extends TestCase
             idempotencyKey: $key,
         ));
 
-        self::assertSame($before - 1, (int) ($stock->findStock((string) $order['product'])?->available ?? 0));
+        self::assertSame($before - 1, (int) ($stock->findStock((string) $order['product'])->available ?? 0));
 
         // Delivery 2: the same operation, a fresh worker (a different job id -
         // the KEY is what stays the same). The guard reads the store the first
         // worker wrote and skips before the loader is even asked.
         $second = new JobExecutor(
-            ['host' => self::HOST, 'port' => self::DB_PORT, 'timeout' => 2.0],
-            ['host' => self::HOST, 'port' => self::CACHE_PORT, 'timeout' => 2.0],
+            ['host' => self::HOST, 'port' => self::dbPort(), 'timeout' => 2.0],
+            ['host' => self::HOST, 'port' => self::cachePort(), 'timeout' => 2.0],
             $store,
         );
         $second($producer->dispatch(
@@ -593,7 +587,7 @@ final class ServeIntegrationTest extends TestCase
             idempotencyKey: $key,
         ));
 
-        self::assertSame($before - 1, (int) ($stock->findStock((string) $order['product'])?->available ?? 0));
+        self::assertSame($before - 1, (int) ($stock->findStock((string) $order['product'])->available ?? 0));
         self::assertTrue(new IdempotencyGuard(new FileStorage($store))->isProcessed($key));
 
         $rows = self::$database->read('SELECT status FROM orders WHERE id = ?', [$order['id']]);
@@ -603,45 +597,45 @@ final class ServeIntegrationTest extends TestCase
     public function testTheQueuePathRedeliversTheSameOperationAndTheGuardKeepsTheSettleSingle(): void
     {
         $order = $this->postOrder('Idempotency End To End', 4);
-        $store = self::LOG_DIR . '/idem-e2e-' . uniqid('', true) . '.log';
+        $store = self::logDir() . '/idem-e2e-' . uniqid('', true) . '.log';
         $key = 'order.process:' . $order['id'];
         $stock = new CatalogRepository(self::$database);
-        $before = (int) ($stock->findStock((string) $order['product'])?->available ?? 0);
+        $before = (int) ($stock->findStock((string) $order['product'])->available ?? 0);
         $clock = new SystemClock();
 
         // Delivery 1 through the real queue path: journal -> consumer -> pool
         // workers, with the Step 20 store wired into the executor the forks
         // run.
         new Producer(
-            new InMemoryQueue($clock, new FileStorage(self::DATA_DIR . '/queue/queue.log')),
+            new InMemoryQueue($clock, new FileStorage(self::dataDir() . '/queue/queue.log')),
             new JobFactory($clock, new MetricsCollector()),
         )->dispatch(OrderProcessJob::TYPE, ['order_id' => $order['id']], maxAttempts: 3, idempotencyKey: $key);
         $this->drainQueue($store);
 
-        self::assertSame($before - 1, (int) ($stock->findStock((string) $order['product'])?->available ?? 0));
+        self::assertSame($before - 1, (int) ($stock->findStock((string) $order['product'])->available ?? 0));
 
         // Delivery 2: the at-least-once redelivery - a brand new job, same
         // operation key, drained by a fresh executor over the same store,
         // exactly how a restarted worker would see it.
         $redelivered = new Producer(
-            new InMemoryQueue($clock, new FileStorage(self::DATA_DIR . '/queue/queue.log')),
+            new InMemoryQueue($clock, new FileStorage(self::dataDir() . '/queue/queue.log')),
             new JobFactory($clock, new MetricsCollector()),
         )->dispatch(OrderProcessJob::TYPE, ['order_id' => $order['id']], maxAttempts: 3, idempotencyKey: $key);
         $this->drainQueue($store);
 
-        self::assertSame($before - 1, (int) ($stock->findStock((string) $order['product'])?->available ?? 0));
+        self::assertSame($before - 1, (int) ($stock->findStock((string) $order['product'])->available ?? 0));
 
         // Skipped means completed, not failed: the handler returned cleanly on
         // its one delivery rather than burning the attempts budget.
-        $rows = new QueueJournal(self::DATA_DIR . '/queue/queue.log')->rows();
+        $rows = new QueueJournal(self::dataDir() . '/queue/queue.log')->rows();
         self::assertSame('COMPLETED', $rows[(string) $redelivered->getId()]['state']);
         self::assertSame(1, $rows[(string) $redelivered->getId()]['attempts']);
     }
 
     public function testAWorkerStuckPastItsExecutionTimeoutIsKilledAndReplaced(): void
     {
-        $socketPath = '/tmp/php-exectimeout-' . uniqid('', true) . '.sock';
-        $dir = self::LOG_DIR . '/exectimeout-' . uniqid('', true);
+        $socketPath = sys_get_temp_dir() . '/php-exectimeout-' . uniqid('', true) . '.sock';
+        $dir = self::logDir() . '/exectimeout-' . uniqid('', true);
         mkdir($dir, 0o777, true);
 
         $pool = proc_open(
@@ -711,8 +705,8 @@ final class ServeIntegrationTest extends TestCase
         // pool on its own socket: crash a worker, and watch the pool's own
         // bookkeeping prove each phase - it fails the request the dead worker
         // held (worker_crashed), drops the dead pid, and forks a replacement.
-        $socketPath = '/tmp/php-crash-' . uniqid('', true) . '.sock';
-        $dir = self::LOG_DIR . '/crash-' . uniqid('', true);
+        $socketPath = sys_get_temp_dir() . '/php-crash-' . uniqid('', true) . '.sock';
+        $dir = self::logDir() . '/crash-' . uniqid('', true);
         mkdir($dir, 0o777, true);
 
         $pool = proc_open(
@@ -767,8 +761,8 @@ final class ServeIntegrationTest extends TestCase
         // PLAN Step 22's gate from the pool's side: a pool launched in a
         // production environment must answer failure_injection_disabled to a
         // worker.crash, not die - and must still be intact after doing so.
-        $socketPath = '/tmp/php-prodcrash-' . uniqid('', true) . '.sock';
-        $dir = self::LOG_DIR . '/prodcrash-' . uniqid('', true);
+        $socketPath = sys_get_temp_dir() . '/php-prodcrash-' . uniqid('', true) . '.sock';
+        $dir = self::logDir() . '/prodcrash-' . uniqid('', true);
         mkdir($dir, 0o777, true);
 
         $pool = proc_open(
@@ -829,7 +823,7 @@ final class ServeIntegrationTest extends TestCase
         // so it may spend its whole attempts budget, and dies FAILED at
         // exactly max_attempts instead of retrying forever.
         $clock = new SystemClock();
-        $logPath = self::DATA_DIR . '/queue/queue.log';
+        $logPath = self::dataDir() . '/queue/queue.log';
 
         $job = new Producer(
             new InMemoryQueue($clock, new FileStorage($logPath)),
@@ -913,7 +907,7 @@ final class ServeIntegrationTest extends TestCase
 
     public function testOrderCreationIsRejectedWithoutTouchingAnythingWhenTheQueueIsAtCapacity(): void
     {
-        $scratchLog = self::LOG_DIR . '/backpressure.log';
+        $scratchLog = self::logDir() . '/backpressure.log';
         @unlink($scratchLog);
         $this->publishJobs($scratchLog, 2);
 
@@ -945,7 +939,7 @@ final class ServeIntegrationTest extends TestCase
 
     public function testOrderCreationSucceedsWhenTheQueueIsUnderCapacity(): void
     {
-        $scratchLog = self::LOG_DIR . '/backpressure-ok.log';
+        $scratchLog = self::logDir() . '/backpressure-ok.log';
         @unlink($scratchLog);
         $this->publishJobs($scratchLog, 1);
 
@@ -1008,7 +1002,7 @@ final class ServeIntegrationTest extends TestCase
     {
         // Delta-based: earlier tests may already have published jobs into the
         // shared journal, so assert on what THIS post adds.
-        $before = new QueueJournal(self::DATA_DIR . '/queue/queue.log')->snapshot();
+        $before = new QueueJournal(self::dataDir() . '/queue/queue.log')->snapshot();
 
         $this->postOrder('Dennis Ritchie', 6.0);
 
@@ -1036,7 +1030,7 @@ final class ServeIntegrationTest extends TestCase
 
         $this->drainQueue();
 
-        $rows = new QueueJournal(self::DATA_DIR . '/queue/queue.log')->rows();
+        $rows = new QueueJournal(self::dataDir() . '/queue/queue.log')->rows();
 
         // The journal is keyed by job id; find this order's job by payload.
         $jobRow = null;
@@ -1054,7 +1048,7 @@ final class ServeIntegrationTest extends TestCase
 
         // Everything published before the drain is terminal now: nothing is
         // left waiting for a worker.
-        $snapshot = new QueueJournal(self::DATA_DIR . '/queue/queue.log')->snapshot();
+        $snapshot = new QueueJournal(self::dataDir() . '/queue/queue.log')->snapshot();
         self::assertSame(0, $snapshot['depth']);
         self::assertSame(
             $snapshot['published'],
@@ -1065,7 +1059,7 @@ final class ServeIntegrationTest extends TestCase
     public function testConsumerRejectsAMalformedJobWithoutBurningItsRetryBudget(): void
     {
         $clock = new SystemClock();
-        $logPath = self::DATA_DIR . '/queue/queue.log';
+        $logPath = self::dataDir() . '/queue/queue.log';
 
         // The journal may already hold jobs from earlier tests, so assert on
         // the delta this malformed job adds.
@@ -1098,7 +1092,7 @@ final class ServeIntegrationTest extends TestCase
     public function testConsumerStillRetriesAWellFormedJobUntilItsBudgetIsSpent(): void
     {
         $clock = new SystemClock();
-        $logPath = self::DATA_DIR . '/queue/queue.log';
+        $logPath = self::dataDir() . '/queue/queue.log';
 
         $before = new QueueJournal($logPath)->snapshot();
 
@@ -1137,7 +1131,7 @@ final class ServeIntegrationTest extends TestCase
     {
         $order = $this->postOrder('Job Metadata', 5);
         $clock = new SystemClock();
-        $logPath = self::DATA_DIR . '/queue/queue.log';
+        $logPath = self::dataDir() . '/queue/queue.log';
 
         $job = new Producer(
             new InMemoryQueue($clock, new FileStorage($logPath)),
@@ -1157,7 +1151,7 @@ final class ServeIntegrationTest extends TestCase
 
     public function testLiveConsumerPicksUpJobsPublishedWhileItRuns(): void
     {
-        $logPath = self::DATA_DIR . '/queue/queue.log';
+        $logPath = self::dataDir() . '/queue/queue.log';
         $order = $this->postOrder('Bjarne Stroustrup', 12.75);
 
         // Run the real queue:consume CLI as a subprocess, then publish a job
@@ -1166,8 +1160,8 @@ final class ServeIntegrationTest extends TestCase
         $process = proc_open(
             [PHP_BINARY, dirname(__DIR__, 2) . '/bin/platform.php', 'queue:consume'],
             [
-                1 => ['file', self::LOG_DIR . '/consume.out', 'a'],
-                2 => ['file', self::LOG_DIR . '/consume.err', 'a'],
+                1 => ['file', self::logDir() . '/consume.out', 'a'],
+                2 => ['file', self::logDir() . '/consume.err', 'a'],
             ],
             $pipes,
         );
@@ -1192,7 +1186,7 @@ final class ServeIntegrationTest extends TestCase
 
             self::assertSame('COMPLETED', $state, sprintf(
                 'Consumer output: %s',
-                (string) file_get_contents(self::LOG_DIR . '/consume.out'),
+                (string) file_get_contents(self::logDir() . '/consume.out'),
             ));
         } finally {
             OwnedProcess::terminate($process);
@@ -1202,7 +1196,7 @@ final class ServeIntegrationTest extends TestCase
 
     public function testGracefulShutdownLosesNoJobs(): void
     {
-        $logPath = self::DATA_DIR . '/queue/queue.log';
+        $logPath = self::dataDir() . '/queue/queue.log';
         $clock = new SystemClock();
         $queue = new InMemoryQueue($clock, new FileStorage($logPath));
         $producer = new Producer($queue, new JobFactory($clock, new MetricsCollector()));
@@ -1224,8 +1218,8 @@ final class ServeIntegrationTest extends TestCase
         $process = proc_open(
             [PHP_BINARY, dirname(__DIR__, 2) . '/bin/platform.php', 'queue:consume'],
             [
-                1 => ['file', self::LOG_DIR . '/consume.out', 'a'],
-                2 => ['file', self::LOG_DIR . '/consume.err', 'a'],
+                1 => ['file', self::logDir() . '/consume.out', 'a'],
+                2 => ['file', self::logDir() . '/consume.err', 'a'],
             ],
             $pipes,
         );
@@ -1242,13 +1236,13 @@ final class ServeIntegrationTest extends TestCase
             $deadline = microtime(true) + 20.0;
 
             do {
-                $started = str_contains((string) file_get_contents(self::LOG_DIR . '/consume.out'), 'Consumer started');
+                $started = str_contains((string) file_get_contents(self::logDir() . '/consume.out'), 'Consumer started');
                 usleep(20_000);
             } while (microtime(true) < $deadline && !$started);
 
             self::assertTrue($started, sprintf(
                 'Consumer output: %s',
-                (string) file_get_contents(self::LOG_DIR . '/consume.out'),
+                (string) file_get_contents(self::logDir() . '/consume.out'),
             ));
 
             proc_terminate($process);
@@ -1272,7 +1266,7 @@ final class ServeIntegrationTest extends TestCase
 
             $exit = $reaped === $pid ? pcntl_wexitstatus($waitStatus) : -1;
             proc_close($process);
-            $output = (string) file_get_contents(self::LOG_DIR . '/consume.out');
+            $output = (string) file_get_contents(self::logDir() . '/consume.out');
 
             self::assertSame(0, $exit, sprintf(
                 'Consumer did not exit 0 (%.1fs after SIGTERM). Output:%s%s',
@@ -1319,8 +1313,8 @@ final class ServeIntegrationTest extends TestCase
         $second = proc_open(
             [PHP_BINARY, dirname(__DIR__, 2) . '/bin/platform.php', 'queue:consume'],
             [
-                1 => ['file', self::LOG_DIR . '/consume.out', 'a'],
-                2 => ['file', self::LOG_DIR . '/consume.err', 'a'],
+                1 => ['file', self::logDir() . '/consume.out', 'a'],
+                2 => ['file', self::logDir() . '/consume.err', 'a'],
             ],
             $pipes,
         );
@@ -1349,7 +1343,7 @@ final class ServeIntegrationTest extends TestCase
                 self::assertSame('COMPLETED', $rows[$id]['state'] ?? null, sprintf(
                     'Job %s was not drained by the restart. Output: %s',
                     $id,
-                    (string) file_get_contents(self::LOG_DIR . '/consume.out'),
+                    (string) file_get_contents(self::logDir() . '/consume.out'),
                 ));
             }
         } finally {
@@ -1391,7 +1385,7 @@ final class ServeIntegrationTest extends TestCase
     {
         $order = $this->postOrder('Edsger Dijkstra', 6.75);
         $clock = new SystemClock();
-        $logPath = self::DATA_DIR . '/queue/queue.log';
+        $logPath = self::dataDir() . '/queue/queue.log';
 
         // One READY job, straight into the real journal.
         new Producer(
@@ -1451,15 +1445,15 @@ final class ServeIntegrationTest extends TestCase
 
     public function testWorkersStatusExposesTheConsumerForwarders(): void
     {
-        $logPath = self::DATA_DIR . '/queue/queue.log';
-        $statusPath = self::DATA_DIR . '/worker/workers.status.json';
+        $logPath = self::dataDir() . '/queue/queue.log';
+        $statusPath = self::dataDir() . '/worker/workers.status.json';
         $order = $this->postOrder('Alan Turing', 9.99);
 
         $process = proc_open(
             [PHP_BINARY, dirname(__DIR__, 2) . '/bin/platform.php', 'queue:consume'],
             [
-                1 => ['file', self::LOG_DIR . '/consume.out', 'a'],
-                2 => ['file', self::LOG_DIR . '/consume.err', 'a'],
+                1 => ['file', self::logDir() . '/consume.out', 'a'],
+                2 => ['file', self::logDir() . '/consume.err', 'a'],
             ],
             $pipes,
         );
@@ -1490,7 +1484,7 @@ final class ServeIntegrationTest extends TestCase
 
             self::assertGreaterThanOrEqual(1, $done, sprintf(
                 'Consumer output: %s',
-                (string) file_get_contents(self::LOG_DIR . '/consume.out'),
+                (string) file_get_contents(self::logDir() . '/consume.out'),
             ));
 
             foreach ($workers as $worker) {
@@ -1514,8 +1508,8 @@ final class ServeIntegrationTest extends TestCase
 
     public function testOrdersCompareReportsBothExecutionModels(): void
     {
-        $out = self::LOG_DIR . '/compare.out';
-        $err = self::LOG_DIR . '/compare.err';
+        $out = self::logDir() . '/compare.out';
+        $err = self::logDir() . '/compare.err';
         @unlink($out);
         @unlink($err);
 
@@ -1553,7 +1547,7 @@ final class ServeIntegrationTest extends TestCase
     {
         $order = $this->postOrder('Queue Job Command', 3);
         $clock = new SystemClock();
-        $logPath = self::DATA_DIR . '/queue/queue.log';
+        $logPath = self::dataDir() . '/queue/queue.log';
 
         $job = new Producer(
             new InMemoryQueue($clock, new FileStorage($logPath)),
@@ -1605,8 +1599,8 @@ final class ServeIntegrationTest extends TestCase
 
     public function testQueueBenchmarkRunsTheFullPipelineAndReportsMetrics(): void
     {
-        $out = self::LOG_DIR . '/bench.out';
-        $err = self::LOG_DIR . '/bench.err';
+        $out = self::logDir() . '/bench.out';
+        $err = self::logDir() . '/bench.err';
         @unlink($out);
         @unlink($err);
 
@@ -1632,16 +1626,15 @@ final class ServeIntegrationTest extends TestCase
         self::assertStringContainsString('worker utilization', $output);
 
         preg_match('/total processing time\s+([\d.]+)s/', $output, $total);
-        self::assertGreaterThan(0.0, (float) $total[1]);
+        self::assertGreaterThan(0.0, (float) ($total[1] ?? 0));
 
         preg_match('/throughput\s+([\d.]+) jobs/', $output, $throughput);
-        self::assertGreaterThan(0.0, (float) $throughput[1]);
+        self::assertGreaterThan(0.0, (float) ($throughput[1] ?? 0));
     }
 
     private function taskRunner(): ConcurrentTaskRunner
     {
-        $config = require dirname(__DIR__, 2) . '/config/platform.php';
-        $workers = $config['workers'];
+        $workers = self::config()['workers'];
 
         return new ConcurrentTaskRunner(new WorkerPoolClient(
             (string) $workers['socket'],
@@ -1651,13 +1644,50 @@ final class ServeIntegrationTest extends TestCase
 
     private function workerManager(): WorkerManager
     {
-        $config = require dirname(__DIR__, 2) . '/config/platform.php';
-        $workers = $config['workers'];
+        $workers = self::config()['workers'];
 
         return new WorkerManager(new WorkerPoolClient(
             (string) $workers['socket'],
             (float) $workers['task_timeout'],
         ));
+    }
+
+    /**
+     * The platform's own config, read the way every process reads it - so
+     * HTTP_PORT, DATABASE_PORT, CACHE_PORT, WORKER_POOL_SOCKET and TMPDIR move
+     * this suite together with the serve it talks to.
+     *
+     * @return array<string, mixed>
+     */
+    private static function config(): array
+    {
+        return require dirname(__DIR__, 2) . '/config/platform.php';
+    }
+
+    private static function httpPort(): int
+    {
+        return (int) self::config()['http']['port'];
+    }
+
+    private static function dbPort(): int
+    {
+        return (int) self::config()['database']['port'];
+    }
+
+    private static function cachePort(): int
+    {
+        return (int) self::config()['cache']['port'];
+    }
+
+    /** The root every platform data directory lives under. */
+    private static function dataDir(): string
+    {
+        return dirname((string) self::config()['database']['data_dir']);
+    }
+
+    private static function logDir(): string
+    {
+        return sys_get_temp_dir() . '/php-systems-platform-test';
     }
 
     private static function orders(): OrderService
@@ -1669,7 +1699,7 @@ final class ServeIntegrationTest extends TestCase
     {
         return new ForkedOrderLoader(
             self::orders(),
-            ['host' => self::HOST, 'port' => self::DB_PORT, 'timeout' => 2.0],
+            ['host' => self::HOST, 'port' => self::dbPort(), 'timeout' => 2.0],
             $simulatedLatencyMs,
         );
     }
@@ -1696,6 +1726,7 @@ final class ServeIntegrationTest extends TestCase
         }
     }
 
+    /** @param array<string, mixed> $payload */
     private function dispatchJob(string $type, array $payload = []): \PhpJobQueue\Job\Job
     {
         $clock = new SystemClock();
@@ -1719,14 +1750,14 @@ final class ServeIntegrationTest extends TestCase
     private function drainQueue(?string $idempotencyLogPath = null, ?Trace $trace = null): void
     {
         $clock = new SystemClock();
-        $logPath = self::DATA_DIR . '/queue/queue.log';
+        $logPath = self::dataDir() . '/queue/queue.log';
         $storage = new FileStorage($logPath);
 
         $queue = InMemoryQueue::restoreFromStorage($storage, $clock);
 
         $executor = new JobExecutor(
-            ['host' => self::HOST, 'port' => self::DB_PORT, 'timeout' => 2.0],
-            ['host' => self::HOST, 'port' => self::CACHE_PORT, 'timeout' => 2.0],
+            ['host' => self::HOST, 'port' => self::dbPort(), 'timeout' => 2.0],
+            ['host' => self::HOST, 'port' => self::cachePort(), 'timeout' => 2.0],
             $idempotencyLogPath,
             $trace,
         );
@@ -1817,7 +1848,6 @@ final class ServeIntegrationTest extends TestCase
         self::assertGreaterThan(0.0, $after['http.request_duration']);
     }
 
-    /** @return array<string, int|float> */
     private function metricsBody(): string
     {
         [$status, $body] = $this->request('GET', '/metrics');
@@ -1832,7 +1862,7 @@ final class ServeIntegrationTest extends TestCase
     {
         $metrics = [];
 
-        foreach (preg_split('/\R/', trim($body)) as $line) {
+        foreach (preg_split('/\R/', trim($body)) ?: [] as $line) {
             [$name, $value] = explode(' ', $line, 2);
             $metrics[$name] = str_contains($value, '.') ? (float) $value : (int) $value;
         }
@@ -1849,7 +1879,7 @@ final class ServeIntegrationTest extends TestCase
         // the same JSONL journal as the serve process's own http.request
         // span. The `trace` CLI (TraceCommandTest) is the read side of the
         // exact same file.
-        $traceLog = '/tmp/php-systems-platform/trace.log';
+        $traceLog = (string) self::config()['jobs']['trace_store'];
         @unlink($traceLog);
 
         $requestId = 'req-0102030405060708';
@@ -1868,7 +1898,7 @@ final class ServeIntegrationTest extends TestCase
 
         // The job that order.created published carried the request_id into
         // the queue - the worker has something to re-open.
-        $journal = (string) file_get_contents(self::DATA_DIR . '/queue/queue.log');
+        $journal = (string) file_get_contents(self::dataDir() . '/queue/queue.log');
         self::assertStringContainsString('"request_id":"' . $requestId . '"', $journal);
 
         // The same journal the serve process appends to, now on the worker
@@ -1971,15 +2001,15 @@ final class ServeIntegrationTest extends TestCase
 
     private static function startServe(): void
     {
-        self::removeTree(self::DATA_DIR);
-        self::removeTree(self::LOG_DIR);
-        mkdir(self::LOG_DIR, 0o777, true);
+        self::removeTree(self::dataDir());
+        self::removeTree(self::logDir());
+        mkdir(self::logDir(), 0o777, true);
 
         $process = proc_open(
             [PHP_BINARY, dirname(__DIR__, 2) . '/bin/platform.php', 'serve'],
             [
-                1 => ['file', self::LOG_DIR . '/serve.out', 'a'],
-                2 => ['file', self::LOG_DIR . '/serve.err', 'a'],
+                1 => ['file', self::logDir() . '/serve.out', 'a'],
+                2 => ['file', self::logDir() . '/serve.err', 'a'],
             ],
             $pipes,
         );
@@ -1990,7 +2020,7 @@ final class ServeIntegrationTest extends TestCase
 
         self::$serveProcess = $process;
 
-        if (!self::portAnswers(self::HTTP_PORT, 20.0)) {
+        if (!self::portAnswers(self::httpPort(), 20.0)) {
             self::stopServe();
 
             throw new RuntimeException('The platform serve did not start listening in time.');
@@ -2048,6 +2078,8 @@ final class ServeIntegrationTest extends TestCase
     }
 
     /**
+     * @param list<string> $headers extra header lines
+     *
      * @return array{int, string, list<string>} HTTP status, response body, raw headers
      */
     private function request(string $method, string $path, ?string $body = null, array $headers = []): array
@@ -2063,20 +2095,21 @@ final class ServeIntegrationTest extends TestCase
         ];
 
         $response = @file_get_contents(
-            sprintf('http://%s:%d%s', self::HOST, self::HTTP_PORT, $path),
+            sprintf('http://%s:%d%s', self::HOST, self::httpPort(), $path),
             false,
             stream_context_create($options),
         );
 
         $status = 0;
+        $responseHeaders = http_get_last_response_headers() ?? [];
 
-        foreach ($http_response_header ?? [] as $line) {
+        foreach ($responseHeaders as $line) {
             if (preg_match('#^HTTP/\S+\s+(\d{3})#', $line, $matches) === 1) {
                 $status = (int) $matches[1];
             }
         }
 
-        return [$status, (string) $response, $http_response_header ?? []];
+        return [$status, (string) $response, $responseHeaders];
     }
 
     private static function removeTree(string $dir): void

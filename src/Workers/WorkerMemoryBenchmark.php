@@ -50,7 +50,8 @@ final readonly class WorkerMemoryBenchmark
     }
 
     /**
-     * @param list<array{pid: int, before: array<string, mixed>, after: array<string, mixed>}> $answers
+     * @param list<array<string, mixed>> $answers each worker's memory.hold
+     *                                         answer: pid, before, after
      *
      * @return array{workers: int, workers_observed: int, parent_rss: ?int, before_avg_rss: ?int, before_min_rss: ?int, before_max_rss: ?int, after_avg_rss: ?int, after_min_rss: ?int, after_max_rss: ?int, total_before_rss: ?int, total_after_rss: ?int}
      */
@@ -64,11 +65,11 @@ final readonly class WorkerMemoryBenchmark
             'workers_observed' => count($answers),
             'parent_rss' => $parentRss,
             'before_avg_rss' => self::avg($before),
-            'before_min_rss' => self::extreme($before, min(...)),
-            'before_max_rss' => self::extreme($before, max(...)),
+            'before_min_rss' => self::extreme($before, static fn (array $v): int => min($v)),
+            'before_max_rss' => self::extreme($before, static fn (array $v): int => max($v)),
             'after_avg_rss' => self::avg($after),
-            'after_min_rss' => self::extreme($after, min(...)),
-            'after_max_rss' => self::extreme($after, max(...)),
+            'after_min_rss' => self::extreme($after, static fn (array $v): int => min($v)),
+            'after_max_rss' => self::extreme($after, static fn (array $v): int => max($v)),
             'total_before_rss' => self::total($parentRss, $before),
             'total_after_rss' => self::total($parentRss, $after),
         ];
@@ -86,7 +87,7 @@ final readonly class WorkerMemoryBenchmark
 
     /**
      * @param list<?int>              $values
-     * @param \Closure(list<int>): int $reduce
+     * @param \Closure(non-empty-list<int>): int $reduce
      */
     private static function extreme(array $values, \Closure $reduce): ?int
     {

@@ -16,7 +16,9 @@ $faultInjection = in_array($platformEnv, ['dev', 'development', 'demo', 'test'],
 return [
     'http' => [
         'host' => '127.0.0.1',
-        'port' => 8080,
+        // Every port (and the pool socket below) is overridable, so a test
+        // run or a second stack can live next to one already holding them.
+        'port' => (int) (getenv('HTTP_PORT') ?: 8080),
         // request_timeout closes a connection idle this long (nothing sent
         // or received). header_timeout is the Slowloris guard: a connection
         // still mid-header-block this long is closed, since a trickling
@@ -26,7 +28,7 @@ return [
     ],
     'database' => [
         'host' => '127.0.0.1',
-        'port' => 5433,
+        'port' => (int) (getenv('DATABASE_PORT') ?: 5433),
         'data_dir' => sys_get_temp_dir() . '/php-systems-platform/db',
         'timeout' => 2.0,
         // How long one query may take once connected (`timeout` above is
@@ -41,7 +43,8 @@ return [
     ],
     'cache' => [
         'host' => '127.0.0.1',
-        'port' => 6380,
+        // CACHE_PORT is also the variable bin/cache.php listens on.
+        'port' => (int) (getenv('CACHE_PORT') ?: 6380),
         'data_dir' => sys_get_temp_dir() . '/php-systems-platform/cache',
         'timeout' => 2.0,
         // CACHE_ENABLED=0 means no cache tier at all (no server started,
@@ -61,6 +64,11 @@ return [
         // reproduced by running `serve` with a small one.
         'max_size' => (int) (getenv('QUEUE_MAX_SIZE') ?: 500),
         'timeout' => 2.0,
+        // Stamped onto each job by the Producer when it is published (the
+        // HTTP write path, the demos, the tests), not read by the dispatcher:
+        // the job carries its own budget, so changing this value only
+        // affects jobs published afterwards - jobs already in the journal
+        // keep the max_attempts they were published with.
         'max_attempts' => 3,
         // Whole seconds: php-job-queue's RetryPolicy::nextDelay() returns an
         // int, so a fractional value here would be truncated to 0 and every
@@ -70,7 +78,15 @@ return [
     ],
     'workers' => [
         'data_dir' => sys_get_temp_dir() . '/php-systems-platform/worker',
-        'count' => 4,
+        // The pool serve launches (bin/worker.php) autoscales between these
+        // bounds: it forks min_workers at start and grows toward max_workers
+        // under load. These are the real size of the pool.
+        'min_workers' => (int) (getenv('WORKER_POOL_MIN') ?: 2),
+        'max_workers' => (int) (getenv('WORKER_POOL_MAX') ?: 16),
+        // NOT the pool's size: the fixed size the demo pins its pool to
+        // (by raising WORKER_POOL_MIN) and the load test's baseline pool
+        // size for the queue-scaling phase.
+        'demo_workers' => 4,
         // Worker lifecycle timeouts: how long a worker may sit STARTING
         // without reporting ready, or STOPPING without exiting.
         'bootstrap_timeout' => 10.0,
@@ -83,7 +99,10 @@ return [
         // replaces it. task_timeout is the client giving up; this is the pool
         // taking the slot back, deliberately well above it.
         'execution_timeout' => 30.0,
-        'socket' => '/tmp/php-worker-pool.sock',
+        // Under sys_get_temp_dir() like every other path here. bin/worker.php
+        // listens on it and every client (serve, queue:consume, the CLI, the
+        // tests) connects to it, all through this one value.
+        'socket' => getenv('WORKER_POOL_SOCKET') ?: sys_get_temp_dir() . '/php-worker-pool.sock',
     ],
     'jobs' => [
         // Append-only JSONL journal of IdempotencyGuard's recorded

@@ -89,7 +89,9 @@ with fewer pieces gets the old behavior back instead of a crash.
 `config/platform.php` is a single file of defaults an environment variable or
 a command may override. The environment overrides are the deliberate ones:
 `QUEUE_MAX_SIZE`, `CACHE_ENABLED`, `PLATFORM_ENV`, `DATABASE_LATENCY_MS`,
-`WORKER_POOL_*`. Two of them encode policy, not tuning:
+`WORKER_POOL_SOCKET`/`WORKER_POOL_MIN`/`WORKER_POOL_MAX`, and the ports
+`HTTP_PORT`/`DATABASE_PORT`/`CACHE_PORT`. Two of them encode policy, not
+tuning:
 
 - `PLATFORM_ENV` gates failure injection: worker crashes, `/debug/fail-worker`
   and the database delay exist only where a deployment is not serving.

@@ -190,11 +190,6 @@ final class PlatformTestStack
         return new WorkerPoolClient((string) $workers['socket'], (float) $workers['task_timeout']);
     }
 
-    private function logDir(): string
-    {
-        return $this->logDir;
-    }
-
     /**
      * A child process's own stdout, as it wrote it.
      *
@@ -306,14 +301,15 @@ final class PlatformTestStack
         );
 
         $status = 0;
+        $responseHeaders = http_get_last_response_headers() ?? [];
 
-        foreach ($http_response_header ?? [] as $line) {
+        foreach ($responseHeaders as $line) {
             if (preg_match('#^HTTP/\S+\s+(\d{3})#', $line, $matches) === 1) {
                 $status = (int) $matches[1];
             }
         }
 
-        return [$status, (string) $response, $http_response_header ?? []];
+        return [$status, (string) $response, $responseHeaders];
     }
 
     /**
@@ -361,7 +357,11 @@ final class PlatformTestStack
         return $response;
     }
 
-    /** The value of one response header, case-insensitively. */
+    /**
+     * The value of one response header, case-insensitively.
+     *
+     * @param list<string>|null $headers raw response header lines
+     */
     public static function header(?array $headers, string $name): ?string
     {
         foreach ($headers ?? [] as $line) {
@@ -462,7 +462,7 @@ final class PlatformTestStack
             proc_close($process);
         }
 
-        return $reaped === $pid ? pcntl_wexitstatus($status) : -1;
+        return $reaped === $pid ? (int) pcntl_wexitstatus($status) : -1;
     }
 
     /**
@@ -521,6 +521,7 @@ final class PlatformTestStack
         throw new RuntimeException($message);
     }
 
+    /** @param array<string, string> $env */
     private function startServe(array $env = [], bool $mustOwn = false): void
     {
         if ($mustOwn && $this->portAnswers($this->httpPort())) {

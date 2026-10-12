@@ -338,7 +338,7 @@ final class FailureExperiments
             'PLATFORM_ENV' => 'demo',
             'CACHE_ENABLED' => '1',
             'QUEUE_MAX_SIZE' => '500',
-        ];
+        ] + OwnedProcess::addressEnvironment();
 
         $this->serve = OwnedProcess::startAndWaitForPort(
             [PHP_BINARY, dirname(__DIR__, 2) . '/bin/platform.php', 'serve'],

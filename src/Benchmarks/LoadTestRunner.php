@@ -231,7 +231,14 @@ final class LoadTestRunner
             'corpus_orders' => $corpus,
             'queue_jobs' => $this->jobs,
             'scaling_worker_counts' => implode(',', $this->workerCounts),
-            'workers_configured' => (int) $config['workers']['count'],
+            // The pool serve runs autoscales; the baseline is only the size
+            // Test D pins its pool to, not the size of serve's pool.
+            'pool_workers' => sprintf(
+                '%d..%d (autoscaling)',
+                (int) $config['workers']['min_workers'],
+                (int) $config['workers']['max_workers'],
+            ),
+            'baseline_workers' => $this->baselineWorkers,
             'queue_max_size' => (int) $config['queue']['max_size'],
             'cache_enabled_for_b' => 'no (CACHE_ENABLED=0)',
         ];

@@ -31,33 +31,38 @@ The main goal is understanding the interaction between the components and the un
 
 # 1. Integrated Components
 
-The platform should integrate the following projects.
+The platform integrates five components as Composer packages and uses two
+earlier levels as concepts only.
 
 ### Core runtime
 
-* `php-concurrency`
-* `php-memory-lab`
-* `php-worker-pool`
+* `php-worker-pool` (Composer package)
+* `php-concurrency` (concepts only - process-based concurrency and IPC,
+  reimplemented where the platform needs them)
+* `php-memory-lab` (concepts only - fork, copy-on-write, RSS, reimplemented
+  in the platform's memory experiments)
 
 ### Networking
 
-* `php-mini-http-server`
+* `php-mini-http-server` (Composer package)
 
 ### Storage
 
-* `php-mini-database`
+* `php-mini-database` (Composer package)
 
 ### Cache
 
-* `php-mini-cache`
+* `php-mini-cache` (Composer package)
 
 ### Asynchronous processing
 
-* `php-job-queue`
+* `php-job-queue` (Composer package)
 
 ### Benchmarking / experiments
 
-* `php-benchmark-lab`
+There is no separate benchmarking component: the benchmarks, load tests and
+failure experiments live in this repository (`src/Benchmarks/`,
+`src/Experiments/`, `docs/benchmarks.md`).
 
 The final project itself is:
 
@@ -122,7 +127,7 @@ The initial target architecture:
                          ┌──────────────────────────────────────────────┐
                          │ Observability / Metrics / Experiments       │
                          │                                              │
-                         │ php-benchmark-lab                            │
+                         │ src/Benchmarks (this repository)             │
                          │ latency / throughput / queue depth / memory  │
                          └──────────────────────────────────────────────┘
 ```

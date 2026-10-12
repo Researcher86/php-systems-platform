@@ -61,7 +61,7 @@ What each line proves:
 
 ## Why the min workers floor is visible
 
-`bin/worker.php` reads `WORKER_POOL_MIN` (default 2) and forks that many
+`bin/worker.php` reads `workers.min_workers` (`WORKER_POOL_MIN`, default 2) and forks that many
 eagerly at boot - which is why two worker processes appear under the Master
 even before any job arrives. The pool grows toward `WORKER_POOL_MAX` under
 load and retires idle workers back down, so the floor is the invariant a

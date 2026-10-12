@@ -80,6 +80,57 @@ non-zero if any. A process that had to be killed is reported as killed
 (`OwnedProcess` returns a non-zero stop), because a graceful stop and a kill
 are different claims.
 
+## Known limits (left in place on purpose)
+
+Three gaps the platform does not close. They are written down instead of
+re-architected, because each fix is a mechanism of its own (an outbox, a
+transaction, a supervisor), and the point here is that the gap is visible.
+
+### Order create + job publish is a dual write, with no outbox
+
+`OrderService::createOrder()` inserts the order row, *then* appends the
+`order.created` job to the queue journal. The two writes go to two different
+stores (the database and the journal file) with nothing tying them together.
+Doing the insert first means a job never names an order the database does
+not have - but a process that dies (or a journal append that throws) between
+the two leaves an order in `CREATED` with no job behind it, and nothing ever
+notices: no retry, no sweeper, no reconciliation. The textbook fix is a
+transactional outbox (write the job into the same database transaction as
+the order, relay it to the queue afterwards); the platform has no
+transactions and no relay, so the window stays open. Backpressure narrows
+nothing here - it is checked before the insert, so a 429 writes neither.
+
+### `OrderProcessJob` is not atomic, and records its idempotency last
+
+Settling an order is three separate steps against the database, then the
+idempotency record:
+
+1. `decrementAvailable($sku)` - a conditional `UPDATE` that takes one unit
+2. `updateOrderStatus($orderId, COMPLETED|CANCELLED)`
+3. drop the cached order
+4. `markProcessed()` - append `order.process:<id>` to the idempotency journal
+
+There is no transaction around 1 and 2, so a crash between them leaves a unit
+taken off the shelf for an order still in `CREATED`. And because the record
+is written after the effects, a crash anywhere before step 4 means the
+redelivered job (delivery is at-least-once) is not recognized as done and
+runs again - taking a second unit. The guard closes the *common* duplicate
+(a redelivery after the job finished) and leaves this residual window, which
+`OrderProcessJob` and `JobContext::markProcessed()` document in the code.
+
+### Stopping `serve` takes the pool away from `queue:consume`
+
+The worker pool is owned by whichever process started it - normally `serve` -
+and adopted by `queue:consume` through a client (see `ownership.md`).
+Stopping `serve` stops the pool Master it owns, even while a consumer is
+still forwarding jobs to it. The consumer is not told and does not start a
+replacement: its deliveries fail, each one is a failed attempt that burns
+retry budget, and jobs that run out of attempts end `FAILED`. Stop the
+consumer first, or restart `serve` (or the consumer, which then starts and
+owns a pool of its own) before the budget runs out. The reverse holds too:
+if the consumer started the pool, stopping the consumer takes it away from
+`serve`'s `/parallel` and concurrent loader.
+
 ## The common failure contract
 
 Database, cache, and pool all follow it: **report honestly, let the caller

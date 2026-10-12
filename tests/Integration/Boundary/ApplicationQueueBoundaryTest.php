@@ -220,8 +220,6 @@ final class ApplicationQueueBoundaryTest extends TestCase
     }
 
     /**
-     * @param array<string, mixed> $order
-     *
      * @return array<string, mixed>
      */
     private function jobFor(string $orderId): array

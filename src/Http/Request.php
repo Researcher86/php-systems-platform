@@ -12,7 +12,8 @@ namespace PhpSystemsPlatform\Http;
 final readonly class Request
 {
     /**
-     * @param array<string, mixed>   $query   query string parsed into key/value pairs
+     * @param array<int|string, mixed> $query query string parsed into key/value pairs
+     *                                        (`?0=x` parses to an int key)
      * @param array<string, string>  $headers lowercased header name => value
      */
     public function __construct(

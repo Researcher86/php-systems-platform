@@ -34,6 +34,13 @@ final class OwnedProcess
 
     private const float PORT_PROBE_CONNECT_SECONDS = 0.2;
 
+    /**
+     * The environment variables config/platform.php locates the platform by:
+     * its ports, the pool socket, and TMPDIR, which sys_get_temp_dir() - and
+     * so every data path - follows.
+     */
+    private const array ADDRESS_VARIABLES = ['HTTP_PORT', 'DATABASE_PORT', 'CACHE_PORT', 'WORKER_POOL_SOCKET', 'TMPDIR'];
+
     /** @var resource|null */
     private $process = null;
 
@@ -43,6 +50,29 @@ final class OwnedProcess
         private readonly string $stdoutPath,
         private readonly string $stderrPath,
     ) {
+    }
+
+    /**
+     * The part of this process's environment that says where the platform
+     * is. A child given a whole environment of its own (see start()) gets
+     * this merged under its overrides, so a stack moved to other ports or
+     * another socket is found by every process in it, not just this one.
+     *
+     * @return array<string, string>
+     */
+    public static function addressEnvironment(): array
+    {
+        $environment = [];
+
+        foreach (self::ADDRESS_VARIABLES as $name) {
+            $value = getenv($name);
+
+            if ($value !== false && $value !== '') {
+                $environment[$name] = $value;
+            }
+        }
+
+        return $environment;
     }
 
     /**

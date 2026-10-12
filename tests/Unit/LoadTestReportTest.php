@@ -21,6 +21,8 @@ use PHPUnit\Framework\TestCase;
 final class LoadTestReportTest extends TestCase
 {
     /**
+     * @param array<string, int> $markers X-Cache marker => count
+     *
      * @return array<string, mixed>
      */
     private function phase(string $test, string $name, int $requests, float $rps, array $markers): array

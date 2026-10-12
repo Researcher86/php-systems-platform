@@ -26,6 +26,9 @@ is observed, and how it is reproduced. The "why" behind each row lives in
 | HTTP port already taken  | start-up fails, exit 1, and **nothing the attempt started keeps running** - no orphan pool, cache or db | the three stop lines, then exit 1; `pgrep -f bin/worker.php` empty | a second `serve` on a bound port |
 | One cleanup step refuses  | the remaining steps still run; the refusal is reported to stderr | the `[shutdown] could not release ...` line plus the later ones | a pool that answers `refused` when asked to stop |
 | `CACHE_ENABLED=0`        | no cache server process at all, on either end of the platform | no `bin/cache.php` in `pgrep` | `CACHE_ENABLED=0` with a consumer running |
+| Crash between order insert and job publish | **not handled** (no outbox): the order stays `CREATED` with no job, and nothing reconciles it | an order row with no `order.created` in the journal | kill serve between the two writes - see `failure-handling.md`, Known limits |
+| Crash inside `order.process` before its idempotency record | **not handled** (no transaction): a unit may be taken with the status unchanged, and the redelivered job runs again | stock lower than completed orders account for | kill the worker mid-job - see `failure-handling.md`, Known limits |
+| `serve` stopped while `queue:consume` runs | the pool Master serve owns stops with it; the consumer's deliveries fail and burn retry budget until a pool is back | failed attempts in the journal; `pgrep -f bin/worker.php` empty | `kill -TERM <serve-pid>` with a consumer running |
 | Two platforms migrate at once | both succeed; the loser's seed insert is ignored, not fatal | both processes reach "migrate ok" | two `serve` processes starting on an empty data dir |
 
 ## The two recovery axes

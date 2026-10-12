@@ -39,13 +39,6 @@ final class WorkerCrashE2ETest extends TestCase
 {
     private const BATCH = 8;
 
-    /**
-     * bin/worker.php launches the pool with WORKER_POOL_MIN=2 and a maximum of
-     * 16, autoscale in between: the pool is sized for the work it is handed,
-     * so its worker count is a moving target and only its floor is a promise.
-     */
-    private const MIN_POOL_WORKERS = 2;
-
     private static PlatformTestStack $stack;
 
     public static function setUpBeforeClass(): void
@@ -101,7 +94,7 @@ final class WorkerCrashE2ETest extends TestCase
             self::assertNotContains((int) $report['crashed_pid'], $pidsAfter);
             self::assertNotEmpty(array_diff($pidsAfter, $pidsBefore), 'The pool is running the same workers it was before the crash.');
             self::assertGreaterThanOrEqual(
-                self::MIN_POOL_WORKERS,
+                self::minPoolWorkers(),
                 count($pidsAfter),
                 'The pool is serving with fewer workers than its configured minimum.',
             );
@@ -149,7 +142,7 @@ final class WorkerCrashE2ETest extends TestCase
                 }
 
                 foreach (self::$stack->pool()->stats() as $row) {
-                    if (($row['state'] ?? '') === 'BUSY') {
+                    if ($row['state'] === 'BUSY') {
                         $victim = (int) $row['pid'];
 
                         return true;
@@ -187,7 +180,7 @@ final class WorkerCrashE2ETest extends TestCase
 
             self::assertNotContains($victim, $pids, 'The pool still lists the worker that was killed.');
             self::assertGreaterThanOrEqual(
-                self::MIN_POOL_WORKERS,
+                self::minPoolWorkers(),
                 count($pids),
                 'The pool is not serving the work it took back.',
             );
@@ -243,5 +236,16 @@ final class WorkerCrashE2ETest extends TestCase
     private function jobById(string $jobId): array
     {
         return self::$stack->journal()->rows()[$jobId] ?? [];
+    }
+
+    /**
+     * bin/worker.php launches the pool with workers.min_workers and
+     * max_workers (2 and 16 by default), autoscaling in between: the pool is
+     * sized for the work it is handed, so its worker count is a moving target
+     * and only its floor is a promise.
+     */
+    private static function minPoolWorkers(): int
+    {
+        return (int) self::$stack->config()['workers']['min_workers'];
     }
 }

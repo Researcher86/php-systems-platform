@@ -18,13 +18,14 @@ use PHPUnit\Framework\TestCase;
 final class DemoCommandTest extends TestCase
 {
     private const HOST = '127.0.0.1';
-    private const HTTP_PORT = 8080;
 
     private const DEMO_DEADLINE_SECONDS = 180.0;
 
     public function testDemoRunsTheWholePlatformStoryAndExitsZero(): void
     {
-        if (self::portAnswers(self::HTTP_PORT, 1.0)) {
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+
+        if (self::portAnswers((int) $config['http']['port'], 1.0)) {
             self::markTestSkipped('A platform serve is already running; the demo would refuse to share its ports.');
         }
 

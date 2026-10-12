@@ -35,16 +35,16 @@ final class ProcessCostReaderTest extends TestCase
 
     public function testItReadsThisProcess(): void
     {
-        $cost = $this->reader->read(getmypid());
+        $cost = $this->reader->read(posix_getpid());
 
-        self::assertSame(getmypid(), $cost->pid);
+        self::assertSame(posix_getpid(), $cost->pid);
         self::assertGreaterThan(0.0, $cost->cpuSeconds, 'a running process has spent some CPU on itself');
         self::assertGreaterThan(0, $cost->rssBytes);
     }
 
     public function testTheKernelPeakIsAtLeastTheCurrentResidentSize(): void
     {
-        $cost = $this->reader->read(getmypid());
+        $cost = $this->reader->read(posix_getpid());
 
         // VmHWM is a high-water mark, so it can be much larger than VmRSS
         // after a spike - but never smaller. A reader that mixed the two up
@@ -55,7 +55,7 @@ final class ProcessCostReaderTest extends TestCase
 
     public function testCpuIsReadAsADeltaBetweenTwoReadings(): void
     {
-        $before = $this->reader->read(getmypid());
+        $before = $this->reader->read(posix_getpid());
 
         // Spin for a fixed stretch of wall time rather than a fixed number of
         // iterations: CPU here is accounted in 10ms ticks, so the work has to
@@ -71,7 +71,7 @@ final class ProcessCostReaderTest extends TestCase
             }
         }
 
-        $after = $this->reader->read(getmypid());
+        $after = $this->reader->read(posix_getpid());
 
         unset($burn);
 
@@ -99,9 +99,9 @@ final class ProcessCostReaderTest extends TestCase
 
     public function testReadsBothMemoryNumbersForTheGivenPid(): void
     {
-        $cost = $this->reader->read(getmypid());
+        $cost = $this->reader->read(posix_getpid());
 
-        self::assertSame(getmypid(), $cost->pid);
+        self::assertSame(posix_getpid(), $cost->pid);
         self::assertGreaterThan(0, $cost->rssBytes);
         self::assertGreaterThanOrEqual($cost->rssBytes, $cost->peakRssBytes);
     }

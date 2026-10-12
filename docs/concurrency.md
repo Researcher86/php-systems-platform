@@ -82,8 +82,8 @@ an accident of the machine:
 
 | Limit                        | Value / bounds                      | Where |
 | ---------------------------- | ----------------------------------- | ----- |
-| Worker pool floor            | `WORKER_POOL_MIN`, default 2        | `config/platform.php` |
-| Worker pool ceiling          | `WORKER_POOL_MAX`, default 16       | `config/platform.php` |
+| Worker pool floor            | `workers.min_workers` (`WORKER_POOL_MIN`), default 2  | `config/platform.php` |
+| Worker pool ceiling          | `workers.max_workers` (`WORKER_POOL_MAX`), default 16 | `config/platform.php` |
 | Queue consumer forwarders    | `queue.consumers`, default 4        | `config/platform.php` |
 | Database connections         | `Database::connect(..., 10)`        | `serve` |
 | `benchmark` jobs             | 1 .. 5000                           | CLI guard |

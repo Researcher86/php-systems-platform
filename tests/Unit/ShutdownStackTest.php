@@ -64,6 +64,7 @@ final class ShutdownStackTest extends TestCase
     {
         $releases = [];
         $errors = fopen('php://memory', 'w+');
+        self::assertIsResource($errors);
         $stack = new ShutdownStack('test', $errors);
 
         $stack->push(static function () use (&$releases): void {
@@ -90,6 +91,7 @@ final class ShutdownStackTest extends TestCase
     {
         $releases = [];
         $errors = fopen('php://memory', 'w+');
+        self::assertIsResource($errors);
         $stack = new ShutdownStack('test', $errors);
         $stack->push(static function () use (&$releases): void {
             $releases[] = 'database';

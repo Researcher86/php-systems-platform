@@ -37,11 +37,13 @@ $config = require __DIR__ . '/../config/platform.php';
 $workers = $config['workers'];
 
 // serve launches the pool with the config's socket and autoscaling bounds
-// of 2..16 workers; the environment overrides let a benchmark, the demo or
-// an experiment run a fixed-size pool, or an isolated one on its own socket.
-$socket = getenv('WORKER_POOL_SOCKET') ?: (string) $workers['socket'];
-$minWorkers = (int) (getenv('WORKER_POOL_MIN') ?: 2);
-$maxWorkers = (int) (getenv('WORKER_POOL_MAX') ?: 16);
+// (workers.min_workers..max_workers, 2..16 by default). config/platform.php
+// reads WORKER_POOL_SOCKET/MIN/MAX itself, which is what lets a benchmark,
+// the demo or an experiment run a fixed-size pool, or an isolated one on its
+// own socket, while every client reads the same socket from the same place.
+$socket = (string) $workers['socket'];
+$minWorkers = (int) $workers['min_workers'];
+$maxWorkers = (int) $workers['max_workers'];
 $requestTimeout = (float) (getenv('WORKER_POOL_TIMEOUT') ?: $workers['task_timeout']);
 
 // The Master's own timeouts (enforced by php-worker-pool's
@@ -91,9 +93,9 @@ $master = new Master(
     maxQueueSize: 10_000,
     requestTimeoutSeconds: $requestTimeout,
     workerExecutionTimeoutSeconds: $executionTimeout,
+    handler: $handler,
     workerBootstrapTimeoutSeconds: $bootstrapTimeout,
     workerDepartureTimeoutSeconds: $departureTimeout,
-    handler: $handler,
 );
 
 $master->run();

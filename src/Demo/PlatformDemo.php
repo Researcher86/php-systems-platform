@@ -95,7 +95,7 @@ final class PlatformDemo
         $this->dataDir = dirname((string) $database['data_dir']);
         $this->binPath = dirname(__DIR__, 2) . '/bin/platform.php';
         $this->logDir = sys_get_temp_dir() . '/php-systems-platform-demo-' . uniqid('', true);
-        $this->orderedWorkers = (int) $workers['count'];
+        $this->orderedWorkers = (int) $workers['demo_workers'];
         $this->http = new HttpProbe(sprintf('http://%s:%d', $this->host, $this->httpPort));
     }
 
@@ -108,9 +108,9 @@ final class PlatformDemo
             OwnedProcess::mkdir($this->logDir);
 
             // The pool Master autoscales from a floor of two, so the story
-            // could only point at a pool of workers.count after the first
-            // burst. Raising the floor (inherited by serve, which launches
-            // the pool) makes it that size from start to finish.
+            // could only point at a pool of workers.demo_workers after the
+            // first burst. Raising the floor (inherited by serve, which
+            // launches the pool) makes it that size from start to finish.
             putenv(sprintf('WORKER_POOL_MIN=%d', $this->orderedWorkers));
 
             $this->startupSections();

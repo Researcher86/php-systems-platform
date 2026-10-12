@@ -53,7 +53,7 @@ final readonly class WorkerFailureTasks
         // only report of this death is the pool's own crash-reap path. The
         // exit() is unreachable fallback for a platform where posix_kill is
         // somehow unavailable.
-        posix_kill(getmypid(), SIGKILL);
+        posix_kill(posix_getpid(), SIGKILL);
         exit(137);
     }
 }

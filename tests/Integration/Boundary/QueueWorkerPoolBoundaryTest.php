@@ -106,12 +106,10 @@ final class QueueWorkerPoolBoundaryTest extends TestCase
                 self::assertArrayHasKey('state', $worker);
             }
 
-            // The workers the platform asked for are the ones the pool is
-            // running - the pool is started by serve, from the same config.
-            $configured = (int) $config['workers']['count'];
-
-            self::assertLessThanOrEqual($configured, count($workers));
-            self::assertGreaterThan(0, count($workers));
+            // The pool is started by serve from the same config, so it runs
+            // within the autoscaling bounds the platform asked for.
+            self::assertGreaterThanOrEqual((int) $config['workers']['min_workers'], count($workers));
+            self::assertLessThanOrEqual((int) $config['workers']['max_workers'], count($workers));
         } finally {
             $pool->close();
         }
@@ -198,7 +196,7 @@ final class QueueWorkerPoolBoundaryTest extends TestCase
 
         sort($pids);
 
-        return array_values($pids);
+        return $pids;
     }
 
     private function assertServerError(

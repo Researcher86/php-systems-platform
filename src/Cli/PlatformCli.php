@@ -649,13 +649,15 @@ final class PlatformCli
         $socketPath = sprintf('%s/php-%s-%s.sock', sys_get_temp_dir(), $name, $id);
         OwnedProcess::mkdir($logDir);
 
-        // The environment replaces the child's whole environment.
+        // The environment replaces the child's whole environment, apart from
+        // where the rest of the platform is (its ports and TMPDIR), which the
+        // pool's job and catalog tasks still need to reach.
         $master = $this->spawn($this->binary('worker.php'), $logDir . '/worker', [
             'WORKER_POOL_SOCKET' => $socketPath,
             'WORKER_POOL_MIN' => (string) $workers,
             'WORKER_POOL_MAX' => (string) $workers,
             'WORKER_POOL_TIMEOUT' => (string) $timeoutSeconds,
-        ], sprintf('Could not start the %d-worker %s pool.', $workers, $name));
+        ] + OwnedProcess::addressEnvironment(), sprintf('Could not start the %d-worker %s pool.', $workers, $name));
 
         if (!OwnedProcess::endpointAnswers('unix://' . $socketPath, self::START_DEADLINE_SECONDS)) {
             $this->terminate($master);
@@ -862,7 +864,7 @@ final class PlatformCli
             );
 
             printf(
-                "Consumer started (forwarders=%d, max attempts=%d, retry delay=%ds, visibility=%ds). SIGTERM/SIGINT to stop.\n",
+                "Consumer started (forwarders=%d, max attempts at publish=%d, retry delay=%ds, visibility=%ds). SIGTERM/SIGINT to stop.\n",
                 $queueConfig['consumers'],
                 $queueConfig['max_attempts'],
                 (int) $queueConfig['retry_delay'],
@@ -1146,7 +1148,7 @@ final class PlatformCli
             requests: (int) $options['requests'],
             concurrency: (int) $options['concurrency'],
             jobs: (int) $options['jobs'],
-            baselineWorkers: (int) $this->config()['workers']['count'],
+            baselineWorkers: (int) $this->config()['workers']['demo_workers'],
             workerCounts: $workerCounts,
         );
 

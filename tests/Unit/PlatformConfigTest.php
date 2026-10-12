@@ -23,6 +23,12 @@ final class PlatformConfigTest extends TestCase
         putenv('PLATFORM_ENV');
         putenv('CACHE_ENABLED');
         putenv('DATABASE_LATENCY_MS');
+        putenv('WORKER_POOL_SOCKET');
+        putenv('WORKER_POOL_MIN');
+        putenv('WORKER_POOL_MAX');
+        putenv('HTTP_PORT');
+        putenv('DATABASE_PORT');
+        putenv('CACHE_PORT');
     }
 
     public function testQueueMaxSizeDefaultsToFiveHundred(): void
@@ -151,5 +157,90 @@ final class PlatformConfigTest extends TestCase
         $config = require dirname(__DIR__, 2) . '/config/platform.php';
 
         self::assertSame(0.0, $config['database']['delay_ms']);
+    }
+
+    /**
+     * Every other path the platform writes lives under sys_get_temp_dir(),
+     * so the pool's socket does too - a hardcoded /tmp put it somewhere else
+     * than the rest of the platform's files wherever TMPDIR is set (macOS).
+     */
+    public function testWorkerPoolSocketDefaultsToTheSystemTempDirectory(): void
+    {
+        putenv('WORKER_POOL_SOCKET');
+
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+
+        self::assertSame(sys_get_temp_dir() . '/php-worker-pool.sock', $config['workers']['socket']);
+    }
+
+    /**
+     * WORKER_POOL_SOCKET was already what bin/worker.php honoured for an
+     * isolated pool; reading it here is what makes serve, the queue
+     * consumer, the CLI clients and the tests reach the same pool through it.
+     */
+    public function testWorkerPoolSocketCanBeOverriddenByEnvironment(): void
+    {
+        putenv('WORKER_POOL_SOCKET=/run/elsewhere/pool.sock');
+
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+
+        self::assertSame('/run/elsewhere/pool.sock', $config['workers']['socket']);
+    }
+
+    /**
+     * The pool serve launches autoscales between these bounds; they are the
+     * real size of the pool, which reporting reads instead of a fixed count.
+     */
+    public function testWorkerPoolBoundsDefaultToTwoAndSixteen(): void
+    {
+        putenv('WORKER_POOL_MIN');
+        putenv('WORKER_POOL_MAX');
+
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+
+        self::assertSame(2, $config['workers']['min_workers']);
+        self::assertSame(16, $config['workers']['max_workers']);
+    }
+
+    public function testWorkerPoolBoundsCanBeOverriddenByEnvironment(): void
+    {
+        putenv('WORKER_POOL_MIN=3');
+        putenv('WORKER_POOL_MAX=5');
+
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+
+        self::assertSame(3, $config['workers']['min_workers']);
+        self::assertSame(5, $config['workers']['max_workers']);
+    }
+
+    public function testPortsDefaultToTheDocumentedOnes(): void
+    {
+        putenv('HTTP_PORT');
+        putenv('DATABASE_PORT');
+        putenv('CACHE_PORT');
+
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+
+        self::assertSame(8080, $config['http']['port']);
+        self::assertSame(5433, $config['database']['port']);
+        self::assertSame(6380, $config['cache']['port']);
+    }
+
+    /**
+     * What lets a test run (or a second stack) live next to a platform that
+     * already holds 8080/5433/6380: every process reads its ports from here,
+     * so one set of environment variables moves all of them.
+     */
+    public function testPortsCanBeOverriddenByEnvironment(): void
+    {
+        putenv('HTTP_PORT=18080');
+        putenv('DATABASE_PORT=15433');
+        putenv('CACHE_PORT=16380');
+
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+
+        self::assertSame(18080, $config['http']['port']);
+        self::assertSame(15433, $config['database']['port']);
+        self::assertSame(16380, $config['cache']['port']);
     }
 }

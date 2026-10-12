@@ -15,8 +15,6 @@ use PHPUnit\Framework\TestCase;
  */
 final class TraceCommandTest extends TestCase
 {
-    private const TRACE_LOG = '/tmp/php-systems-platform/trace.log';
-
     public function testPrintsTheChainForOneRequestId(): void
     {
         $this->seedTraceLog();
@@ -35,7 +33,7 @@ final class TraceCommandTest extends TestCase
         fclose($pipes[2]);
         $code = proc_close($process);
 
-        @unlink(self::TRACE_LOG);
+        @unlink(self::traceLog());
 
         self::assertSame(0, $code, $errors . $output);
 
@@ -95,8 +93,8 @@ final class TraceCommandTest extends TestCase
 
     private function seedTraceLog(): void
     {
-        @mkdir(dirname(self::TRACE_LOG), 0o777, true);
-        @unlink(self::TRACE_LOG);
+        @mkdir(dirname(self::traceLog()), 0o777, true);
+        @unlink(self::traceLog());
 
         $spans = [
             [
@@ -138,6 +136,14 @@ final class TraceCommandTest extends TestCase
             $spans,
         );
 
-        file_put_contents(self::TRACE_LOG, implode(PHP_EOL, $lines) . PHP_EOL);
+        file_put_contents(self::traceLog(), implode(PHP_EOL, $lines) . PHP_EOL);
+    }
+
+    /** Where the platform's own config puts it, so TMPDIR moves it for both sides. */
+    private static function traceLog(): string
+    {
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+
+        return (string) $config['jobs']['trace_store'];
     }
 }

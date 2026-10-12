@@ -24,8 +24,6 @@ use PHPUnit\Framework\TestCase;
  */
 final class StatusCommandTest extends TestCase
 {
-    private const QUEUE_LOG = '/tmp/php-systems-platform/queue/queue.log';
-
     public function testPrintsEveryPlatformSection(): void
     {
         $output = $this->runStatus();
@@ -53,13 +51,13 @@ final class StatusCommandTest extends TestCase
             $output = $this->runStatus();
 
             self::assertSame(1, preg_match('/^  depth:\s+(.+)$/m', $output, $matches));
-            self::assertSame('2', $matches[1]);
+            self::assertSame('2', $matches[1] ?? null);
             self::assertSame(1, preg_match('/^  processed:\s+(.+)$/m', $output, $matches));
-            self::assertSame('0', $matches[1]);
+            self::assertSame('0', $matches[1] ?? null);
             self::assertSame(1, preg_match('/^  failed:\s+(.+)$/m', $output, $matches));
-            self::assertSame('0', $matches[1]);
+            self::assertSame('0', $matches[1] ?? null);
         } finally {
-            @unlink(self::QUEUE_LOG);
+            @unlink(self::queueLog());
         }
     }
 
@@ -86,22 +84,30 @@ final class StatusCommandTest extends TestCase
 
     private function prepareJournal(int $count): void
     {
-        $dir = dirname(self::QUEUE_LOG);
+        $dir = dirname(self::queueLog());
 
         if (!is_dir($dir) && !@mkdir($dir, 0o777, true) && !is_dir($dir)) {
             self::fail('Could not create the queue data dir for the status test.');
         }
 
-        @unlink(self::QUEUE_LOG);
+        @unlink(self::queueLog());
 
         $clock = new SystemClock();
         $producer = new Producer(
-            new InMemoryQueue($clock, new FileStorage(self::QUEUE_LOG)),
+            new InMemoryQueue($clock, new FileStorage(self::queueLog())),
             new JobFactory($clock, new MetricsCollector()),
         );
 
         for ($i = 0; $i < $count; $i++) {
             $producer->dispatch(NoopJob::TYPE);
         }
+    }
+
+    /** Where the platform's own config puts it, so TMPDIR moves it for both sides. */
+    private static function queueLog(): string
+    {
+        $config = require dirname(__DIR__, 2) . '/config/platform.php';
+
+        return (string) $config['queue']['data_dir'] . '/queue.log';
     }
 }

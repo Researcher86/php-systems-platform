@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PhpSystemsPlatform\Benchmarks;
 
 use CurlHandle;
+use InvalidArgumentException;
 use RuntimeException;
 use stdClass;
 
@@ -161,15 +162,21 @@ final class HttpLoadTest
         $capture->headers = '';
         curl_reset($handle);
 
+        $url = rtrim($this->baseUrl, '/') . $path;
+
+        if ($url === '' || $method === '') {
+            throw new InvalidArgumentException('A load request needs a URL and a method.');
+        }
+
         curl_setopt_array($handle, [
-            CURLOPT_URL => rtrim($this->baseUrl, '/') . $path,
+            CURLOPT_URL => $url,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_TIMEOUT => (int) ceil($this->timeoutSeconds),
             CURLOPT_CONNECTTIMEOUT => (int) ceil(self::DEFAULT_CONNECT_TIMEOUT_SECONDS),
             CURLOPT_CUSTOMREQUEST => $method,
             CURLOPT_HTTPHEADER => $this->headerLines($headers),
             // Captured only to read X-Cache from it.
-            CURLOPT_HEADERFUNCTION => static function ($ignored, string $header) use ($capture): int {
+            CURLOPT_HEADERFUNCTION => static function (CurlHandle $ignored, string $header) use ($capture): int {
                 $capture->headers .= $header;
 
                 return strlen($header);

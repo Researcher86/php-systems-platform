@@ -24,8 +24,15 @@ answer". The pool does not know or care which.
 
 ## The lifecycle
 
-- `bin/worker.php` reads `WORKER_POOL_MIN`/`WORKER_POOL_MAX` (defaults from
-  `config/platform.php`: min 2, max 16) and eagerly forks `minWorkers`.
+- `bin/worker.php` reads `workers.min_workers`/`workers.max_workers` from
+  `config/platform.php` (min 2, max 16; overridable with
+  `WORKER_POOL_MIN`/`WORKER_POOL_MAX`) and eagerly forks `minWorkers`. These
+  bounds are the pool's real size. `workers.demo_workers` (4) is not: it is
+  only the fixed size the `demo` pins its pool to and the `load` test's
+  baseline for the queue-scaling phase.
+- The pool listens on `workers.socket` - `sys_get_temp_dir()/php-worker-pool.sock`
+  by default, overridable with `WORKER_POOL_SOCKET` - and every client
+  (`serve`, `queue:consume`, the CLI, the tests) reads the same value.
 - The Master answers a task by dispatching it to an idle worker; if none is
   idle it may fork toward the max, and it retires idle workers back toward the
   min.

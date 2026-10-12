@@ -1359,15 +1359,13 @@ Run the test suite with:
 composer test
 ```
 
-The three commands may evolve with the implementation.
-
 Every push and pull request runs the same three commands on GitHub Actions
 (`.github/workflows/ci.yml`), on PHP 8.5 with the extensions the integrated
 components need:
 
 ```bash
 composer test          # all three suites, in order
-composer analyse       # PHPStan
+composer analyse       # PHPStan, level 7, over src/, bin/ and tests/
 composer format:check  # PHP CS Fixer, no changes allowed
 ```
 
@@ -1375,7 +1373,7 @@ composer format:check  # PHP CS Fixer, no changes allowed
 different kinds of feedback at three very different costs:
 
 ```bash
-composer test:unit          # 131 tests, well under a second - no processes
+composer test:unit          # 145 tests, a few seconds - no servers started
 composer test:integration   # starts real servers, speaks HTTP to them
 composer test:e2e           # drives the CLI as a user would
 ```
@@ -1387,6 +1385,26 @@ unchanged.
 The integration tests start the real database, cache, worker pool and HTTP
 server as child processes, so CI exercises the same process model a local
 run does - no mocks standing in for a component.
+
+They start them where `config/platform.php` says the platform lives:
+`127.0.0.1:8080` (HTTP), `5433` (database), `6380` (cache), the pool socket
+`sys_get_temp_dir()/php-worker-pool.sock`, and data under
+`sys_get_temp_dir()/php-systems-platform/`. Inside the Docker container
+(`make test`) nothing else holds those. Run on a host where a platform is
+already up, a suite reuses that serve instead of starting its own (the demo
+test skips), and the suites that clear the data directory would clear its
+data. To run the tests next to a running stack instead, move the whole test
+stack - every process reads the same variables:
+
+```bash
+HTTP_PORT=18080 DATABASE_PORT=15433 CACHE_PORT=16380 \
+WORKER_POOL_SOCKET=/tmp/platform-test-pool.sock \
+TMPDIR=/tmp/platform-test composer test
+```
+
+The ports are configurable, not ephemeral: the suites assert against fixed,
+known addresses, and two suites (`MigratorUpgradeTest`, `DatabaseDelayTest`)
+start private databases on their own fixed ports, 5455 and 5456.
 
 ## Integration tests by boundary
 
@@ -1520,7 +1538,8 @@ Environment
   corpus_orders          1000
   queue_jobs             1000
   scaling_worker_counts  1,2,4,8
-  workers_configured     4
+  pool_workers           2..16 (autoscaling)
+  baseline_workers       4
   queue_max_size         500
   cache_enabled_for_b    no (CACHE_ENABLED=0)
 
@@ -1620,6 +1639,7 @@ Detailed documentation is kept separately from this README.
 ```text
 docs/
 ├── architecture.md
+├── components.md
 ├── concurrency.md
 ├── memory.md
 ├── workers.md
@@ -1628,7 +1648,10 @@ docs/
 ├── database.md
 ├── backpressure.md
 ├── failure-handling.md
+├── failure-matrix.md
 ├── observability.md
+├── ownership.md
+├── process-model.md
 └── benchmarks.md
 ```
 
@@ -1638,6 +1661,7 @@ the *why* behind one part of it:
 | Document               | What it is the why of |
 | ---------------------- | --------------------- |
 | `architecture.md`      | the process split and ownership rules |
+| `components.md`        | the surface of each integrated component, as the platform calls it |
 | `concurrency.md`       | when the three concurrency models pay |
 | `memory.md`            | the copy-on-write price of process workers |
 | `workers.md`           | the pool lifecycle and its timeouts |
@@ -1651,8 +1675,6 @@ the *why* behind one part of it:
 | `ownership.md`         | who owns each resource and who stops it |
 | `process-model.md`     | the live process tree, readable with `ps`/`pstree` |
 | `benchmarks.md`        | every benchmark, measured and interpreted |
-
-`docs/components.md` fixes the surface of each integrated component.
 
 The individual documents explain the experiments and implementation details.
 
@@ -1775,17 +1797,19 @@ Composer packages and uses the first two levels as concepts — see
 
 **Level 8 of 8 — Final Platform**
 
-The project is intended to evolve incrementally through the implementation plan.
+All forty steps of [`PLAN.md`](PLAN.md) are implemented: the five components
+run together as one platform (`serve`, `queue:consume`, the worker pool, the
+database and the cache as separate processes), and every interaction between
+them can be observed (`status`, `/metrics`, `trace`), measured (`benchmark`,
+`load`, `workers:memory`), tested (unit, integration-by-boundary and
+end-to-end suites on CI) and intentionally broken (`experiments`,
+`/debug/fail-worker`, the failure demos).
 
-The initial milestone is not production readiness.
-
-The initial milestone is:
-
-```text
-All components work together
-and their interactions can be observed,
-measured, tested, and intentionally broken.
-```
+The components are pinned to their `1.0.0` releases. The goal was never
+production readiness: the known limits the platform deliberately leaves in
+place - no outbox between the order write and the job publish, no
+transactions around a job's side effects - are written down in
+[`docs/failure-handling.md`](docs/failure-handling.md) rather than hidden.
 
 ---
 

@@ -1805,7 +1805,7 @@ them can be observed (`status`, `/metrics`, `trace`), measured (`benchmark`,
 end-to-end suites on CI) and intentionally broken (`experiments`,
 `/debug/fail-worker`, the failure demos).
 
-The components are pinned to their `1.0.0` releases. The goal was never
+The components are pinned to their `1.1.0` releases. The goal was never
 production readiness: the known limits the platform deliberately leaves in
 place - no outbox between the order write and the job publish, no
 transactions around a job's side effects - are written down in

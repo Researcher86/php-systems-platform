@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "7f61653f93a14fffe9c8a32c53d81040",
+    "content-hash": "4f8dad0a3e39f6949d9264b1be898232",
     "packages": [
         {
             "name": "brick/math",
@@ -222,16 +222,16 @@
         },
         {
             "name": "researcher86/php-job-queue",
-            "version": "v1.0.0",
+            "version": "v1.1.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-job-queue.git",
-                "reference": "a1fb925a687533eada81141bb981cd3b8202a69f"
+                "reference": "b969ae4d84571b8fba59a53b096276425d3edcec"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-job-queue/zipball/a1fb925a687533eada81141bb981cd3b8202a69f",
-                "reference": "a1fb925a687533eada81141bb981cd3b8202a69f",
+                "url": "https://api.github.com/repos/Researcher86/php-job-queue/zipball/b969ae4d84571b8fba59a53b096276425d3edcec",
+                "reference": "b969ae4d84571b8fba59a53b096276425d3edcec",
                 "shasum": ""
             },
             "require": {
@@ -261,36 +261,36 @@
                     "phpunit"
                 ],
                 "analyse": [
-                    "phpstan analyse"
+                    "phpstan analyse --memory-limit=1G"
                 ],
                 "format": [
-                    "php-cs-fixer fix"
+                    "php-cs-fixer fix --diff"
                 ],
                 "format:check": [
-                    "php-cs-fixer check --diff"
+                    "php-cs-fixer fix --diff --dry-run"
                 ]
             },
             "license": [
                 "MIT"
             ],
             "support": {
-                "source": "https://github.com/Researcher86/php-job-queue/tree/v1.0.0",
+                "source": "https://github.com/Researcher86/php-job-queue/tree/v1.1.0",
                 "issues": "https://github.com/Researcher86/php-job-queue/issues"
             },
-            "time": "2026-10-02T06:46:11+00:00"
+            "time": "2026-10-12T10:48:28+00:00"
         },
         {
             "name": "researcher86/php-mini-cache",
-            "version": "v1.0.0",
+            "version": "v1.1.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-mini-cache.git",
-                "reference": "c916a2831bbefc188c7ac83eb2e96d7c772c8e2b"
+                "reference": "58386550902da7bf9d65c491b9886b37981b55a2"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-mini-cache/zipball/c916a2831bbefc188c7ac83eb2e96d7c772c8e2b",
-                "reference": "c916a2831bbefc188c7ac83eb2e96d7c772c8e2b",
+                "url": "https://api.github.com/repos/Researcher86/php-mini-cache/zipball/58386550902da7bf9d65c491b9886b37981b55a2",
+                "reference": "58386550902da7bf9d65c491b9886b37981b55a2",
                 "shasum": ""
             },
             "require": {
@@ -319,7 +319,7 @@
                     "phpunit"
                 ],
                 "analyse": [
-                    "phpstan analyse"
+                    "phpstan analyse --memory-limit=1G"
                 ],
                 "format": [
                     "php-cs-fixer fix --diff"
@@ -332,33 +332,32 @@
                 "MIT"
             ],
             "support": {
-                "source": "https://github.com/Researcher86/php-mini-cache/tree/v1.0.0",
+                "source": "https://github.com/Researcher86/php-mini-cache/tree/v1.1.0",
                 "issues": "https://github.com/Researcher86/php-mini-cache/issues"
             },
-            "time": "2026-10-02T14:02:48+00:00"
+            "time": "2026-10-12T10:48:28+00:00"
         },
         {
             "name": "researcher86/php-mini-database",
-            "version": "v1.0.0",
+            "version": "v1.1.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-mini-database.git",
-                "reference": "07058a5e5e42a051865fa7a13ddc79977db7415b"
+                "reference": "9adde5d113786ae8730a89721302270e1130c3e9"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-mini-database/zipball/07058a5e5e42a051865fa7a13ddc79977db7415b",
-                "reference": "07058a5e5e42a051865fa7a13ddc79977db7415b",
+                "url": "https://api.github.com/repos/Researcher86/php-mini-database/zipball/9adde5d113786ae8730a89721302270e1130c3e9",
+                "reference": "9adde5d113786ae8730a89721302270e1130c3e9",
                 "shasum": ""
             },
             "require": {
-                "ext-ffi": "*",
+                "ext-ctype": "*",
+                "ext-mbstring": "*",
                 "ext-pcntl": "*",
+                "ext-phar": "*",
                 "ext-posix": "*",
-                "ext-sockets": "*",
-                "ext-sysvmsg": "*",
-                "ext-sysvsem": "*",
-                "ext-sysvshm": "*",
+                "ext-sodium": "*",
                 "php": "^8.5"
             },
             "require-dev": {
@@ -367,6 +366,10 @@
                 "phpstan/phpstan-phpunit": "^2.0",
                 "phpunit/phpunit": "^11.5"
             },
+            "bin": [
+                "bin/minidb",
+                "bin/minidb-server"
+            ],
             "type": "project",
             "autoload": {
                 "psr-4": {
@@ -389,33 +392,33 @@
                     "phpstan analyse --memory-limit=1G"
                 ],
                 "format": [
-                    "php-cs-fixer fix"
+                    "php-cs-fixer fix --diff"
                 ],
                 "format:check": [
-                    "php-cs-fixer check --diff"
+                    "php-cs-fixer fix --diff --dry-run"
                 ]
             },
             "license": [
                 "MIT"
             ],
             "support": {
-                "source": "https://github.com/Researcher86/php-mini-database/tree/v1.0.0",
+                "source": "https://github.com/Researcher86/php-mini-database/tree/v1.1.0",
                 "issues": "https://github.com/Researcher86/php-mini-database/issues"
             },
-            "time": "2026-10-02T11:21:04+00:00"
+            "time": "2026-10-12T10:48:28+00:00"
         },
         {
             "name": "researcher86/php-mini-http-server",
-            "version": "v1.0.0",
+            "version": "v1.1.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-mini-http-server.git",
-                "reference": "1f067f78db947d2282087de303d5b7ad5c544ab3"
+                "reference": "1f73404b193b6d7dda29f7d82bf97360d5b75e03"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-mini-http-server/zipball/1f067f78db947d2282087de303d5b7ad5c544ab3",
-                "reference": "1f067f78db947d2282087de303d5b7ad5c544ab3",
+                "url": "https://api.github.com/repos/Researcher86/php-mini-http-server/zipball/1f73404b193b6d7dda29f7d82bf97360d5b75e03",
+                "reference": "1f73404b193b6d7dda29f7d82bf97360d5b75e03",
                 "shasum": ""
             },
             "require": {
@@ -445,36 +448,36 @@
                     "phpunit"
                 ],
                 "analyse": [
-                    "phpstan analyse"
+                    "phpstan analyse --memory-limit=1G"
                 ],
                 "format": [
-                    "php-cs-fixer fix"
+                    "php-cs-fixer fix --diff"
                 ],
                 "format:check": [
-                    "php-cs-fixer check --diff"
+                    "php-cs-fixer fix --diff --dry-run"
                 ]
             },
             "license": [
                 "MIT"
             ],
             "support": {
-                "source": "https://github.com/Researcher86/php-mini-http-server/tree/v1.0.0",
+                "source": "https://github.com/Researcher86/php-mini-http-server/tree/v1.1.0",
                 "issues": "https://github.com/Researcher86/php-mini-http-server/issues"
             },
-            "time": "2026-10-02T06:50:25+00:00"
+            "time": "2026-10-12T10:48:28+00:00"
         },
         {
             "name": "researcher86/php-worker-pool",
-            "version": "v1.0.0",
+            "version": "v1.1.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-worker-pool.git",
-                "reference": "ee776796cbf30fce76150fc62f35c97275f689d6"
+                "reference": "b616246957c0fac9bbb71100c14663b86f74c2a3"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-worker-pool/zipball/ee776796cbf30fce76150fc62f35c97275f689d6",
-                "reference": "ee776796cbf30fce76150fc62f35c97275f689d6",
+                "url": "https://api.github.com/repos/Researcher86/php-worker-pool/zipball/b616246957c0fac9bbb71100c14663b86f74c2a3",
+                "reference": "b616246957c0fac9bbb71100c14663b86f74c2a3",
                 "shasum": ""
             },
             "require": {
@@ -517,10 +520,10 @@
                 "MIT"
             ],
             "support": {
-                "source": "https://github.com/Researcher86/php-worker-pool/tree/v1.0.0",
+                "source": "https://github.com/Researcher86/php-worker-pool/tree/v1.1.0",
                 "issues": "https://github.com/Researcher86/php-worker-pool/issues"
             },
-            "time": "2026-10-02T06:46:51+00:00"
+            "time": "2026-10-12T10:57:54+00:00"
         }
     ],
     "packages-dev": [

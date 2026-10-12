@@ -6,7 +6,7 @@ so every later phase wires its adapter against a known contract instead of
 re-reading the components' internals each time.
 
 All five are Composer `vcs` dependencies on `https://github.com/Researcher86`,
-pinned to `1.0.0` (the `v1.0.0` tags). The components stay the owners of their mechanics; the
+pinned to `1.1.0` (the `v1.1.0` tags). The components stay the owners of their mechanics; the
 platform only ever calls the entry points listed here.
 
 ## Common defaults
@@ -149,8 +149,9 @@ which boots the platform autoloader and runs `PhpMiniCache\Server\CacheServer`
 with the component's own environment contract (`CACHE_HOST`, `CACHE_PORT`,
 plus a `CACHE_SNAPSHOT` path that enables persistence). The component's own
 `bin/server.php` resolves the autoloader from an installed dependency since
-`v1.0.0` (its `bin/bootstrap.php`), but it has no snapshot option, which is
-why the platform keeps its own entry.
+`v1.0.0` (its `bin/bootstrap.php`), and since `v1.1.0` it reads
+`CACHE_SNAPSHOT_PATH` too. The platform keeps its own entry so that its
+`CACHE_SNAPSHOT` contract and logger stay unchanged.
 
 The cache component has **no daemon mode**: its server is a foreground
 process. `PlatformCli::serve()` therefore owns the cache as a direct child —

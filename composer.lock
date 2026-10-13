@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "4f8dad0a3e39f6949d9264b1be898232",
+    "content-hash": "a203c52c902af8ba19384523d9fc23e7",
     "packages": [
         {
             "name": "brick/math",
@@ -465,6 +465,69 @@
                 "issues": "https://github.com/Researcher86/php-mini-http-server/issues"
             },
             "time": "2026-10-12T10:48:28+00:00"
+        },
+        {
+            "name": "researcher86/php-mini-search",
+            "version": "v0.9.0",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/Researcher86/php-mini-search.git",
+                "reference": "9d8dcb2411d29aa3c964e24e6e90fa92da218340"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/Researcher86/php-mini-search/zipball/9d8dcb2411d29aa3c964e24e6e90fa92da218340",
+                "reference": "9d8dcb2411d29aa3c964e24e6e90fa92da218340",
+                "shasum": ""
+            },
+            "require": {
+                "ext-intl": "*",
+                "ext-mbstring": "*",
+                "ext-pcntl": "*",
+                "php": "^8.5"
+            },
+            "require-dev": {
+                "friendsofphp/php-cs-fixer": "^3.95",
+                "phpstan/phpstan": "^2.2",
+                "phpstan/phpstan-phpunit": "^2.0",
+                "phpunit/phpunit": "^11.5"
+            },
+            "bin": [
+                "bin/mini-search"
+            ],
+            "type": "project",
+            "autoload": {
+                "psr-4": {
+                    "PhpMiniSearch\\": "src/"
+                }
+            },
+            "autoload-dev": {
+                "psr-4": {
+                    "PhpMiniSearch\\Tests\\": "tests/"
+                }
+            },
+            "scripts": {
+                "test": [
+                    "phpunit"
+                ],
+                "analyse": [
+                    "phpstan analyse --memory-limit=1G"
+                ],
+                "format": [
+                    "php-cs-fixer fix --diff"
+                ],
+                "format:check": [
+                    "php-cs-fixer fix --diff --dry-run"
+                ]
+            },
+            "license": [
+                "MIT"
+            ],
+            "support": {
+                "source": "https://github.com/Researcher86/php-mini-search/tree/v0.9.0",
+                "issues": "https://github.com/Researcher86/php-mini-search/issues"
+            },
+            "time": "2026-10-13T12:11:16+00:00"
         },
         {
             "name": "researcher86/php-worker-pool",

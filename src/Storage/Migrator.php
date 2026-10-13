@@ -64,6 +64,7 @@ final class Migrator
                 )
                 SQL,
         );
+        self::upgradeProducts($database);
 
         $database->write(
             <<<'SQL'
@@ -120,6 +121,41 @@ final class Migrator
             'UPDATE orders SET product = ? WHERE product IS NULL',
             [OrderService::DEFAULT_PRODUCT],
         );
+    }
+
+    /**
+     * The columns php-mini-search needs, added in place to a products table
+     * of any age (PLAN Step 41):
+     *
+     *  - `description`: the text search indexes beyond the title. VARCHAR,
+     *    because the mini database has no TEXT type; 4000 bytes;
+     *  - `version`: bumped by every write, sent to the index as the source
+     *    version that orders late or repeated jobs;
+     *  - `deleted`: a soft delete. The row and its version outlive the
+     *    product, so a sku deleted and created again continues at a higher
+     *    version instead of starting at 1 below its own tombstone.
+     *
+     * An added column needs a DEFAULT to be NOT NULL on a table with rows,
+     * and "already has a column" is the normal case on every restart, matched
+     * on the message for the reason upgradeOrders() gives.
+     */
+    private static function upgradeProducts(Database $database): void
+    {
+        $columns = [
+            'description' => "VARCHAR(4000) NOT NULL DEFAULT ''",
+            'version' => 'INT NOT NULL DEFAULT 1',
+            'deleted' => 'BOOL NOT NULL DEFAULT FALSE',
+        ];
+
+        foreach ($columns as $column => $definition) {
+            try {
+                $database->write("ALTER TABLE products ADD COLUMN {$column} {$definition}");
+            } catch (Throwable $e) {
+                if (!str_contains($e->getMessage(), 'already has a column')) {
+                    throw new RuntimeException("Could not add the {$column} column to products.", previous: $e);
+                }
+            }
+        }
     }
 
     /**

@@ -10,6 +10,7 @@ use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Observability\MetricsReporter;
 use PhpSystemsPlatform\Observability\Trace;
 use PhpSystemsPlatform\Queue\QueueJournal;
+use PhpSystemsPlatform\Search\SearchClient;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Workers\ConcurrentTaskRunner;
 use PhpSystemsPlatform\Workers\WorkerFailureInjector;
@@ -43,6 +44,9 @@ final readonly class ApplicationWiring
         public ?MetricsReporter $metricsReporter = null,
         public ?Trace $trace = null,
         public ?Logger $logger = null,
+        // Null: no GET /products/search. Products can still be written; their
+        // product.index jobs wait in the queue until a search service exists.
+        public ?SearchClient $search = null,
     ) {
     }
 }

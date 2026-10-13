@@ -100,6 +100,19 @@ the order, relay it to the queue afterwards); the platform has no
 transactions and no relay, so the window stays open. Backpressure narrows
 nothing here - it is checked before the insert, so a 429 writes neither.
 
+### Product write + `product.index` publish is the same dual write
+
+`ProductService` writes the product row, then publishes `product.index` for
+php-mini-search, with nothing tying the two together, exactly like orders.
+A process that dies in between leaves the search index one change behind for
+that product. Unlike the order gap, this one is healed: the next change to
+the product publishes a job that sends its current row, and a full reindex
+(`product.reindex`, or `search:reindex`) resends every live product and
+removes whatever the index holds that the catalog no longer has. The outbox
+that would close the window was weighed and rejected. The mini database
+allows one transaction per server, so an outbox transaction around every
+product write would block every other write the platform makes.
+
 ### `OrderProcessJob` is not atomic, and records its idempotency last
 
 Settling an order is three separate steps against the database, then the

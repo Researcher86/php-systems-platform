@@ -39,7 +39,7 @@ final class OwnedProcess
      * its ports, the pool socket, and TMPDIR, which sys_get_temp_dir() - and
      * so every data path - follows.
      */
-    private const array ADDRESS_VARIABLES = ['HTTP_PORT', 'DATABASE_PORT', 'CACHE_PORT', 'WORKER_POOL_SOCKET', 'TMPDIR'];
+    private const array ADDRESS_VARIABLES = ['HTTP_PORT', 'DATABASE_PORT', 'CACHE_PORT', 'SEARCH_PORT', 'WORKER_POOL_SOCKET', 'TMPDIR'];
 
     /** @var resource|null */
     private $process = null;

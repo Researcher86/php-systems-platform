@@ -11,10 +11,12 @@ use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderService;
 use PhpSystemsPlatform\Domain\SequentialOrderLoader;
 use PhpSystemsPlatform\Observability\Trace;
+use PhpSystemsPlatform\Search\SearchClient;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
 use PhpSystemsPlatform\Storage\Repositories\InventoryRepository;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
+use PhpSystemsPlatform\Storage\Repositories\ProductRepository;
 use Throwable;
 
 /**
@@ -37,6 +39,8 @@ final class JobExecutor
     private ?SequentialOrderLoader $loader = null;
     private ?IdempotencyGuard $idempotency = null;
     private ?InventoryRepository $inventory = null;
+    private ?ProductRepository $products = null;
+    private ?SearchClient $search = null;
 
     /** stat of the idempotency store the current guard was loaded from */
     private ?string $idempotencyStat = null;
@@ -46,12 +50,14 @@ final class JobExecutor
      * @param array<string, mixed> $cacheConfig        the `cache` config block
      * @param string|null          $idempotencyLogPath the `jobs.idempotency_store` journal path, or null for no guard
      * @param Trace|null           $trace              PLAN Step 24's tracer, or null for none
+     * @param array<string, mixed>|null $searchConfig  the `search` config block, or null where the product jobs cannot run
      */
     public function __construct(
         private readonly array $databaseConfig,
         private readonly array $cacheConfig,
         private readonly ?string $idempotencyLogPath = null,
         private readonly ?Trace $trace = null,
+        private readonly ?array $searchConfig = null,
     ) {
     }
 
@@ -64,6 +70,8 @@ final class JobExecutor
             $this->loader(),
             $this->idempotency($job),
             $this->inventory(),
+            $this->products(),
+            $this->search(),
         );
 
         // A job whose payload names the request that published it re-opens
@@ -174,5 +182,19 @@ final class JobExecutor
     private function inventory(): InventoryRepository
     {
         return $this->inventory ??= new InventoryRepository($this->database());
+    }
+
+    private function products(): ProductRepository
+    {
+        return $this->products ??= new ProductRepository($this->database());
+    }
+
+    private function search(): ?SearchClient
+    {
+        if ($this->searchConfig === null) {
+            return null;
+        }
+
+        return $this->search ??= SearchClient::fromConfig($this->searchConfig);
     }
 }

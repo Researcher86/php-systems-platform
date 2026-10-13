@@ -9,7 +9,9 @@ use PhpJobQueue\Job\Job as QueueJob;
 use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Domain\OrderLoader;
 use PhpSystemsPlatform\Domain\OrderService;
+use PhpSystemsPlatform\Search\SearchClient;
 use PhpSystemsPlatform\Storage\Repositories\InventoryRepository;
+use PhpSystemsPlatform\Storage\Repositories\ProductRepository;
 
 /**
  * Everything a running platform Job may reach: the queue carrier it came
@@ -18,7 +20,8 @@ use PhpSystemsPlatform\Storage\Repositories\InventoryRepository;
  *
  * `idempotency` is null when no idempotency store is wired and `inventory`
  * is null where nothing may write stock; a job must behave sensibly without
- * either.
+ * either. `products` and `search` are null where no `search` config block
+ * reached the worker; the product jobs fail their attempt without them.
  */
 final readonly class JobContext
 {
@@ -29,6 +32,8 @@ final readonly class JobContext
         public ?OrderLoader $loader = null,
         public ?IdempotencyGuard $idempotency = null,
         public ?InventoryRepository $inventory = null,
+        public ?ProductRepository $products = null,
+        public ?SearchClient $search = null,
     ) {
     }
 

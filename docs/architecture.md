@@ -89,9 +89,9 @@ with fewer pieces gets the old behavior back instead of a crash.
 `config/platform.php` is a single file of defaults an environment variable or
 a command may override. The environment overrides are the deliberate ones:
 `QUEUE_MAX_SIZE`, `CACHE_ENABLED`, `PLATFORM_ENV`, `DATABASE_LATENCY_MS`,
-`WORKER_POOL_SOCKET`/`WORKER_POOL_MIN`/`WORKER_POOL_MAX`, and the ports
-`HTTP_PORT`/`DATABASE_PORT`/`CACHE_PORT`. Two of them encode policy, not
-tuning:
+`WORKER_POOL_SOCKET`/`WORKER_POOL_MIN`/`WORKER_POOL_MAX`, `SEARCH_ENABLED`,
+`SEARCH_TOKEN`, and the ports `HTTP_PORT`/`DATABASE_PORT`/`CACHE_PORT`/
+`SEARCH_PORT`. Two of them encode policy, not tuning:
 
 - `PLATFORM_ENV` gates failure injection: worker crashes, `/debug/fail-worker`
   and the database delay exist only where a deployment is not serving.
@@ -115,11 +115,12 @@ Infrastructure, and infrastructure must not become coupled to business
 logic. The actual cross-namespace imports in `src/`:
 
 ```text
-Application -> Http, Observability, Domain, Cache, Workers, Queue
+Application -> Http, Observability, Domain, Cache, Workers, Queue, Search
 Domain      -> Storage (repositories), Queue (job type constants)
 Observability -> Queue (journal), Memory
 Cache       -> Domain (Order), Observability
-Queue       -> Storage, Domain, Cache, Workers, Observability
+Queue       -> Storage, Domain, Cache, Workers, Observability, Search
+Search      -> nothing (curl and JSON; no php-mini-search class)
 Storage     -> Domain (entities), Observability
 Workers     -> Domain, Queue, Storage, Memory, Observability
 Cli         -> everything (the composition root)

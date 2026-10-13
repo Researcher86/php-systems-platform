@@ -77,6 +77,7 @@ final class WorkerJobs
                 ? (string) $this->config['jobs']['idempotency_store']
                 : null,
             $this->trace,
+            isset($this->config['search']) ? (array) $this->config['search'] : null,
         );
     }
 }

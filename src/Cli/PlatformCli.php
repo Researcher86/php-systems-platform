@@ -34,14 +34,19 @@ use PhpSystemsPlatform\Application\Handlers\OrderCreateHandler;
 use PhpSystemsPlatform\Application\Handlers\OrderReadHandler;
 use PhpSystemsPlatform\Application\Handlers\OrderUpdateHandler;
 use PhpSystemsPlatform\Application\Handlers\ParallelHandler;
+use PhpSystemsPlatform\Application\Handlers\ProductDeleteHandler;
+use PhpSystemsPlatform\Application\Handlers\ProductPutHandler;
+use PhpSystemsPlatform\Application\Handlers\ProductSearchHandler;
 use PhpSystemsPlatform\Application\Handlers\QueueStatusHandler;
 use PhpSystemsPlatform\Application\Handlers\WorkersStatusHandler;
 use PhpSystemsPlatform\Benchmarks\LoadTestRunner;
 use PhpSystemsPlatform\Cache\CacheService;
 use PhpSystemsPlatform\Demo\PlatformDemo;
 use PhpSystemsPlatform\Domain\OrderService;
+use PhpSystemsPlatform\Domain\ProductService;
 use PhpSystemsPlatform\Domain\SequentialOrderLoader;
 use PhpSystemsPlatform\Experiments\FailureExperiments;
+use PhpSystemsPlatform\Http\RequestMethod;
 use PhpSystemsPlatform\Http\Router;
 use PhpSystemsPlatform\Memory\ForkedMemoryDemo;
 use PhpSystemsPlatform\Memory\MemoryReporter;
@@ -54,13 +59,17 @@ use PhpSystemsPlatform\Queue\JobExecutor;
 use PhpSystemsPlatform\Queue\JobRegistry;
 use PhpSystemsPlatform\Queue\Jobs\FailingJob;
 use PhpSystemsPlatform\Queue\Jobs\OrderProcessJob;
+use PhpSystemsPlatform\Queue\Jobs\ProductReindexJob;
 use PhpSystemsPlatform\Queue\JournalOnlyQueue;
 use PhpSystemsPlatform\Queue\QueueConsumer;
 use PhpSystemsPlatform\Queue\QueueJournal;
+use PhpSystemsPlatform\Search\SearchClient;
+use PhpSystemsPlatform\Search\SearchUnavailable;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Migrator;
 use PhpSystemsPlatform\Storage\Repositories\CatalogRepository;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
+use PhpSystemsPlatform\Storage\Repositories\ProductRepository;
 use PhpSystemsPlatform\Support\HttpProbe;
 use PhpSystemsPlatform\Support\OwnedProcess;
 use PhpSystemsPlatform\Support\ShutdownStack;
@@ -122,6 +131,7 @@ final class PlatformCli
         'experiments' => 'Run the Step 30 failure/overload experiments.',
         'metrics' => 'Print the platform\'s standard metric snapshot.',
         'trace' => 'Print the spans recorded for one request_id: trace <request_id>.',
+        'search:reindex' => 'Send every live product to php-mini-search as one full reindex.',
     ];
 
     /** How long a server this process started gets to start answering. */
@@ -190,6 +200,7 @@ final class PlatformCli
             'trace' => $this->traceCommand($args),
             'status' => $this->statusCommand(),
             'demo' => new PlatformDemo()->run(),
+            'search:reindex' => $this->searchReindex(),
             default => throw new \LogicException(sprintf('Command "%s" is listed but not dispatched.', $command)),
         };
     }
@@ -225,6 +236,10 @@ final class PlatformCli
 
             $this->ensureWorkerPool($shutdown, $workersConfig);
 
+            $producer = $this->producer($config['queue']);
+            $search = $this->ensureSearchServer($shutdown, $config['search']);
+            $this->requestReindexIfNeeded($search, $producer);
+
             // The debug route exists only in development/demo environments;
             // a null injector means application() never registers it.
             $failureInjector = $config['failure_injection']['enabled']
@@ -239,7 +254,7 @@ final class PlatformCli
             $application = $this->application(new ApplicationWiring(
                 database: $database,
                 cache: $cache,
-                producer: $this->producer($config['queue']),
+                producer: $producer,
                 runner: new ConcurrentTaskRunner($this->poolClient($workersConfig)),
                 queueJournal: $queueJournal,
                 workersStatusPath: $this->workersStatusPath($config),
@@ -253,6 +268,7 @@ final class PlatformCli
                 ),
                 trace: $systemTrace,
                 logger: $logger,
+                search: $search,
             ));
 
             $http = $config['http'];
@@ -351,6 +367,8 @@ final class PlatformCli
         $cache = $wiring->cache;
         $journal = $wiring->queueJournal;
         $orders = new OrderService(new OrderRepository($wiring->database), $wiring->producer);
+        $productRepository = new ProductRepository($wiring->database);
+        $products = new ProductService($productRepository, $wiring->producer);
 
         // Only a real queue has a depth to be overloaded.
         $backpressure = ($journal !== null && $wiring->maxQueueSize !== null)
@@ -364,6 +382,12 @@ final class PlatformCli
         $router->put('/orders/{id}', (new OrderUpdateHandler($orders, $cache))(...));
         $router->get('/parallel', (new ParallelHandler($wiring->runner))(...));
         $router->get('/workers', (new WorkersStatusHandler($wiring->workersStatusPath))(...));
+        $router->put('/products/{sku}', (new ProductPutHandler($products))(...));
+        $router->add(RequestMethod::DELETE, '/products/{sku}', (new ProductDeleteHandler($products))(...));
+
+        if ($wiring->search !== null) {
+            $router->get('/products/search', (new ProductSearchHandler($wiring->search, $productRepository))(...));
+        }
 
         if ($journal !== null) {
             $router->get('/queue/status', (new QueueStatusHandler($journal))(...));
@@ -554,6 +578,108 @@ final class PlatformCli
     }
 
     /**
+     * php-mini-search, the sixth component (PLAN Step 41): started as
+     * `vendor/bin/mini-search serve` like any service would be, and spoken to
+     * only over HTTP. Start-or-adopt like the cache: a search service already
+     * answering on the port is used and left running.
+     *
+     * The child gets an explicit environment — its port, data directory and
+     * the shared token — and nothing else from this process. It replays its
+     * log before it listens, so it gets `start_deadline`, not the 10 s the
+     * other servers get. SIGTERM is its graceful drain.
+     *
+     * @param array<string, mixed> $config the `search` config block
+     */
+    private function ensureSearchServer(ShutdownStack $shutdown, array $config): ?SearchClient
+    {
+        $address = sprintf('tcp://%s:%d', $config['host'], $config['port']);
+
+        if (!(bool) ($config['enabled'] ?? true)) {
+            printf("Search disabled (SEARCH_ENABLED): no search service on %s\n", $address);
+
+            return null;
+        }
+
+        $client = SearchClient::fromConfig($config);
+
+        if (OwnedProcess::portAnswers((string) $config['host'], (int) $config['port'], 0.5)) {
+            printf("Search service already running on %s\n", $address);
+
+            return $client;
+        }
+
+        $dataDir = (string) $config['data_dir'];
+        OwnedProcess::mkdir($dataDir);
+
+        $this->spawnOwned($shutdown, 'search service', dirname(__DIR__, 2) . '/vendor/bin/mini-search', $dataDir . '/search', [
+            'MINI_SEARCH_HOST' => (string) $config['host'],
+            'MINI_SEARCH_PORT' => (string) $config['port'],
+            'MINI_SEARCH_DATA_DIR' => $dataDir,
+            'MINI_SEARCH_TOKEN' => (string) $config['token'],
+            'MINI_SEARCH_LOG_LEVEL' => 'error',
+        ], ['serve']);
+
+        if (!OwnedProcess::endpointAnswers($address, (float) ($config['start_deadline'] ?? self::START_DEADLINE_SECONDS))) {
+            throw new RuntimeException(sprintf('Search service did not start listening on %s in time.', $address));
+        }
+
+        printf("Search service listening on %s\n", $address);
+
+        return $client;
+    }
+
+    /**
+     * A search service that was never filled, or lost its log, asks for a
+     * full reindex instead of answering "no results" forever. serve answers
+     * by publishing one `product.reindex` job; the consumer runs it. Without
+     * a producer (or a search service that does not answer) nothing is
+     * published, and `search:reindex` remains the manual way.
+     */
+    private function requestReindexIfNeeded(?SearchClient $search, ?Producer $producer): void
+    {
+        if ($search === null) {
+            return;
+        }
+
+        try {
+            $reason = $search->notReadyReason();
+        } catch (SearchUnavailable $e) {
+            printf("Search readiness unknown (%s); no reindex requested\n", $e->getMessage());
+
+            return;
+        }
+
+        if ($reason === null || $producer === null) {
+            return;
+        }
+
+        $producer->dispatch(ProductReindexJob::TYPE, ['reason' => $reason]);
+        printf("Search service needs a full reindex (%s): product.reindex published\n", $reason);
+    }
+
+    /**
+     * `search:reindex`: the full reindex in the foreground, against a running
+     * database and search service.
+     */
+    private function searchReindex(): int
+    {
+        $config = $this->config();
+        $database = Database::connect($config['database']);
+
+        try {
+            $result = ProductReindexJob::run(new ProductRepository($database), SearchClient::fromConfig($config['search']));
+        } catch (RuntimeException $e) {
+            return $this->fail($e);
+        } finally {
+            $database->close();
+        }
+
+        printf("Generation %d: %d products sent, %d removed from the index\n", $result['generation'], $result['sent'], $result['removed']);
+
+        return 0;
+    }
+
+    /**
      * @param array<string, mixed> $config
      */
     private function cacheServerAnswers(array $config): bool
@@ -621,10 +747,11 @@ final class PlatformCli
      * step IS the ownership: an adopted server never reaches this method.
      *
      * @param array<string, string>|null $env
+     * @param list<string>               $arguments after the script name
      */
-    private function spawnOwned(ShutdownStack $shutdown, string $name, string $script, string $logPrefix, ?array $env): void
+    private function spawnOwned(ShutdownStack $shutdown, string $name, string $script, string $logPrefix, ?array $env, array $arguments = []): void
     {
-        $process = $this->spawn($script, $logPrefix, $env, sprintf('Could not start the %s process.', $name));
+        $process = $this->spawn($script, $logPrefix, $env, sprintf('Could not start the %s process.', $name), $arguments);
 
         $shutdown->push(function () use ($process, $name): void {
             $this->terminate($process);
@@ -673,13 +800,14 @@ final class PlatformCli
      * $logPrefix.out / .err. A null $env inherits this process's environment.
      *
      * @param array<string, string>|null $env
+     * @param list<string>               $arguments after the script name
      *
      * @return resource
      */
-    private function spawn(string $script, string $logPrefix, ?array $env, string $failure): mixed
+    private function spawn(string $script, string $logPrefix, ?array $env, string $failure, array $arguments = []): mixed
     {
         $process = proc_open(
-            [PHP_BINARY, $script],
+            [PHP_BINARY, $script, ...$arguments],
             [
                 1 => ['file', $logPrefix . '.out', 'a'],
                 2 => ['file', $logPrefix . '.err', 'a'],

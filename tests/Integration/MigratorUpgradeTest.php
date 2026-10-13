@@ -6,9 +6,11 @@ namespace PhpSystemsPlatform\Tests\Integration;
 
 use PhpMiniDatabase\Client\ClientConfig;
 use PhpSystemsPlatform\Domain\OrderService;
+use PhpSystemsPlatform\Domain\ProductService;
 use PhpSystemsPlatform\Storage\Database;
 use PhpSystemsPlatform\Storage\Migrator;
 use PhpSystemsPlatform\Storage\Repositories\OrderRepository;
+use PhpSystemsPlatform\Storage\Repositories\ProductRepository;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 
@@ -100,6 +102,47 @@ final class MigratorUpgradeTest extends TestCase
         $order = $orders->createOrder('Ada Lovelace', '2.00', 'SKU-PRO');
 
         self::assertSame('SKU-PRO', $orders->getOrder($order->id)?->product);
+    }
+
+    /**
+     * A products table from before Step 41 - sku, title, price and nothing
+     * else - gains description, version and deleted in place, and the rows
+     * already in it keep what they had at version 1.
+     */
+    public function testProductsFromBeforeSearchGainTheirColumnsInPlace(): void
+    {
+        $this->database->write('CREATE TABLE products (sku VARCHAR(64) PRIMARY KEY, title VARCHAR(255) NOT NULL, price DECIMAL(10,2) NOT NULL)');
+        $this->database->write("INSERT INTO products (sku, title, price) VALUES ('SKU-OLD', 'Old product', '1.50')");
+
+        Migrator::migrate($this->database);
+        Migrator::migrate($this->database);
+
+        $old = new ProductRepository($this->database)->find('SKU-OLD');
+        self::assertNotNull($old);
+        self::assertSame(['Old product', '', '1.50', 1, false], [$old->title, $old->description, $old->price, $old->version, $old->deleted]);
+    }
+
+    /**
+     * The soft delete is what keeps a version monotonic: a sku deleted and
+     * written again continues above the version its delete was sent with,
+     * so the search service's tombstone never shadows the new product.
+     */
+    public function testAProductDeletedAndCreatedAgainKeepsCountingVersions(): void
+    {
+        Migrator::migrate($this->database);
+        $products = new ProductService(new ProductRepository($this->database));
+
+        self::assertSame(1, $products->put('SKU-X', 'Кабель', 'USB-C', '9.90')->version);
+        self::assertSame(2, $products->put('SKU-X', 'Кабель', 'USB-C, 2 m', '9.90')->version);
+        $deleted = $products->delete('SKU-X');
+        $deletedAgain = $products->delete('SKU-X');
+        self::assertSame(3, $deleted?->version);
+        self::assertSame(3, $deletedAgain?->version, 'a second delete is not a new version');
+        $again = $products->put('SKU-X', 'Кабель снова', '', 5);
+
+        self::assertSame(4, $again->version);
+        self::assertFalse($again->deleted);
+        self::assertSame('5.00', $again->price);
     }
 
     /**

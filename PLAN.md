@@ -2200,7 +2200,44 @@ The platform must work from a clean environment.
 
 ---
 
-# 46. Final Test Matrix
+# 46. Step 41 — Full-Text Search with php-mini-search
+
+Integrate the sixth component, `php-mini-search`, the way a separate service
+is integrated: started by the platform, spoken to over HTTP, never imported.
+
+Tasks:
+
+- require `researcher86/php-mini-search` through Composer and start
+  `vendor/bin/mini-search serve` as an owned child, start-or-adopt;
+- give `products` a write path: `PUT /products/{sku}`, `DELETE /products/{sku}`;
+- add `description`, `version` and `deleted` to `products` in place;
+- publish `product.index` after each write, and run it through the queue and
+  the worker pool;
+- add `GET /products/search?q=`: ranked by the search service, rows from the
+  platform's database;
+- publish `product.reindex` when the search service has never been filled,
+  and add `search:reindex`.
+
+Acceptance criteria: a product is created, found, renamed, found under its
+new name and not its old one, deleted and no longer found — through the
+platform's HTTP API, with the index updated by the queue.
+
+> Implemented: `src/Search/SearchClient.php` (curl, 1 s connect, 5 s
+> answer), `ProductService`/`ProductRepository`, `ProductIndexJob` and
+> `ProductReindexJob`, the three handlers, `upgradeProducts()` in the
+> Migrator and `search:reindex`. Writes use the same dual write as orders,
+> and the gap is healed by a full reindex (`failure-handling.md`). Delete is
+> soft, so a sku deleted and created again continues above its own
+> tombstone. The Docker image gained `intl`, which the search service needs.
+> `SEARCH_ENABLED=0` runs the platform without search, which the demo uses:
+> it counts its order jobs exactly. Tests:
+> `ProductSearchIntegrationTest` (the lifecycle above, a row shown from the
+> catalog, invalid input) and two `MigratorUpgradeTest` cases (the columns
+> added in place; versions across a delete and a re-create).
+
+---
+
+# 47. Final Test Matrix
 
 The project should have at least four test levels.
 
@@ -2259,7 +2296,7 @@ Metrics
 
 ---
 
-# 47. Final Demo Scenario
+# 48. Final Demo Scenario
 
 The final README should contain one complete walkthrough.
 
@@ -2319,7 +2356,7 @@ This becomes the final "story" of the project.
 
 ---
 
-# 48. Final Repository Structure
+# 49. Final Repository Structure
 
 Target:
 
@@ -2388,7 +2425,7 @@ php-systems-platform/
 
 ---
 
-# 49. Implementation Order
+# 50. Implementation Order
 
 Do not implement everything simultaneously.
 
@@ -2460,7 +2497,7 @@ Use this exact dependency order:
 
 ---
 
-# 50. Definition of Done
+# 51. Definition of Done
 
 Phase 5 is complete when all of the following are true.
 
@@ -2571,7 +2608,7 @@ Phase 5 is complete when all of the following are true.
 
 ---
 
-# 51. Final Result
+# 52. Final Result
 
 The completed `php-systems-platform` should make it possible to demonstrate the entire chain:
 

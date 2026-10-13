@@ -10,6 +10,7 @@
 // Not `getenv(...) ?: '1'`: '0' is falsy, so the elvis form would turn
 // CACHE_ENABLED=0 back into 1.
 $cacheEnabled = getenv('CACHE_ENABLED');
+$searchEnabled = getenv('SEARCH_ENABLED');
 $platformEnv = strtolower(trim((string) (getenv('PLATFORM_ENV') ?: 'dev')));
 $faultInjection = in_array($platformEnv, ['dev', 'development', 'demo', 'test'], true);
 
@@ -57,6 +58,33 @@ return [
             ['0', 'false', 'no', 'off'],
             true,
         ),
+    ],
+    'search' => [
+        // SEARCH_ENABLED=0 is a platform without php-mini-search: no child
+        // started, no GET /products/search, no reindex request at start.
+        // Product writes still publish product.index; those jobs fail their
+        // attempts until a search service exists. Parsed like CACHE_ENABLED.
+        'enabled' => !in_array(
+            strtolower(trim($searchEnabled === false ? '1' : $searchEnabled)),
+            ['0', 'false', 'no', 'off'],
+            true,
+        ),
+        'host' => '127.0.0.1',
+        // SEARCH_PORT is also what serve passes to the child as
+        // MINI_SEARCH_PORT; the platform and its search service always agree.
+        'port' => (int) (getenv('SEARCH_PORT') ?: 8090),
+        'data_dir' => sys_get_temp_dir() . '/php-systems-platform/search',
+        // The shared secret between the platform and php-mini-search, which
+        // refuses to start without one of at least 32 bytes. This default is
+        // for development only; set SEARCH_TOKEN anywhere else.
+        'token' => getenv('SEARCH_TOKEN') ?: 'platform-development-search-token-0',
+        // The client side of the contract in php-mini-search's docs/API.md:
+        // 1 s to connect, 5 s for an answer.
+        'connect_timeout' => 1.0,
+        'timeout' => 5.0,
+        // How long serve waits for a child it started to answer. The service
+        // replays its log before it listens, so this grows with the log.
+        'start_deadline' => 60.0,
     ],
     'queue' => [
         'data_dir' => sys_get_temp_dir() . '/php-systems-platform/queue',

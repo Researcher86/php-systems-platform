@@ -5,9 +5,12 @@ uses it. It is written once, from the installed sources under `vendor/researcher
 so every later phase wires its adapter against a known contract instead of
 re-reading the components' internals each time.
 
-All five are Composer `vcs` dependencies on `https://github.com/Researcher86`,
-pinned to `1.1.0` (the `v1.1.0` tags). The components stay the owners of their mechanics; the
-platform only ever calls the entry points listed here.
+All six are Composer `vcs` dependencies on `https://github.com/Researcher86`.
+Five are pinned to `1.1.0` (the `v1.1.0` tags), and php-mini-search to `0.9.0`
+until its `1.0.0` release. The components stay the owners of their mechanics;
+the platform only ever calls the entry points listed here. php-mini-search is
+the one reached only over a network protocol: the platform starts its binary
+and never imports its classes.
 
 ## Common defaults
 
@@ -18,10 +21,13 @@ platform only ever calls the entry points listed here.
 | php-mini-cache                | `bin/cache.php` (platform entry)      | `127.0.0.1:6380`    |
 | php-job-queue                 | none (in-process)                 | -                   |
 | php-worker-pool               | `bin/worker.php` (platform entry)     | `sys_get_temp_dir()/php-worker-pool.sock` |
+| php-mini-search               | `vendor/bin/mini-search serve`    | `127.0.0.1:8090`    |
 
 `config/platform.php` is where the platform's addresses come from - every
 process reads them from there - and each can be overridden from the
-environment: `HTTP_PORT`, `DATABASE_PORT`, `CACHE_PORT`, `WORKER_POOL_SOCKET`.
+environment: `HTTP_PORT`, `DATABASE_PORT`, `CACHE_PORT`, `SEARCH_PORT`,
+`WORKER_POOL_SOCKET`. `SEARCH_TOKEN` is the secret shared with the search
+service, and `SEARCH_ENABLED=0` runs the platform without one.
 
 ## php-mini-http-server
 
@@ -422,6 +428,45 @@ Key facts:
 - The Master applies backpressure by queueing up to `maxQueueSize` and
   answering `server_overloaded` past it — the platform's `WorkerManager` and
   `ConcurrentTaskRunner` sit on top of this SDK.
+
+## php-mini-search
+
+Not a library: a separate HTTP service that indexes products and ranks them
+with BM25. Its contract is its own `docs/API.md`; the platform speaks it with
+plain curl in `src/Search/SearchClient.php` and imports none of its classes.
+
+```text
+serve      vendor/bin/mini-search serve, env MINI_SEARCH_HOST / PORT / DATA_DIR / TOKEN / LOG_LEVEL
+writes     PUT /documents/{sku}  {source_version, title, body[, generation]}
+           DELETE /documents/{sku}?source_version=N
+search     POST /search {query, limit} -> results [{id, score, source_version}]
+reindex    POST /reindex -> {generation};  POST /reindex/{generation}/complete
+readiness  GET /health/ready -> 200, or 503 {"status": "reindex_required", "reason"}
+```
+
+How the platform uses it (PLAN Step 41):
+
+- **Lifecycle.** `serve` starts it as an owned child after the worker pool,
+  start-or-adopt like the cache, and stops it first on the way out. It
+  replays its log before it listens, so serve gives it `search.start_deadline`
+  (60 s) rather than the 10 s of the other servers.
+- **Writes.** `PUT /products/{sku}` and `DELETE /products/{sku}` write the
+  row, then publish `product.index`. The job reads the row as it is when it
+  runs and sends it at its `version`, or a delete for a soft-deleted row. The
+  version is what the search service orders writes by, so a late or repeated
+  job is ignored rather than applied.
+- **Soft delete.** `products.deleted` keeps the row and its version, so a sku
+  deleted and created again continues above its own tombstone in the index.
+- **Reads.** `GET /products/search?q=` asks the service for skus and scores,
+  then shows the rows from the platform's own table, in the service's order.
+  The index ranks; the database answers.
+- **Full reindex.** When the service reports `reindex_required` at start
+  (it has never been filled, or lost its log), serve publishes
+  `product.reindex`. `search:reindex` runs the same thing in the foreground.
+
+Recovery shape: the search index is derived, never the source of truth. A
+write the index missed is healed by the next change to that product or by a
+full reindex (see `failure-handling.md`).
 
 ## The controller example (shipped)
 

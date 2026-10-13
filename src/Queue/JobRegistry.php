@@ -11,6 +11,8 @@ use PhpSystemsPlatform\Queue\Jobs\FailingJob;
 use PhpSystemsPlatform\Queue\Jobs\NoopJob;
 use PhpSystemsPlatform\Queue\Jobs\OrderCreatedJob;
 use PhpSystemsPlatform\Queue\Jobs\OrderProcessJob;
+use PhpSystemsPlatform\Queue\Jobs\ProductIndexJob;
+use PhpSystemsPlatform\Queue\Jobs\ProductReindexJob;
 use RuntimeException;
 use Throwable;
 
@@ -36,6 +38,8 @@ final class JobRegistry
         NoopJob::TYPE => NoopJob::class,
         FailingJob::TYPE => FailingJob::class,
         DemoSlowJob::TYPE => DemoSlowJob::class,
+        ProductIndexJob::TYPE => ProductIndexJob::class,
+        ProductReindexJob::TYPE => ProductReindexJob::class,
     ];
 
     public function execute(QueueJob $carrier, JobContext $context): void

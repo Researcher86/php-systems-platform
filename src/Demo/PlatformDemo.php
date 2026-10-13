@@ -113,6 +113,12 @@ final class PlatformDemo
             // launches the pool) makes it that size from start to finish.
             putenv(sprintf('WORKER_POOL_MIN=%d', $this->orderedWorkers));
 
+            // The demo tells the order story and counts its jobs exactly. A
+            // fresh search service would ask for a full reindex at start and
+            // add a job of its own to every count, so serve runs without one;
+            // search has its own end-to-end test.
+            putenv('SEARCH_ENABLED=0');
+
             $this->startupSections();
             $this->createOrders();
             $this->reportPublishedJobs();

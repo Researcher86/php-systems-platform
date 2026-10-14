@@ -1959,12 +1959,12 @@ final class ServeIntegrationTest extends TestCase
 
         $output = (string) $output;
 
-        foreach (['HTTP Server', 'Cache', 'Database', 'Queue', 'Workers', 'Memory'] as $section) {
+        foreach (['HTTP Server', 'Cache', 'Database', 'Search', 'Queue', 'Workers', 'Memory'] as $section) {
             self::assertStringContainsString($section, $output);
         }
 
-        // HTTP + Cache + Database + Queue all answer running on this serve.
-        self::assertSame(4, preg_match_all('/^  status:\s+running$/m', $output), $output);
+        // HTTP + Cache + Database + Search + Queue all answer running on this serve.
+        self::assertSame(5, preg_match_all('/^  status:\s+running$/m', $output), $output);
 
         // The serve-side counters are readable across the process boundary:
         // requests grew with the traffic this class's tests produced, and the

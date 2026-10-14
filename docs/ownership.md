@@ -17,6 +17,8 @@ get a document of their own.
 | Cache client        | whoever started the cache      | a child handle (no daemon mode, no pid file) |
 | Worker-pool Master  | `serve` (or the command that started it) | a child process handle |
 | Worker processes    | the pool Master                | worker pids in the Master's `stats()` |
+| Search index        | the search service process     | its append-only `search.log`, locked by `flock`; derived from the products table and rebuildable from it |
+| Search service      | `serve`                        | a child handle (start-or-adopt, like the cache) |
 | Pending jobs        | the queue's contract           | the append-only journal; producer appends, consumer drains |
 | Trace journal       | appended by serve and workers  | shared JSONL; no single owner, append-only by contract |
 | One job's execution | the worker running it          | the pool's task timeout bounds it |
@@ -50,14 +52,14 @@ get a document of their own.
 
 | Stopper | What it stops |
 | ------- | ------------- |
-| `serve` SIGTERM/SIGINT | HTTP server, its db connection pool, the db daemon it owns, the cache it owns, the pool Master it started |
+| `serve` SIGTERM/SIGINT | HTTP server, its db connection pool, the db daemon it owns, the cache it owns, the pool Master it started, the search service it started |
 | `queue:consume` | the consumer's own loop; drains workers through the pool's client |
 | the pool Master | its worker processes, on its own shutdown |
 | `OwnedProcess` (commands: `load`, `experiments`, demos) | every child it started - SIGTERM, wait for exit, kill if it ignores SIGTERM; a non-zero stop says it was killed, not that it stopped politely |
 
 `serve`'s shutdown is the model, and it is `ShutdownStack`
-(`src/Support/ShutdownStack.php`): close the db pool, then stop the pool, the
-cache, the database - on every path (success, error, signal), because every
+(`src/Support/ShutdownStack.php`): stop the search service, close the db
+pool, then stop the pool, the cache, the database - on every path (success, error, signal), because every
 path runs one stack rather than a sequence of hand-written `if ($owned)`
 statements. That indirection is the point. The old inline version gated each
 stop on its own ownership flag, and the bug it had was not any one flag being

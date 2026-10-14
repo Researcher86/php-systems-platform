@@ -23,6 +23,7 @@ The platform combines:
 * queues
 * caching
 * database storage
+* full-text search over a separate service
 * retries and idempotency
 * timeouts
 * backpressure
@@ -56,32 +57,32 @@ The final system provides a practical environment for experimenting with the con
                     │ Routing           │
                     │ Services          │
                     │ Domain logic      │
-                    └────┬────┬────┬────┘
-                         │    │    │
-              ┌──────────┘    │    └────────────┐
-              ▼               ▼                 ▼
-       ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-       │    Cache    │ │  Database   │ │    Queue    │
-       │             │ │             │ │             │
-       │ php-mini-   │ │ php-mini-   │ │ php-job-    │
-       │ cache       │ │ database    │ │ queue       │
-       └─────────────┘ └─────────────┘ └──────┬──────┘
-                                              │
-                                              ▼
-                                      ┌───────────────┐
-                                      │ Worker Pool   │
-                                      │               │
-                                      │ php-worker-   │
-                                      │ pool          │
-                                      └───────┬───────┘
-                                              │
-                                  ┌───────────┼───────────┐
-                                  ▼           ▼           ▼
-                               Worker      Worker      Worker
-                                  │           │           │
-                                  └───────────┼───────────┘
-                                              ▼
-                                            Jobs
+                    └─────────┬─────────┘
+                              │
+              ┌───────────────┼───────────────┬───────────────┐
+              ▼               ▼               ▼               ▼
+       ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
+       │    Cache    │ │  Database   │ │   Search    │ │    Queue    │
+       │             │ │             │ │             │ │             │
+       │ php-mini-   │ │ php-mini-   │ │ php-mini-   │ │ php-job-    │
+       │ cache       │ │ database    │ │ search      │ │ queue       │
+       └─────────────┘ └─────────────┘ └──────▲──────┘ └──────┬──────┘
+                                              │ product.index │
+                                              │               ▼
+                                              │       ┌───────────────┐
+                                              │       │ Worker Pool   │
+                                              │       │               │
+                                              │       │ php-worker-   │
+                                              │       │ pool          │
+                                              │       └───────┬───────┘
+                                              │               │
+                                              │     ┌─────────┼─────────┐
+                                              │     ▼         ▼         ▼
+                                              │  Worker    Worker    Worker
+                                              │     │         │         │
+                                              │     └─────────┼─────────┘
+                                              │               ▼
+                                              └──────────── Jobs
 
              ┌─────────────────────────────────────────┐
              │ Concurrency / Memory / IPC / Metrics    │
@@ -93,7 +94,7 @@ One high-level picture of the same shape, with the process ownership that
 makes it work (see `docs/architecture.md`):
 
 ```text
-serve           HTTP server + routes, owns database/cache servers + pool Master
+serve           HTTP server + routes, owns database/cache/search servers + pool Master
 queue:consume   owns the queue consumer, adopts the pool Master, drains the journal
 bin/worker.php  the pool Master: forks, supervises and replaces worker processes
 ```

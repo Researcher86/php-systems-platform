@@ -10,6 +10,7 @@ minidb.php (daemonized, reparented to init)
      │
 serve
  ├── cache.php           serve owns the cache server (a child; no daemon mode)
+ ├── mini-search serve   serve owns the search service (a child, spoken to over HTTP)
  ├── worker.php          serve owns the pool Master
  │   ├── worker #1       the Master forks the floor (min 2)
  │   └── worker #2
@@ -31,7 +32,7 @@ there is exactly one `worker.php` Master even though both processes use it.
 The tree is inspectable with standard OS tools. In the container:
 
 ```bash
-ps -eo pid,ppid,cmd --forest | grep -E "platform.php|worker.php|minidb|cache.php" | grep -v grep
+ps -eo pid,ppid,cmd --forest | grep -E "platform.php|worker.php|minidb|cache.php|mini-search" | grep -v grep
 ```
 
 or with `pstree`:
@@ -45,7 +46,7 @@ What each line proves:
 | Line          | What it proves                                       |
 | ------------- | ---------------------------------------------------- |
 | `minidb.php` with ppid 1 | the database server daemonized (reparented to init) |
-| `cache.php` and `worker.php` under `serve` | serve owns the cache and the pool Master |
+| `cache.php`, `mini-search` and `worker.php` under `serve` | serve owns the cache, the search service and the pool Master |
 | `worker #1`, `worker #2` under `worker.php` | the Master forked its floor (min workers) |
 | `queue:consume` running forwarders, no second `worker.php` | the consumer adopted the pool rather than starting one |
 

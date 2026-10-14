@@ -6,12 +6,13 @@ and use it, see `README.md`; for component contracts, `components.md`.
 
 ## The split that shapes everything
 
-The platform is four long-running processes, not one:
+The platform is six long-running processes, not one:
 
 ```text
 serve            owns the HTTP server, the routes, the database server
                  (daemonized, pid-file owned), the cache server (child),
-                 and the worker-pool Master (child)
+                 the worker-pool Master (child) and the search service
+                 (child)
 
 queue:consume    owns the queue consumer; adopts the running pool Master
                  through WorkerManager and drains the journal
@@ -22,6 +23,8 @@ bin/worker.php   the worker-pool Master: forks worker processes, keeps
 
 bin/minidb.php   the database server, daemonized and tracked by pid file
 bin/cache.php    the cache server, a child of whoever started it
+mini-search      vendor/bin/mini-search serve: the search service, a child of
+                 serve, spoken to only over HTTP
 ```
 
 `serve` starts the pool because HTTP needs it (the `/parallel` route and the
@@ -42,6 +45,7 @@ Everything owns what it started, and stops it on every path:
 | Cache server      | whoever started it | no pid file - a child handle, adopted if already running |
 | Worker-pool Master| `serve` (or a command) | `bin/worker.php` child process |
 | Worker processes  | the Master   | worker pids in `stats()`    |
+| Search service    | `serve`      | a child handle, adopted if already answering; its log is locked by `flock` |
 
 The cache has no daemon mode, so it is a child of whoever started it. `serve`
 only stops a cache it owns: an already-running cache is adopted, and the
@@ -58,7 +62,9 @@ uses it:
 1. One shared `MetricsRegistry` and one `Trace`, handed to the database and
    cache at construction, so both report into the same observability.
 2. Database server ensured + migrated, cache server ensured (or skipped when
-   `CACHE_ENABLED=0`), pool Master ensured.
+   `CACHE_ENABLED=0`), pool Master ensured, search service ensured (or
+   skipped when `SEARCH_ENABLED=0`) and, if it has never been filled,
+   `product.reindex` published.
 3. Routes registered in `application()`: each later feature is a route added
    to the same router - health, order endpoints, cache-first reads, the
    producer seam, the backpressure policy in front of `POST /orders`, the

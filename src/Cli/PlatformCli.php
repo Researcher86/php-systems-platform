@@ -1979,12 +1979,38 @@ final class PlatformCli
      * None failing is an error - a stopped platform is what this command is
      * for. Serve-only counters print as 0 (RSS as n/a) when no serve answers.
      */
+    /**
+     * The search service as `status` shows it, or null when it is disabled or
+     * does not answer. `index` says whether it can search yet.
+     *
+     * @param array<string, mixed> $config the `search` config block
+     *
+     * @return array{index: string, documents: int, tombstones: int}|null
+     */
+    private function searchStatus(array $config): ?array
+    {
+        if (!(bool) ($config['enabled'] ?? true)) {
+            return null;
+        }
+
+        $client = SearchClient::fromConfig($config);
+
+        try {
+            $reason = $client->notReadyReason();
+
+            return ['index' => $reason === null ? 'ready' : "reindex required ({$reason})"] + $client->stats();
+        } catch (SearchUnavailable) {
+            return null;
+        }
+    }
+
     private function statusCommand(): int
     {
         $config = $this->config();
         $http = $config['http'];
         $databaseConfig = $config['database'];
         $cacheConfig = $config['cache'];
+        $search = $this->searchStatus($config['search']);
 
         try {
             $serve = new HttpProbe(sprintf('http://%s:%d', $http['host'], $http['port']), 2.0)->metrics();
@@ -2019,6 +2045,13 @@ final class PlatformCli
         $this->printStatusSection('Database', [
             'status' => $running($databaseRunning),
             'operations' => $count($serve['db.operations'] ?? null),
+        ]);
+
+        $this->printStatusSection('Search', [
+            'status' => $running($search !== null),
+            'index' => $search['index'] ?? '-',
+            'documents' => $count($search['documents'] ?? null),
+            'tombstones' => $count($search['tombstones'] ?? null),
         ]);
 
         $this->printStatusSection('Queue', [

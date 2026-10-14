@@ -140,6 +140,8 @@ Application
      │
      ├──────────────► Database
      │
+     ├──────────────► Search (over HTTP)
+     │
      └──────────────► Job Queue
                             │
                             ▼
@@ -396,6 +398,12 @@ Cache
 Database
   status:       running
   operations:   9,532
+
+Search
+  status:       running
+  index:        ready
+  documents:    3
+  tombstones:   0
 
 Queue
   status:       running
@@ -1761,6 +1769,8 @@ Application
  ├── Cache
  │
  ├── Database
+ │
+ ├── Search
  │
  └── Queue
        │

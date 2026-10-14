@@ -28,7 +28,7 @@ final class StatusCommandTest extends TestCase
     {
         $output = $this->runStatus();
 
-        foreach (['HTTP Server', 'Cache', 'Database', 'Queue', 'Workers', 'Memory'] as $section) {
+        foreach (['HTTP Server', 'Cache', 'Database', 'Search', 'Queue', 'Workers', 'Memory'] as $section) {
             self::assertStringContainsString($section, $output);
         }
 
@@ -41,6 +41,10 @@ final class StatusCommandTest extends TestCase
         // And a counter that only lives inside a serve prints as a number
         // either way; without a serve it is 0, not an error.
         self::assertMatchesRegularExpression('/^  requests:\s+\d/m', $output);
+
+        // The search service's index state sits beside its status, so the
+        // status line keeps its two values.
+        self::assertMatchesRegularExpression('/^  index:\s+(ready|reindex required \(\w+\)|-)$/m', $output);
     }
 
     public function testQueueCountersComeFromTheJournal(): void

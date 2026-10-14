@@ -106,6 +106,18 @@ final readonly class SearchClient
         throw new SearchUnavailable(sprintf('Search readiness answered %d.', $status));
     }
 
+    /**
+     * The headline numbers of the index, for `status`.
+     *
+     * @return array{documents: int, tombstones: int}
+     */
+    public function stats(): array
+    {
+        $stats = $this->expectOk('GET', '/stats');
+
+        return ['documents' => (int) ($stats['documents'] ?? 0), 'tombstones' => (int) ($stats['tombstones'] ?? 0)];
+    }
+
     public function beginReindex(): int
     {
         return (int) $this->expectOk('POST', '/reindex')['generation'];

@@ -54,7 +54,7 @@
         "researcher86/php-mini-cache": "1.1.0",
         "researcher86/php-mini-database": "1.1.0",
         "researcher86/php-mini-http-server": "1.1.0",
-        "researcher86/php-mini-search": "0.9.0",
+        "researcher86/php-mini-search": "1.0.0",
         "researcher86/php-worker-pool": "1.1.0"
     },
     "require-dev": {

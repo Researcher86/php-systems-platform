@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "a203c52c902af8ba19384523d9fc23e7",
+    "content-hash": "21d2b379ee8ef1537d6558e094dc6a7c",
     "packages": [
         {
             "name": "brick/math",
@@ -468,16 +468,16 @@
         },
         {
             "name": "researcher86/php-mini-search",
-            "version": "v0.9.0",
+            "version": "v1.0.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/Researcher86/php-mini-search.git",
-                "reference": "9d8dcb2411d29aa3c964e24e6e90fa92da218340"
+                "reference": "7ecddc0278acc5e4ac22098c7d9aa5ebebe86ef3"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Researcher86/php-mini-search/zipball/9d8dcb2411d29aa3c964e24e6e90fa92da218340",
-                "reference": "9d8dcb2411d29aa3c964e24e6e90fa92da218340",
+                "url": "https://api.github.com/repos/Researcher86/php-mini-search/zipball/7ecddc0278acc5e4ac22098c7d9aa5ebebe86ef3",
+                "reference": "7ecddc0278acc5e4ac22098c7d9aa5ebebe86ef3",
                 "shasum": ""
             },
             "require": {
@@ -524,10 +524,10 @@
                 "MIT"
             ],
             "support": {
-                "source": "https://github.com/Researcher86/php-mini-search/tree/v0.9.0",
+                "source": "https://github.com/Researcher86/php-mini-search/tree/v1.0.0",
                 "issues": "https://github.com/Researcher86/php-mini-search/issues"
             },
-            "time": "2026-10-13T12:11:16+00:00"
+            "time": "2026-10-14T05:39:19+00:00"
         },
         {
             "name": "researcher86/php-worker-pool",

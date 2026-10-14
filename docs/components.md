@@ -6,8 +6,7 @@ so every later phase wires its adapter against a known contract instead of
 re-reading the components' internals each time.
 
 All six are Composer `vcs` dependencies on `https://github.com/Researcher86`.
-Five are pinned to `1.1.0` (the `v1.1.0` tags), and php-mini-search to `0.9.0`
-until its `1.0.0` release. The components stay the owners of their mechanics;
+Five are pinned to `1.1.0` (the `v1.1.0` tags), and php-mini-search to `1.0.0`. The components stay the owners of their mechanics;
 the platform only ever calls the entry points listed here. php-mini-search is
 the one reached only over a network protocol: the platform starts its binary
 and never imports its classes.

@@ -1,6 +1,6 @@
 # PHP Systems Platform
 
-**[🧪 PHP Systems Lab](https://github.com/Researcher86/php-systems-lab)** · Level 8 of 8 · ← [`php-mini-database`](https://github.com/Researcher86/php-mini-database)
+**[🧪 PHP Systems Lab](https://github.com/Researcher86/php-systems-lab)** · Level 9 of 9 · ← [`php-mini-search`](https://github.com/Researcher86/php-mini-search)
 
 > The final integration project of PHP Systems Lab.
 
@@ -102,7 +102,7 @@ bin/worker.php  the pool Master: forks, supervises and replaces worker processes
 
 ## Systems Lab Components
 
-The platform integrates the components developed in the previous levels. Five
+The platform integrates the components developed in the previous levels. Six
 of them are Composer dependencies; the first two are concepts the platform
 reimplements where it needs them.
 
@@ -115,6 +115,7 @@ reimplements where it needs them.
 | 5 | [`php-mini-cache`](https://github.com/Researcher86/php-mini-cache) | in-memory caching | Composer — `src/Cache/` |
 | 6 | [`php-mini-http-server`](https://github.com/Researcher86/php-mini-http-server) | HTTP networking and request handling | Composer — `src/Http/`, `src/Application/` |
 | 7 | [`php-mini-database`](https://github.com/Researcher86/php-mini-database) | database and storage | Composer — `src/Storage/` |
+| 8 | [`php-mini-search`](https://github.com/Researcher86/php-mini-search) | full-text search over the catalog | Composer, run as a service and spoken to over HTTP — `src/Search/` |
 
 Performance experiments live in this repository: `src/Benchmarks/` and
 [`docs/benchmarks.md`](docs/benchmarks.md).
@@ -507,6 +508,16 @@ and `db.*` spans plus every worker's `job.execute` span for that
 `request_id`, all read back from the shared JSONL trace journal
 (`jobs.trace_store`). This is the read side of `#Request and Job Tracing`.
 
+```bash
+php bin/platform.php search:reindex
+```
+
+Send every live product to php-mini-search as one full reindex, in the
+foreground: open a generation, send each product with it, complete it. The
+search service then drops whatever the catalog no longer has. serve does the
+same thing through the queue when the search service reports it was never
+filled.
+
 ---
 
 # Example API
@@ -582,6 +593,37 @@ Cache
         ▼
      Response
 ```
+
+---
+
+## Search products
+
+```http
+PUT /products/SKU-CABLE
+{"title": "Кабель USB-C", "description": "Быстрая зарядка, 2 метра", "price": "9.90"}
+
+GET /products/search?q=кабели
+```
+
+Products are the catalog's write path, and php-mini-search makes them
+findable. The write lands in the database first, then a `product.index` job
+carries it to the search service. The search ranks, and the rows shown come
+from the database:
+
+```text
+PUT/DELETE /products/{sku}          GET /products/search?q=
+  │                                   │
+  ├─► Database (version += 1)         ├─► php-mini-search: skus + scores
+  │                                   │
+  └─► product.index ─► worker ─► php-mini-search
+                                      └─► Database: those rows, in that order
+```
+
+`кабели` finds `Кабель` because both stem to `кабел`. A delete is soft, so a
+sku deleted and created again keeps counting versions, and the index never
+mistakes the new product for a stale write. On a fresh data directory serve
+publishes `product.reindex` by itself. See
+[`docs/components.md`](docs/components.md#php-mini-search).
 
 ---
 
@@ -1777,17 +1819,18 @@ infrastructure in order to understand them. The recommended order:
 | 5 | 💾 [`php-mini-cache`](https://github.com/Researcher86/php-mini-cache) | event-driven in-memory server: RESP, pipelining, TTL, Pub/Sub |
 | 6 | 🌐 [`php-mini-http-server`](https://github.com/Researcher86/php-mini-http-server) | event-driven HTTP server: parsing, routing, middleware, keep-alive |
 | 7 | 🗄️ [`php-mini-database`](https://github.com/Researcher86/php-mini-database) | relational engine: pages, B-trees, SQL, transactions, WAL, recovery |
-| **8** | 🏗️ **`php-systems-platform`** (this project) | **integration of the components into one backend platform** |
+| 8 | 🔎 [`php-mini-search`](https://github.com/Researcher86/php-mini-search) | full-text search: analysis, stemming, inverted index, BM25, reindexing |
+| **9** | 🏗️ **`php-systems-platform`** (this project) | **integration of the components into one backend platform** |
 
 These are teaching projects, not libraries: a mechanism travels between them
-by being read in one and reimplemented in the next. Levels 1–7 do not depend
+by being read in one and reimplemented in the next. Levels 1–8 do not depend
 on each other as packages. Only [`php-systems-platform`](https://github.com/Researcher86/php-systems-platform) requires the
-five components (worker pool, job queue, cache, HTTP server, database)
+six components (worker pool, job queue, cache, HTTP server, database, search)
 through Composer and runs them together as one system.
 
 ## How this project relates
 
-This project is the last level: it depends on the five components as
+This project is the last level: it depends on the six components as
 Composer packages and uses the first two levels as concepts — see
 [Systems Lab Components](#systems-lab-components) for what comes from where.
 
@@ -1795,20 +1838,21 @@ Composer packages and uses the first two levels as concepts — see
 
 ## Status
 
-**Level 8 of 8 — Final Platform**
+**Level 9 of 9 — Final Platform**
 
-All forty steps of [`PLAN.md`](PLAN.md) are implemented: the five components
-run together as one platform (`serve`, `queue:consume`, the worker pool, the
-database and the cache as separate processes), and every interaction between
+All forty-one steps of [`PLAN.md`](PLAN.md) are implemented: the six
+components run together as one platform (`serve`, `queue:consume`, the worker
+pool, the database, the cache and the search service as separate processes), and every interaction between
 them can be observed (`status`, `/metrics`, `trace`), measured (`benchmark`,
 `load`, `workers:memory`), tested (unit, integration-by-boundary and
 end-to-end suites on CI) and intentionally broken (`experiments`,
 `/debug/fail-worker`, the failure demos).
 
-The components are pinned to their `1.1.0` releases. The goal was never
-production readiness: the known limits the platform deliberately leaves in
-place - no outbox between the order write and the job publish, no
-transactions around a job's side effects - are written down in
+Five components are pinned to their `1.1.0` releases and php-mini-search to
+`1.0.0`. The goal was never production readiness: the known limits the
+platform deliberately leaves in place - no outbox between an order or product
+write and its job, no transactions around a job's side effects - are written
+down in
 [`docs/failure-handling.md`](docs/failure-handling.md) rather than hidden.
 
 ---

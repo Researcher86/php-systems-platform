@@ -50,7 +50,7 @@ discarded the exception, so a handler bug in production produced a bare `500`
 in the access log and no other trace of itself anywhere - no message, no
 stack, not even which handler was involved. `Application` now takes an
 optional `Logger` and reports the throwable's message, class, file, line and
-trace, with the method, path and handler named. `serve` wires it to stderr;
+trace, with the method and path named. `serve` wires it to stderr;
 tests can pass a recording logger. The two halves are kept apart on purpose -
 the client gets the verdict, the operator gets the cause.
 

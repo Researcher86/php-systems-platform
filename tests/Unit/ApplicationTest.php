@@ -79,7 +79,8 @@ final class ApplicationTest extends TestCase
 
         self::assertSame(500, $response->statusCode());
         self::assertSame("Internal Server Error\n", $response->body);
-        self::assertStringStartsWith('unhandled GET: /boom: RuntimeException at ', $logger->lines[0] ?? '');
+        // The message reaches the operator, never the client: the body above is generic.
+        self::assertStringStartsWith('unhandled GET: /boom: RuntimeException: boom at ', $logger->lines[0] ?? '');
     }
 
     public function testQueryAndBodyMakeItThrough(): void

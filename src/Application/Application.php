@@ -117,10 +117,11 @@ final readonly class Application implements RequestHandler
         $logger = $this->logger ?? new StderrLogger();
 
         $logger->log(sprintf(
-            'unhandled %s: %s: %s at %s:%d',
+            'unhandled %s: %s: %s: %s at %s:%d',
             $request->method->value,
             $request->path(),
             $e::class,
+            $e->getMessage(),
             $e->getFile(),
             $e->getLine(),
         ));

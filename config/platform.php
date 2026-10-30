@@ -91,7 +91,8 @@ return [
         // The backpressure limit; overridable so an overload can be
         // reproduced by running `serve` with a small one.
         'max_size' => (int) (getenv('QUEUE_MAX_SIZE') ?: 500),
-        'timeout' => 2.0,
+        // No operation timeout here: queue:consume derives the visibility
+        // timeout from workers.task_timeout (README, "Queue operation timeout").
         // Stamped onto each job by the Producer when it is published (the
         // HTTP write path, the demos, the tests), not read by the dispatcher:
         // the job carries its own budget, so changing this value only

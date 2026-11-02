@@ -75,8 +75,9 @@ final class JobRegistry
 
     /**
      * The retry-eligibility hook JobDispatcher consults after a failed
-     * attempt, before its attempts-remaining check: a payload validate()
-     * rules out can never succeed, however many attempts are left.
+     * attempt, once its attempts-remaining check has passed (on the last
+     * attempt it is not consulted at all): a payload validate() rules out
+     * can never succeed, however many attempts are left.
      *
      * @return Closure(QueueJob, Throwable): bool
      */

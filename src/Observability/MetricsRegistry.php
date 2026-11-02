@@ -144,7 +144,7 @@ final class MetricsRegistry
     }
 
     /**
-     * Rounded so a sum of binary floats like 0.1 + 0.3 does not leak
+     * Rounded so a sum of binary floats like 0.1 + 0.2 does not leak
      * 0.30000000000000004 into a dump.
      */
     private function average(string $name): float
